@@ -1,0 +1,40 @@
+version: '3.5'
+services:
+  smma-agent:
+    image: smma-agent:${CI_COMMIT_SHA}
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      DEEPSEEK_KEY: ${DEEPSEEK_KEY}
+      HOSTINGER_SMTP_HOST: ${HOSTINGER_SMTP_HOST}
+    ports:
+      - '8080:8080'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 2
+        delay: 10s
+
+  supabase:
+    image: supabase/postgres:14-alpine
+    environment:
+      POSTGRES_USER: supabase
+      POSTGRES_PASSWORD: ${SUPABASE_PASSWORD}
+      POSTGRES_DB: smma_db
+    volumes:
+      - supabase-data:/var/lib/postgresql/data:rw
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "supabase"]
+      interval: 5s
+      timeout: 15s
+      retries: 20
+
+volumes:
+  supabase-data:

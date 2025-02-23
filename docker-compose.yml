@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  ai_orchestrator:
+    build: .
+    environment:
+      - DOMAIN_NAME=youragency.com
+      - GRAFANA_URL=grafana.youragency.com
+    deploy:
+      replicas: 10
+    depends_on:
+      - postgres
+      - grafana
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  grafana:
+    image: grafana/grafana-enterprise
+    environment:
+      GF_INSTALL_PLUGINS: grafana-postgresql-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
+  grafana_data:

@@ -1,0 +1,653 @@
+Transcript
+
+
+0:00
+this oneperson business can make $40,000
+0:02
+a month and it takes nothing to get
+0:04
+started all you need is a laptop and you
+0:06
+can get going with this and the reason
+0:07
+this business is such a big opportunity
+0:09
+is because a new technology has come
+0:11
+onto the market that allows for it to
+0:13
+exist at a price point that was
+0:15
+traditionally impossible you used to
+0:16
+have to pay $100 for this but now it
+0:18
+costs less than a dollar it's basically
+0:20
+pennies and why this is such a good
+0:22
+business is because there's people that
+0:23
+want this they're searching for this and
+0:25
+they're already used to buying it it's
+0:26
+also a larger ticket item you can charge
+0:28
+probably 3 to 5 grand of month for it
+0:30
+and so to hit that 40K price point you
+0:32
+just need eight clients it's not that
+0:34
+hard and everything you need to know to
+0:35
+start this business you can learn from
+0:37
+YouTube videos it's totally approachable
+0:39
+to anybody hi I'm Cody Schneider I have
+0:41
+15 plus years of digital marketing
+0:42
+experience and the business you're going
+0:44
+to be building today is an AI Avatar ugc
+0:48
+ads agency so we're going to break down
+0:50
+what all of that means but first let's
+0:52
+begin with the data why is this such a
+0:53
+big opportunity all right so here is the
+0:55
+search volume for this this is AI ugc
+0:58
+and what people are looking for is B
+1:00
+basically a way to build these ugc ads
+1:04
+but using AI avatars and AI avatars have
+1:07
+gotten to the point now where they're
+1:08
+good enough like it's so close that
+1:11
+unless you're really looking for it it's
+1:13
+very hard to see and to I'm going to
+1:14
+talk through all the details of this how
+1:16
+to actually make these how to actually
+1:18
+Market this how to distribute this but I
+1:19
+want to start with this data so you
+1:21
+understand the opportunity here and
+1:23
+historically just to give some context
+1:25
+if I wanted to go and I wanted to make a
+1:27
+ugc ad what I would go and do is use
+1:30
+something like Billow uh which is a
+1:32
+Marketplace that I can buy ugc ads from
+1:35
+creators or I'd go and hire a Creator
+1:37
+and historically the price that I would
+1:40
+pay would be like $ 80 to $100 for five
+1:43
+videos right so what these AI avatars
+1:46
+have made or created the opportunity for
+1:48
+is to make these ugc ads which are great
+1:51
+performers all ad companies are running
+1:54
+them all e-commerce companies all SAS
+1:56
+companies are running these at some
+1:57
+point in some way uh at this moment in
+2:00
+time instead of having to pay $100 per
+2:03
+video that you're generating you can now
+2:05
+get make these for under a dollar right
+2:06
+so let's just throw some numbers out
+2:08
+there if I wanted to create a hundred
+2:10
+different ad variations and how you do
+2:13
+Facebook ads really effectively is you
+2:14
+do this you create a bunch of AD
+2:16
+variations you test them against each
+2:18
+other you look at the best performers
+2:20
+and then you allocate all the budget to
+2:21
+the best performers you find the common
+2:23
+Trends with the best performers and then
+2:25
+that creates a growth Loop where you
+2:26
+then go make more content like the best
+2:28
+performers but say I wanted to go and
+2:31
+create a hundred different ads uh using
+2:34
+this traditional uh strategy or this
+2:36
+traditional tactic that would cost me
+2:38
+$100 a piece so I'd spend 10 grand to
+2:41
+make those and there's cheaper ways to
+2:43
+do this but I'm just going to use that
+2:44
+as the number to kind of anchor this
+2:46
+idea in contrast now I can go and make a
+2:49
+100 ads for $89 a piece or sorry $89 in
+2:53
+total so the cost per ad is going to be
+2:57
+a112 and this is just using hey Jen it's
+3:00
+just using this off-the-shelf technology
+3:02
+you don't have to do anything in
+3:04
+particular so all right now let's dive
+3:07
+into the actual process to how to uh do
+3:10
+this how we're seeing this work
+3:11
+effectively for companies so the
+3:14
+strategy here of actually how to build
+3:15
+the product there's tons of YouTube
+3:17
+videos on this I'm just going to show
+3:18
+you what we're seeing work so that you
+3:20
+can implement it for yourself as well so
+3:22
+you go and you use 11 Labs as the way
+3:24
+that you're actually generating the
+3:26
+voices this is the first thing that
+3:28
+you're going to do in the process
+3:29
+process is basically create the MP3 and
+3:32
+then take that and you're going to go
+3:34
+import that into hent I'm going to show
+3:35
+you that whole thing in the whole tool
+3:37
+set but before we do that the thing that
+3:39
+you need to do is identify the pain
+3:41
+points of the person that you're trying
+3:43
+to sell to so say for example I am
+3:46
+trying to uh sell ugc ads or AI ugc ads
+3:51
+to somebody what I would do is I would
+3:53
+say I would go to perplexity and be like
+3:55
+what are the pain points
+3:58
+of using
+4:00
+traditional
+4:01
+traditional ugc we'll say AI Avatar ugc
+4:06
+I literally ask at a question like that
+4:08
+and then I could refine that prompt down
+4:11
+but what it's going to do is it's going
+4:12
+to give me pain points which will then
+4:14
+allow me to generate Hooks and scripts
+4:17
+based off of those pain points the
+4:19
+structure that we're seeing be
+4:20
+incredibly effective right now for these
+4:23
+scripts that we're writing is we
+4:25
+basically do a hook that like calls out
+4:27
+to the person we're marketing to or
+4:29
+calls out out to that pain point we do
+4:31
+some type of Storytelling like digging
+4:33
+into that pain point and then the last
+4:35
+thing that we'll do is then introduce
+4:38
+the product as the hero that basically
+4:41
+is the solution to that pain point that
+4:43
+they're suffering and then strong CTA at
+4:45
+the end to actually Drive traffic off
+4:48
+the platform and to the uh you know
+4:51
+landing page that you're trying to get
+4:53
+the user to do whatever that is whatever
+4:54
+that whether it's a sign up or a
+4:56
+purchase Etc so let's go back to the
+4:59
+perplexity and let's see uh what it came
+5:02
+up with so content Generation Challenges
+5:05
+uh working with them like a lot of the
+5:07
+times what you're going to see is that
+5:09
+uh they're just like the timelines don't
+5:11
+end up actually hitting you're you're
+5:13
+still dealing with people um Quality uh
+5:15
+in control and also the legal components
+5:18
+you could talk about the pain points of
+5:20
+uh like basically what traditional ugc
+5:23
+versus AI Avatar ugc and then I would
+5:25
+use that for those scripts let's take
+5:27
+one of these so say in the past let's do
+5:29
+like a cost structure um I would be like
+5:31
+if you're an e-commerce founder listen
+5:33
+to this and then I would go into
+5:35
+storytelling uh working uh with you know
+5:38
+human ugc creators can be a massive
+5:42
+operations headache right something like
+5:45
+that tell a story and then introduce the
+5:47
+product as the solution for this it
+5:49
+would be our agency ghost right ads and
+5:51
+then strong call to action to click to
+5:53
+learn more so this is how you basically
+5:55
+would script you would take that script
+5:58
+you go over into 11 Labs again and
+6:00
+you're going to use one of their most
+6:02
+common voices I I try to find ones that
+6:04
+feel as natural as possible from
+6:06
+speaking and as informal as casual as
+6:08
+possible reason for this is because
+6:10
+you're trying to create an ad that
+6:12
+doesn't feel like an ad we're trying to
+6:14
+get it on that Spectrum as far as we can
+6:16
+to where it is an ad but it doesn't feel
+6:18
+like an ad right it's like teetering on
+6:20
+that line the reason for that is that
+6:21
+you're going to see cheaper cpcs when
+6:23
+you do that so You' go to 11 Labs you
+6:25
+generate that voice and then you would
+6:28
+pull that out it's going to give you an
+6:30
+MP3 and you would go over to haen and
+6:32
+then within haen what you're going to do
+6:34
+is upload that MP3 and you're going to
+6:39
+then go and generate that ad creative
+6:42
+and that ad creative is basically going
+6:44
+to be uh one of these AI avatars
+6:47
+basically mimicking or you know lip
+6:50
+syncing to that that MP3 that you
+6:52
+uploaded you do you export all of those
+6:54
+variations and then you take those and
+6:56
+you drop them into something like
+6:57
+descript where you go and you actually
+6:59
+edit those variations um what we're
+7:01
+seeing be the most effective currently
+7:03
+is you go after uh basically just like
+7:06
+super simple edits where it is like a
+7:10
+person looks like as human as possible
+7:13
+and then just adding captions we are
+7:14
+seeing those ads perform the best
+7:16
+currently all right so you now know how
+7:18
+to make these ads go and sell you know
+7:21
+basically do free work for people be
+7:23
+like hey can I make these ads run them
+7:25
+can I have the data and then you go and
+7:27
+you start talking about that in public
+7:29
+if you just talk about this on Twitter
+7:31
+you talk about this on YouTube You're
+7:33
+Going to get inbound from this it's
+7:35
+going to naturally happen because
+7:37
+there's a huge appetite for this right
+7:38
+now people are trying to hire these
+7:40
+types of agencies to run this so let's
+7:42
+go deeper now into another strategy that
+7:44
+you could do as well the other angle
+7:46
+that you could come at this from is you
+7:47
+could go and make YouTube videos that
+7:49
+are focused on Facebook ads
+7:52
+forx okay and I'm going to show you all
+7:55
+of these keywords right now you're going
+7:56
+to be able to see these you can do
+7:58
+videos about every one of these how to
+8:00
+do Facebook ads for X category right
+8:02
+we're going to break this down so best
+8:04
+Facebook ads for photographers Facebook
+8:06
+ads for chaor for churches for repair
+8:09
+shops for gyms for financial advisors go
+8:13
+down the list you could create a YouTube
+8:16
+video just like this one that I'm
+8:17
+recording right now and you basically
+8:19
+show the process of how you're making
+8:21
+these ads and then you're going in
+8:23
+managing these campaigns the targeting
+8:25
+that they would do Etc show your
+8:27
+expertise and people are going to watch
+8:29
+this and they're going to be like hey I
+8:30
+don't want to go and do this is going to
+8:31
+take a lot of time I have to learn all
+8:32
+this new stuff can I just hire this
+8:34
+person have a call to action in the
+8:35
+video to go and learn more at the link
+8:38
+and you're going to naturally get
+8:39
+inbound this happens this works I
+8:41
+promise you it does half of my career is
+8:43
+built on this exact strategy all right
+8:45
+so you got your first customers now
+8:47
+let's talk about the last part of bit
+8:49
+how do you manage them how do you
+8:50
+actually create an experience for them
+8:53
+so what you're going to do is you're
+8:54
+going to set up a data reporting
+8:55
+dashboard based off of the Northstar
+8:58
+outcomes that they're looking for and
+8:59
+and again there's tons of more detail
+9:01
+that you can go into around this or
+9:03
+related to this on how to structure
+9:05
+Facebook campaigns all of that Etc but
+9:07
+the biggest thing to remember is most
+9:09
+people have a very simple action that
+9:10
+they're trying to create they're trying
+9:11
+to either create new revenue or they're
+9:13
+trying to create signups and I'm
+9:14
+simplifying this but that at its core is
+9:17
+that what we're trying to do when we pay
+9:19
+these ad platforms so the stack that we
+9:21
+use that we see success so the stack
+9:23
+that we use that we see success with is
+9:25
+Google tag manager that's basically how
+9:27
+we're deploying all the pixels for our
+9:28
+reporting and then we can create
+9:30
+conversion events uh for uh the uh
+9:33
+websites that we're driving this traffic
+9:35
+to and then we can create conversion
+9:37
+events for the websites that we're
+9:38
+driving this traffic to and then for
+9:40
+reporting that we share with the client
+9:42
+we use looker Studio which is another
+9:44
+free tool from Google and it allows for
+9:46
+you to build out these dashboards so
+9:47
+that you can share those with your
+9:49
+client to do reporting and the things
+9:50
+you're going to want to include in there
+9:51
+is basically the revenue that's coming
+9:53
+from these campaigns the
+9:54
+month-over-month efficiencies that are
+9:56
+occurring from the optimizations that
+9:58
+you're making and then you're to tell
+9:59
+stories around that data that show the
+10:01
+value that you're providing and if all
+10:03
+of this sounds like a lot of work which
+10:04
+it could be at this point I just want to
+10:06
+remind you that majority of this can be
+10:08
+learned over YouTube in a weekend and
+10:10
+the other piece of this is that if you
+10:12
+don't want to go and learn this but
+10:14
+you're good at sales and you understand
+10:16
+how to get people into your sales
+10:18
+pipeline you can just go hire offshore
+10:20
+Talent with a company like Talent fiber
+10:23
+you can hire a Facebook ad specialist
+10:24
+they could run those whole campaign and
+10:26
+you can get these people like two grand
+10:28
+a month right one client covers their
+10:30
+cost and this is how you could scale
+10:31
+this up you can build this up into an
+10:33
+agency that could even make more than 40
+10:35
+Grand a month you're basically having
+10:36
+people do the work for you from an
+10:38
+operations perspective and focus on the
+10:40
+big picture components and that's how
+10:42
+you can start a business that can make
+10:44
+$40,000 a month if you want growth
+10:46
+tactics and startup ideas like this
+10:48
+subscribe to my newsletter below if you
+10:50
+want to learn business strategy go
+10:51
+follow me on LinkedIn with the link
+10:53
+below if you want more content like this
+10:55
+on YouTube go subscribe to this channel
+10:57
+in the link below and finally if you
+10:59
+want to watch me ship post everything
+11:01
+about building companies go follow me on
+11:03
+Twitter I'm constantly talking about the
+11:05
+opportunities that I'm seeing and the
+11:07
+Arbitrage that exists currently within
+11:09
+the market from the growth marketing
+11:11
+perspective
