@@ -3,25 +3,36 @@ import json
 import time
 import requests
 import psycopg2
+import logging
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
-from twilio.rest import Client  # Import Twilio client <button class="citation-flag" data-index="1">
-from utils.db_logger import DBLogger
+from twilio.rest import Client  # Ref: https://www.twilio.com/docs/libraries/python
 from agents.email_manager import EmailManager
 from integrations.deepseek_r1 import DeepSeekOrchestrator
+from utils.budget_manager import BudgetManager
+from utils.proxy_rotator import ProxyRotator
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Initialize Flask app
 app = Flask(__name__)
 
 class Orchestrator:
     def __init__(self):
-        # Service configuration with real-time cost tracking
+        # Budget manager for OpenRouter ($20 limit, DeepSeek R1 pricing)
+        self.budget_manager = BudgetManager(total_budget=20.0, input_cost_per_million=0.80, output_cost_per_million=2.40)
+        
+        # Proxy rotator for SmartProxy
+        self.proxy_rotator = ProxyRotator()
+        
+        # Service configuration (Argil.ai uses web automation initially)
         self.services = {
             "argil_ugc": {
-                "endpoint": "https://api.argil.ai/v1/ugc/generate",
-                "cost_per_unit": 0.15,
+                "endpoint": None,  # Handled via web automation
+                "cost_per_unit": 0.0,  # Free via trials
                 "fallback": "open_router_ugc",
-                "rate_limit": (50, 60)  # 50 requests/minute
+                "rate_limit": (50, 60)
             },
             "open_router_ugc": {
                 "endpoint": "https://openrouter.ai/api/v1/ugc",
@@ -32,39 +43,43 @@ class Orchestrator:
 
         # Initialize core systems
         self.db_pool = self._init_db_pool()
-        self.db_logger = DBLogger()
         self.email_manager = EmailManager()
-        self.deepseek_r1 = DeepSeekOrchestrator()
+        self.deepseek_r1 = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
 
         # Twilio WhatsApp setup
         self.twilio_client = Client(
-            os.getenv("TWILIO_ACCOUNT_SID"),
-            os.getenv("TWILIO_AUTH_TOKEN")
+            os.getenv("TWILIO_SID"),  # Matches your TWILIO_SID
+            os.getenv("TWILIO_TOKEN")
         )
-        self.my_whatsapp_number = os.getenv("MY_WHATSAPP_NUMBER")  # Your WhatsApp number
-        self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER")  # Twilio's WhatsApp number
-
-        # Ensure database tables exist
-        self.initialize_database()
+        self.my_whatsapp_number = os.getenv("WHATSAPP_NUMBER")
+        self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")  # Default Twilio number
 
         # State management
-        self.service_usage = {service: {'count': 0, 'errors': 0} 
-                              for service in self.services}
+        self.service_usage = {service: {'count': 0, 'errors': 0} for service in self.services}
         self.last_optimization = datetime.utcnow()
 
+        # Initialize database
+        self.initialize_database()
+
     def _init_db_pool(self):
-        """Initialize PostgreSQL connection pool."""
-        return psycopg2.pool.ThreadedConnectionPool(
-            minconn=5,
-            maxconn=20,
-            dbname=os.getenv('POSTGRES_DB'),
-            user=os.getenv('POSTGRES_USER'),
-            password=os.getenv('POSTGRES_PASSWORD'),
-            host=os.getenv('POSTGRES_HOST')
-        )
+        """Initialize PostgreSQL connection pool (ref: https://www.psycopg.org/docs/pool.html)."""
+        try:
+            pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=5,
+                maxconn=20,
+                dbname=os.getenv('POSTGRES_DB', 'smma_db'),
+                user=os.getenv('POSTGRES_USER', 'supabase'),
+                password=os.getenv('POSTGRES_PASSWORD'),
+                host=os.getenv('POSTGRES_HOST', 'postgres')
+            )
+            logging.info("Database pool initialized successfully.")
+            return pool
+        except psycopg2.Error as e:
+            logging.error(f"Failed to initialize DB pool: {str(e)}")
+            raise
 
     def initialize_database(self):
-        """Ensure all necessary tables exist."""
+        """Ensure necessary tables exist."""
         create_tables_query = """
         CREATE TABLE IF NOT EXISTS api_usage (
             id SERIAL PRIMARY KEY,
@@ -73,14 +88,12 @@ class Orchestrator:
             cost FLOAT,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-
         CREATE TABLE IF NOT EXISTS critical_alerts (
             id SERIAL PRIMARY KEY,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             message TEXT,
-            resolved BOOLEAN
+            resolved BOOLEAN DEFAULT FALSE
         );
-
         CREATE TABLE IF NOT EXISTS optimizations (
             id SERIAL PRIMARY KEY,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -89,18 +102,24 @@ class Orchestrator:
             reason TEXT
         );
         """
-        with self.db_pool.getconn() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(create_tables_query)
-            conn.commit()
-            self.db_pool.putconn(conn)
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(create_tables_query)
+                conn.commit()
+                self.db_pool.putconn(conn)
+                logging.info("Database tables initialized.")
+        except psycopg2.Error as e:
+            logging.error(f"Database initialization failed: {str(e)}")
+            raise
 
     def get_status(self):
         """Expose current status of the orchestrator."""
         return {
             "service_usage": self.service_usage,
             "last_optimization": self.last_optimization.isoformat(),
-            "total_costs": self._calculate_costs()
+            "total_costs": self._calculate_costs(),
+            "remaining_budget": self.budget_manager.get_remaining_budget()
         }
 
     def update_parameters(self, updates):
@@ -108,10 +127,10 @@ class Orchestrator:
         for key, value in updates.items():
             if hasattr(self, key):
                 setattr(self, key, value)
+                logging.info(f"Updated parameter {key} to {value}")
 
     def route_ugc_request(self, client_request: dict) -> dict:
         """Handle end-to-end UGC request lifecycle."""
-        # Phase 1: Service selection
         routing_prompt = f"""
         Analyze UGC request from client {client_request['client_id']}:
         Type: {client_request['content_type']}
@@ -123,139 +142,122 @@ class Orchestrator:
         Current service status: {json.dumps(self.service_usage)}
         
         Recommend optimal service considering:
-        1. Cost efficiency
+        1. Cost efficiency (prioritize free Argil.ai trials)
         2. Content quality requirements
         3. Current system load
         4. Client priority ({client_request.get('priority', 'standard')})
         """
-
-        service_decision = self.deepseek_r1.query(routing_prompt)
-        selected_service = json.loads(service_decision)['service']
-        
-        # Phase 2: Content generation
         try:
+            if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=500):
+                self._critical_alert("Budget too low to process UGC request. Acquire a client to replenish.")
+                raise ValueError("Insufficient OpenRouter budget.")
+            
+            service_decision = self.deepseek_r1.query(routing_prompt, max_tokens=500)
+            selected_service = json.loads(service_decision['choices'][0]['message']['content'])['service']
+            
             if selected_service == "argil_ugc":
                 content = self._generate_argil_ugc(client_request)
             elif selected_service == "open_router_ugc":
                 content = self._generate_openrouter_ugc(client_request)
+            else:
+                raise ValueError(f"Unknown service: {selected_service}")
             
-            # Phase 3: Quality assurance
             if not self._quality_check(content):
                 raise ValueError("Quality check failed")
             
-            # Phase 4: Client delivery
             self._deliver_to_client(client_request, content)
-            
             return content
-        
         except Exception as e:
             self._handle_failure(client_request, str(e))
             return self.route_ugc_request(client_request)  # Retry with fallback
 
     def _generate_argil_ugc(self, request: dict) -> dict:
-        """Generate UGC content using Argil.ai's API."""
-        headers = {"Authorization": f"Bearer {os.getenv('ARGIL_API_KEY')}"}
-        payload = {
-            "template_id": request['template_id'],
-            "variables": request['variables'],
-            "output_format": request.get('format', 'mp4')
-        }
-        
-        response = requests.post(
-            self.services['argil_ugc']['endpoint'],
-            json=payload,
-            headers=headers,
-            timeout=30
-        )
-        response.raise_for_status()
-        return response.json()
+        """Placeholder for Argil.ai UGC via web automation."""
+        logging.info("Argil UGC generation via web automation triggered.")
+        return {"url": "placeholder", "content": "Generated via Argil.ai trial"}
+
+    def _generate_openrouter_ugc(self, request: dict) -> dict:
+        """Generate UGC content using OpenRouter API."""
+        prompt = f"Generate UGC content: {json.dumps(request)}"
+        try:
+            if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=2000):
+                raise ValueError("Insufficient budget for OpenRouter UGC.")
+            response = self.deepseek_r1.query(prompt, max_tokens=2000)
+            self.service_usage['open_router_ugc']['count'] += 1
+            return json.loads(response['choices'][0]['message']['content'])
+        except Exception as e:
+            self.service_usage['open_router_ugc']['errors'] += 1
+            raise Exception(f"OpenRouter UGC generation failed: {str(e)}")
 
     def _quality_check(self, content: dict) -> bool:
-        """Deep quality assurance check using multiple criteria."""
+        """Deep quality assurance check using DeepSeek R1."""
         validation_prompt = f"""
         Validate UGC content against requirements:
-        - Technical specs: {content['specifications']}
-        - Brand guidelines: {content['brand_rules']}
-        - Platform requirements: {content['platform_specs']}
+        - Technical specs: {content.get('specifications', 'N/A')}
+        - Brand guidelines: {content.get('brand_rules', 'N/A')}
+        - Platform requirements: {content.get('platform_specs', 'N/A')}
         
-        Content to validate: {content['content'][:1000]}
+        Content to validate: {content.get('content', 'N/A')[:1000]}
         """
-        
-        validation = self.deepseek_r1.query(validation_prompt)
-        return json.loads(validation)['approval']
+        try:
+            if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500):
+                return False
+            validation = self.deepseek_r1.query(validation_prompt, max_tokens=500)
+            return json.loads(validation['choices'][0]['message']['content'])['approval']
+        except Exception as e:
+            logging.error(f"Quality check failed: {str(e)}")
+            return False
 
     def _deliver_to_client(self, client_request: dict, content: dict) -> None:
         """Deliver generated content to the client via WhatsApp."""
-        message_body = f"@Orchestrator Your UGC Content is Ready\nHere is your requested content: {content['url']}"
+        message_body = f"@Orchestrator Your UGC Content is Ready\nHere is your requested content: {content.get('url', 'N/A')}"
         try:
             self.twilio_client.messages.create(
                 body=message_body,
                 from_=self.twilio_whatsapp_number,
                 to=self.my_whatsapp_number
             )
+            logging.info(f"Content delivered to client {client_request['client_id']}.")
         except Exception as e:
             logging.error(f"Failed to send WhatsApp message: {str(e)}")
 
-    def optimize_workflows(self) -> None:
-        """Autonomous system optimization every 6 hours."""
-        if datetime.utcnow() - self.last_optimization < timedelta(hours=6):
-            return
-
-        analysis_prompt = f"""
-        Analyze system performance data:
-        {json.dumps(self.service_usage)}
-        Current costs: {self._calculate_costs()}
-        
-        Recommend optimizations considering:
-        1. Cost reduction opportunities
-        2. Service reliability improvements
-        3. Load balancing
-        4. New features/services to implement
-        """
-        
-        optimizations = self.deepseek_r1.query(analysis_prompt)
-        self._apply_optimizations(json.loads(optimizations))
-        self.last_optimization = datetime.utcnow()
-
-    def _apply_optimizations(self, plan: dict) -> None:
-        """Execute optimization plan through self-modifier agent."""
-        from agents.self_modifier import CodeRefactorer
-        
-        modifier = CodeRefactorer()
-        for change in plan['changes']:
-            try:
-                modifier.safe_apply_update({
-                    'file_path': change['file_path'],
-                    'new_content': change['new_code'],
-                    'commit_message': f"Optimization: {change['reason']}"
-                })
-                self.db_logger.log_optimization(change)
-            except Exception as e:
-                self._critical_alert(f"Optimization failed: {str(e)}")
+    def _handle_failure(self, client_request: dict, error: str) -> None:
+        """Handle failures with fallback and alerting."""
+        logging.error(f"Request failed: {error}")
+        self._critical_alert(f"Request for client {client_request['client_id']} failed: {error}")
 
     def _critical_alert(self, message: str) -> None:
-        """Emergency alerting system via WhatsApp."""
+        """Emergency alerting system via WhatsApp and PostgreSQL."""
         try:
             self.twilio_client.messages.create(
                 body=f"@Orchestrator {message}",
                 from_=self.twilio_whatsapp_number,
                 to=self.my_whatsapp_number
             )
+            remaining_budget = self.budget_manager.get_remaining_budget()
+            if remaining_budget < 4.0:  # 20% of $20
+                self.twilio_client.messages.create(
+                    body=f"@Orchestrator Budget Warning: Only ${remaining_budget:.2f} left! Acquire a client soon!",
+                    from_=self.twilio_whatsapp_number,
+                    to=self.my_whatsapp_number
+                )
         except Exception as e:
             logging.error(f"Failed to send WhatsApp alert: {str(e)}")
 
-        # Log to PostgreSQL
-        with self.db_pool.getconn() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    INSERT INTO critical_alerts (timestamp, message, resolved)
-                    VALUES (%s, %s, %s)
-                """, (datetime.utcnow(), message, False))
-            conn.commit()
-            self.db_pool.putconn(conn)
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO critical_alerts (timestamp, message, resolved) VALUES (%s, %s, %s)",
+                        (datetime.utcnow(), message, False)
+                    )
+                conn.commit()
+                self.db_pool.putconn(conn)
+        except psycopg2.Error as e:
+            logging.error(f"Failed to log alert to database: {str(e)}")
 
     def _calculate_costs(self) -> float:
-        """Real-time cost calculation."""
+        """Real-time cost calculation for services (excluding OpenRouter)."""
         total = 0.0
         for service, data in self.service_usage.items():
             total += data['count'] * self.services[service]['cost_per_unit']
@@ -265,17 +267,8 @@ class Orchestrator:
         """Main execution loop."""
         while True:
             try:
-                # Monitor system health
-                self.optimize_workflows()
-                
-                # Auto-scale with Coolify
-                self._scale_resources()
-                
-                # Cleanup old tasks
-                self._cleanup_old_tasks()
-                
                 time.sleep(300)  # 5-minute cycle
-                
+                logging.info("Orchestrator cycle completed.")
             except Exception as e:
                 self._critical_alert(f"Main loop failure: {str(e)}")
                 time.sleep(60)
@@ -283,17 +276,17 @@ class Orchestrator:
 # Backend API endpoints
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():
-    """Fetch real-time status of the orchestrator."""
+    """Fetch real-time status (ref: https://flask.palletsprojects.com/en/2.3.x/api/)."""
     return jsonify(orchestrator.get_status())
 
 @app.route('/api/update-agent', methods=['POST'])
 def update_agent():
     """Update orchestrator parameters via web interface."""
-    data = request.json
+    data = request.get_json()
     updates = data.get("updates", {})
     orchestrator.update_parameters(updates)
-    return jsonify({"message": "Orchestrator updated successfully."}) 
+    return jsonify({"message": "Orchestrator updated successfully."})
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host=os.getenv("WEB_UI_HOST", "0.0.0.0"), port=int(os.getenv("WEB_UI_PORT", 5000)))

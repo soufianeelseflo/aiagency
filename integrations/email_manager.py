@@ -4,72 +4,81 @@ import re
 import time
 import dns.resolver
 import logging
-from twilio.rest import Client  # Import Twilio client for WhatsApp integration <button class="citation-flag" data-index="1">
+import random
+import string
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, jsonify, request
+from twilio.rest import Client  # Ref: https://www.twilio.com/docs/libraries/python
 from integrations.deepseek_r1 import DeepSeekOrchestrator
+from utils.budget_manager import BudgetManager
+from utils.proxy_rotator import ProxyRotator
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Initialize Flask app
 app = Flask(__name__)
 
 class EmailManager:
     def __init__(self):
-        # SMTP email setup for client communication
-        self.smtp_server = os.getenv('HOSTINGER_SMTP')
-        self.port = 587
-        self.base_email = os.getenv('HOSTINGER_EMAIL').split('@')[0]
-        self.domain = os.getenv('HOSTINGER_EMAIL').split('@')[1]
+        # SMTP setup for Hostinger (ref: https://www.hostinger.com/tutorials/how-to-use-free-hostinger-smtp)
+        self.smtp_server = os.getenv('HOSTINGER_SMTP', 'smtp.hostinger.com')
+        self.port = int(os.getenv('SMTP_PORT', 587))
+        self.base_email = os.getenv('HOSTINGER_EMAIL', '').split('@')[0]
+        self.domain = os.getenv('HOSTINGER_EMAIL', '').split('@')[1] if '@' in os.getenv('HOSTINGER_EMAIL', '') else 'yourdomain.com'
         self.password = os.getenv('HOSTINGER_SMTP_PASS')
-        self.daily_limit = 500
+        if not all([self.base_email, self.domain, self.password]):
+            raise ValueError("HOSTINGER_EMAIL and HOSTINGER_SMTP_PASS must be set in environment variables.")
+        self.daily_limit = 1000  # Hostinger’s limit per alias as of 2025
         self.sent_count = 0
-        self.current_alias = self.create_alias("campaign-0")
         self.alias_index = 0
-        
-        # Twilio WhatsApp setup for internal alerts
+        self.current_alias = self.create_professional_alias()
+
+        # Twilio WhatsApp setup
         self.twilio_client = Client(
             os.getenv("TWILIO_ACCOUNT_SID"),
             os.getenv("TWILIO_AUTH_TOKEN")
         )
-        self.my_whatsapp_number = os.getenv("MY_WHATSAPP_NUMBER")  # Your WhatsApp number
-        self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER")  # Twilio's WhatsApp number
-        
-        # DeepSeek-R1 integration
-        self.ds = DeepSeekOrchestrator()
+        self.my_whatsapp_number = os.getenv("MY_WHATSAPP_NUMBER")
+        self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER")
 
-    def create_alias(self, alias_name: str) -> str:
-        """Create a masked email alias dynamically."""
-        return f"{alias_name}@{self.domain}"
+        # DeepSeek R1 with budget tracking
+        self.budget_manager = BudgetManager(total_budget=20.0, input_cost_per_million=0.80, output_cost_per_million=2.40)
+        self.proxy_rotator = ProxyRotator()
+        self.ds = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
+
+    def create_professional_alias(self) -> str:
+        """Generate a professional-looking email alias."""
+        first_names = ["sarah", "mike", "emma", "john", "lisa"]
+        last_names = ["lee", "taylor", "smith", "brown", "jones"]
+        name = f"{random.choice(first_names)}.{random.choice(last_names)}{self.alias_index}"
+        return f"{name}@{self.domain}"
 
     def _validate_email(self, email: str) -> bool:
-        """Ultra-strict email validation with domain existence check."""
+        """Ultra-strict email validation with domain existence check (ref: https://dnspython.readthedocs.io/)."""
         if not re.match(r"^[a-z0-9]+[\._-]?[a-z0-9]+@\w+\.\w{2,3}$", email):
             return False
         try:
             domain = email.split('@')[1]
-            dns.resolver.resolve(domain, 'MX')  # Validate domain's MX records
+            dns.resolver.resolve(domain, 'MX')
             return True
         except Exception:
             return False
 
     def send_campaign(self, emails: List[str], template: str) -> dict:
-        """
-        Fully autonomous email campaign system.
-        Dynamically rotates aliases to bypass daily limits.
-        Uses parallel processing for scalability.
-        """
+        """Send a bulk email campaign with dynamic alias rotation."""
         results = {'success': 0, 'blocked': 0}
 
-        def send_email(email: str):
+        def send_single_email(email: str):
             nonlocal results
             if self.sent_count >= self.daily_limit:
-                # Rotate to a new alias
                 self.alias_index += 1
-                self.current_alias = self.create_alias(f"campaign-{self.alias_index}")
-                self.sent_count = 0  # Reset counter for the new alias
+                self.current_alias = self.create_professional_alias()
+                self.sent_count = 0
+                logging.info(f"Rotated to new alias: {self.current_alias}")
 
             if not self._validate_email(email):
                 results['blocked'] += 1
@@ -85,8 +94,8 @@ class EmailManager:
             for attempt in range(retries):
                 try:
                     with smtplib.SMTP(self.smtp_server, self.port) as server:
-                        server.starttls()  # Upgrade connection to secure TLS
-                        server.login(self.base_email + "@" + self.domain, self.password)
+                        server.starttls()  # Ref: https://docs.python.org/3/library/smtplib.html#smtplib.SMTP.starttls
+                        server.login(f"{self.base_email}@{self.domain}", self.password)
                         server.send_message(msg)
                         results['success'] += 1
                         self.sent_count += 1
@@ -95,39 +104,39 @@ class EmailManager:
                     if attempt == retries - 1:
                         results['blocked'] += 1
                         logging.error(f"Failed to send email to {email}: {str(e)}")
-                    time.sleep(2 ** attempt)  # Exponential backoff for retries
+                    time.sleep(2 ** attempt)  # Exponential backoff
 
-        # Use parallel processing for scalability
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            executor.map(send_email, emails)
+        with ThreadPoolExecutor(max_workers=10) as executor:  # Ref: https://docs.python.org/3/library/concurrent.futures.html
+            executor.map(send_single_email, emails)
 
         return results
 
-    def cold_outreach(self, prospects: list) -> dict:
-        """
-        AI-powered personalized cold outreach via email.
-        Generates personalized emails using DeepSeek-R1.
-        """
+    def cold_outreach(self, prospects: List[dict]) -> dict:
+        """AI-powered personalized cold outreach."""
         results = {'success': 0, 'failures': 0}
 
         def template_generator(prospect: dict) -> str:
-            """Generate personalized email content using DeepSeek-R1."""
-            return self.ds.query(f"""
-            Generate personalized email for {prospect['name']}:
-            - Industry: {prospect['industry']}
-            - Pain Points: {prospect['pain_points']}
-            - Offer: AI-driven marketing solutions to boost ROI.
-            """)
+            if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500):
+                logging.error("Insufficient budget for email generation.")
+                return "Budget depleted, please acquire a client."
+            return self.ds.query(
+                f"""
+                Generate personalized email for {prospect['name']}:
+                - Industry: {prospect['industry']}
+                - Pain Points: {prospect['pain_points']}
+                - Offer: AI-driven marketing solutions to boost ROI.
+                """,
+                max_tokens=500
+            )['choices'][0]['message']['content']
 
-        def send_email(prospect: dict):
+        def send_single_email(prospect: dict):
             nonlocal results
             email = prospect.get('email')
-
             if self.sent_count >= self.daily_limit:
-                # Rotate to a new alias
                 self.alias_index += 1
-                self.current_alias = self.create_alias(f"campaign-{self.alias_index}")
-                self.sent_count = 0  # Reset counter for the new alias
+                self.current_alias = self.create_professional_alias()
+                self.sent_count = 0
+                logging.info(f"Rotated to new alias: {self.current_alias}")
 
             if not self._validate_email(email):
                 results['failures'] += 1
@@ -137,41 +146,40 @@ class EmailManager:
             msg = MIMEMultipart()
             msg['From'] = self.current_alias
             msg['To'] = email
-            msg['Subject'] = "AI UGC Solutions"
+            msg['Subject'] = f"AI UGC Solutions for {prospect['name']}"
             msg.attach(MIMEText(template, 'plain'))
 
             retries = 3
             for attempt in range(retries):
                 try:
                     with smtplib.SMTP(self.smtp_server, self.port) as server:
-                        server.starttls()  # Upgrade connection to secure TLS
-                        server.login(self.base_email + "@" + self.domain, self.password)
+                        server.starttls()
+                        server.login(f"{self.base_email}@{self.domain}", self.password)
                         server.send_message(msg)
                         results['success'] += 1
                         self.sent_count += 1
+                        logging.info(f"Email sent to {email}.")
                         break
                 except Exception as e:
                     if attempt == retries - 1:
                         results['failures'] += 1
                         logging.error(f"Failed to send email to {email}: {str(e)}")
-                    time.sleep(2 ** attempt)  # Exponential backoff for retries
+                    time.sleep(2 ** attempt)
 
-        # Use parallel processing for scalability
         with ThreadPoolExecutor(max_workers=10) as executor:
-            executor.map(send_email, prospects)
+            executor.map(send_single_email, prospects)
 
         return results
 
     def send_critical_alert(self, message: str) -> None:
-        """
-        Send critical alerts via WhatsApp for internal monitoring.
-        """
+        """Send critical alerts via WhatsApp."""
         try:
             self.twilio_client.messages.create(
                 body=f"@EmailManager {message}",
                 from_=self.twilio_whatsapp_number,
                 to=self.my_whatsapp_number
             )
+            logging.info(f"Critical alert sent: {message}")
         except Exception as e:
             logging.error(f"Failed to send WhatsApp alert: {str(e)}")
 
@@ -184,7 +192,8 @@ class EmailManager:
         return {
             "emails_sent": self.sent_count,
             "remaining_capacity": self.get_remaining_capacity(),
-            "current_alias": self.current_alias
+            "current_alias": self.current_alias,
+            "budget_remaining": self.budget_manager.get_remaining_budget()
         }
 
     def update_parameters(self, updates):
@@ -192,18 +201,19 @@ class EmailManager:
         for key, value in updates.items():
             if hasattr(self, key):
                 setattr(self, key, value)
+                logging.info(f"Updated parameter {key} to {value}")
 
 # Backend API endpoints
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():
-    """Fetch real-time status of the email manager."""
+    """Fetch real-time status of the email manager (ref: https://flask.palletsprojects.com/en/2.3.x/api/)."""
     email_manager = EmailManager()
     return jsonify(email_manager.get_status())
 
 @app.route('/api/update-agent', methods=['POST'])
 def update_agent():
     """Update email manager parameters via web interface."""
-    data = request.json
+    data = request.get_json()
     updates = data.get("updates", {})
     email_manager = EmailManager()
     email_manager.update_parameters(updates)

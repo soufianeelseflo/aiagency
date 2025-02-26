@@ -1,37 +1,38 @@
-import os
-import json
-import requests
+import logging
+from integrations.deepseek_r1 import DeepSeekOrchestrator
+from utils.budget_manager import BudgetManager
+from utils.proxy_rotator import ProxyRotator
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class OrchestratorReflector:
     def __init__(self):
-        self.deepseek_endpoint = os.getenv("DEEPSEEK_R1_ENDPOINT")
-        self.api_key = os.getenv("DEEPSEEK_API_KEY")
+        self.budget_manager = BudgetManager()  # Hardcoded $20 budget
+        self.proxy_rotator = ProxyRotator()
+        self.ds = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
 
-    def reflect_output(self, graded_output: str, context: dict) -> dict:
-        """
-        Reflect on the graded orchestrator output and provide actionable insights.
-        """
+    def reflect_output(self, graded_output: str, context: dict) -> str:
+        """Reflect on graded orchestrator output for optimization."""
+        if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=500):
+            logging.error("Budget exceeded for reflection.")
+            return '{"status": "failure", "error": "Budget of $20 exceeded"}'
+
         prompt = f"""
-        Reflect on the following graded orchestrator output:
+        Reflect on this graded orchestrator output:
         - Context: {json.dumps(context)}
         - Graded Output: {graded_output}
         
-        Provide actionable recommendations for optimization and an improved version.
+        Provide actionable recommendations to optimize UGC ad delivery, beat competitors in speed and cost,
+        and scale client acquisition to dominate the market.
         """
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "deepseek-r1",
-            "messages": [
-                {"role": "system", "content": "You are an expert AI reflector."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 500
-        }
+        response = self.ds.query(prompt, max_tokens=500, temperature=0.3)
+        logging.info("Reflected on orchestrator output.")
+        return response['choices'][0]['message']['content']
 
-        response = requests.post(self.deepseek_endpoint, json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
+if __name__ == "__main__":
+    reflector = OrchestratorReflector()
+    graded = '{"accuracy": 90, "cost_efficiency": 85}'
+    context = {"client_id": "123", "budget": 5000}
+    result = reflector.reflect_output(graded, context)
+    print(result)

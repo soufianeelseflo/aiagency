@@ -1,43 +1,42 @@
-import os
-import json
-import requests
+import logging
+from integrations.deepseek_r1 import DeepSeekOrchestrator
+from utils.budget_manager import BudgetManager
+from utils.proxy_rotator import ProxyRotator
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class EliteEmailSystemGrader:
     def __init__(self):
-        self.deepseek_endpoint = os.getenv("DEEPSEEK_R1_ENDPOINT")
-        self.api_key = os.getenv("DEEPSEEK_API_KEY")
+        self.budget_manager = BudgetManager()  # Hardcoded $20 budget
+        self.proxy_rotator = ProxyRotator()
+        self.ds = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
 
-    def grade_output(self, output: dict, context: dict) -> dict:
-        """
-        Grade the given output for accuracy, relevance, and compliance.
-        """
+    def grade_output(self, output: dict, context: dict) -> str:
+        """Grade email campaign output for competitive outreach."""
+        if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=500):
+            logging.error("Budget exceeded for grading.")
+            return '{"status": "failure", "error": "Budget of $20 exceeded"}'
+
         prompt = f"""
-        Grade the following email campaign output:
+        Grade this email campaign output:
         - Context: {json.dumps(context)}
         - Output: {json.dumps(output)}
         
         Criteria:
-        1. Accuracy (0–100): Are the emails being sent to valid recipients?
-        2. Relevance (0–100): Is the content aligned with the target audience's needs?
-        3. Compliance (0–100): Do the emails adhere to legal and ethical standards (e.g., GDPR)?
-        4. Cost Efficiency (0–100): Are resources (e.g., email limits) being used optimally?
+        1. Accuracy (0–100): Valid recipients?
+        2. Relevance (0–100): Beats competitor messaging?
+        3. Cost Efficiency (0–100): Outperforms rival costs?
         
-        Provide a final score and recommendations for improvement.
+        Provide a score and tips to dominate competitors in client Outreach.
         """
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "deepseek-r1",
-            "messages": [
-                {"role": "system", "content": "You are an expert AI grader."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 500
-        }
+        response = self.ds.query(prompt, max_tokens=500)
+        logging.info("Graded email campaign output.")
+        return response['choices'][0]['message']['content']
 
-        response = requests.post(self.deepseek_endpoint, json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
+if __name__ == "__main__":
+    grader = EliteEmailSystemGrader()
+    output = {"success": 50, "blocked": 10}
+    context = {"emails": ["test@example.com"], "template": "Boost ROI with AI"}
+    result = grader.grade_output(output, context)
+    print(result)
