@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request
 from twilio.rest import Client  # Ref: https://www.twilio.com/docs/libraries/python
+from twilio.base.exceptions import TwilioRestException  # For error handling
 from agents.email_manager import EmailManager
 from integrations.deepseek_r1 import DeepSeekOrchestrator
 from utils.budget_manager import BudgetManager
@@ -48,13 +49,21 @@ class Orchestrator:
         self.deepseek_r1 = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
         self.argil_agent = ArgilAutomationAgent()
 
-        # Twilio WhatsApp setup
+        # Twilio WhatsApp and Voice setup
         self.twilio_client = Client(
             os.getenv("TWILIO_SID"),  # From environment variables
             os.getenv("TWILIO_TOKEN")
         )
-        self.my_whatsapp_number = os.getenv("WHATSAPP_NUMBER")
-        self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")  # Default Twilio number
+        self.my_whatsapp_number = os.getenv("WHATSAPP_NUMBER")  # e.g., "whatsapp:+YOUR_PHONE_NUMBER"
+        if not self.my_whatsapp_number:
+            raise ValueError("WHATSAPP_NUMBER must be set in environment variables.")
+        self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")  # Sandbox number
+        self.twiml_bin_url = os.getenv("TWIML_BIN_URL")  # TwiML Bin URL for voice call
+        if not self.twiml_bin_url:
+            raise ValueError("TWIML_BIN_URL must be set in environment variables.")
+        self.twilio_voice_number = os.getenv("TWILIO_VOICE_NUMBER")  # Twilio trial phone number for voice
+        if not self.twilio_voice_number:
+            raise ValueError("TWILIO_VOICE_NUMBER must be set in environment variables.")
 
         # State management
         self.service_usage = {service: {'count': 0, 'errors': 0} for service in self.services}
@@ -317,12 +326,54 @@ class Orchestrator:
             logging.error(f"Failed to count clients: {str(e)}")
             return 0
 
-    def _handle_whatsapp_command(self, message: str) -> None:
-        """Handle WhatsApp commands from the owner (e.g., @videoagent)."""
+    def _extract_phone_number(self, whatsapp_number: str) -> str:
+        """Extract E.164 phone number from WhatsApp number format for voice calls."""
+        if whatsapp_number.startswith("whatsapp:"):
+            return whatsapp_number[len("whatsapp:"):]
+        return whatsapp_number
+
+    def _initiate_voice_call(self):
+        """Initiate a voice call to the owner's personal number using Twilio Voice API."""
+        try:
+            to_number = self._extract_phone_number(self.my_whatsapp_number)
+            call = self.twilio_client.calls.create(
+                url=self.twiml_bin_url,  # TwiML Bin URL defining call behavior
+                to=to_number,  # Your personal phone number in E.164 format
+                from_=self.twilio_voice_number  # Twilio trial phone number
+            )
+            logging.info(f"Initiated voice call to {to_number}: SID {call.sid}")
+        except TwilioRestException as e:
+            logging.error(f"Failed to initiate voice call: {e}")
+            self._critical_alert(f"Voice call failed: {e}")
+
+    def _poll_whatsapp_messages(self):
+        """Poll Twilio for new WhatsApp messages (returns list of tuples: message body, sender number)."""
+        try:
+            messages = self.twilio_client.messages.list(
+                to=self.twilio_whatsapp_number,  # Sandbox number receiving messages
+                date_sent=datetime.utcnow().date(),  # Messages from today
+                limit=10  # Limit to recent messages
+            )
+            # Return list of (message body, sender number) for messages starting with "@"
+            return [(msg.body, msg.from_) for msg in messages if msg.body.startswith("@")]
+        except TwilioRestException as e:
+            logging.error(f"Failed to poll WhatsApp messages: {e}")
+            return []
+
+    def _handle_whatsapp_command(self, message: str, from_number: str) -> None:
+        """Handle WhatsApp commands, restricting sensitive actions to the owner's number."""
+        if from_number != self.my_whatsapp_number:
+            logging.warning(f"Unauthorized command attempt from {from_number}")
+            self.twilio_client.messages.create(
+                body="Unauthorized access. This command is restricted to the owner.",
+                from_=self.twilio_whatsapp_number,
+                to=from_number
+            )
+            return
+
         if message.startswith("@videoagent"):
             command = message.split(" ", 1)[1].strip().lower() if len(message.split(" ")) > 1 else ""
             if command == "yes this is exactly what i want":
-                # Record feedback for video preferences
                 self._record_video_feedback("This is exactly the type of ads to create")
                 self.twilio_client.messages.create(
                     body="@Orchestrator Video feedback recorded. Ads will now match your preference.",
@@ -335,11 +386,23 @@ class Orchestrator:
                     from_=self.twilio_whatsapp_number,
                     to=self.my_whatsapp_number
                 )
-            logging.info(f"Processed WhatsApp command: {message}")
+        elif message == "@orchestrator call_me":
+            self._initiate_voice_call()
+            self.twilio_client.messages.create(
+                body="@Orchestrator Initiating voice call to your personal number.",
+                from_=self.twilio_whatsapp_number,
+                to=self.my_whatsapp_number
+            )
+        else:
+            self.twilio_client.messages.create(
+                body="@Orchestrator Unknown command.",
+                from_=self.twilio_whatsapp_number,
+                to=self.my_whatsapp_number
+            )
+        logging.info(f"Processed WhatsApp command: '{message}' from {from_number}")
 
     def _record_video_feedback(self, feedback: str) -> None:
         """Record owner feedback to refine ArgilAutomationAgent video creation."""
-        # Store feedback in database or context for ArgilAutomationAgent
         try:
             with self.db_pool.getconn() as conn:
                 with conn.cursor() as cursor:
@@ -351,39 +414,25 @@ class Orchestrator:
                 self.db_pool.putconn(conn)
             logging.info(f"Recorded video feedback: {feedback}")
         except psycopg2.Error as e:
-            logging.error(f"Failed to record video feedback: {str(e)}")
+            logging.error(f"Failed to record video feedback: {e}")
 
     def run(self) -> None:
-        """Main execution loop with daily status updates and WhatsApp commands."""
+        """Main execution loop with daily status updates and WhatsApp command handling."""
         while True:
             try:
                 time.sleep(300)  # 5-minute cycle
                 logging.info("Orchestrator cycle completed.")
-                if datetime.utcnow().hour == 0:  # Send update at midnight daily
+                if datetime.utcnow().hour == 0:  # Send update at midnight UTC
                     self._send_status_update()
 
-                # Check for new WhatsApp messages (simplified, assume webhook or polling)
+                # Check for new WhatsApp messages
                 messages = self._poll_whatsapp_messages()
-                for message in messages:
-                    self._handle_whatsapp_command(message)
+                for message_body, from_number in messages:
+                    self._handle_whatsapp_command(message_body, from_number)
 
             except Exception as e:
-                self._critical_alert(f"Main loop failure: {str(e)}")
+                self._critical_alert(f"Main loop failure: {e}")
                 time.sleep(60)
-
-    def _poll_whatsapp_messages(self) -> List[str]:
-        """Poll Twilio for new WhatsApp messages (simplified, real implementation via webhook)."""
-        try:
-            messages = self.twilio_client.messages.list(
-                to=self.twilio_whatsapp_number,
-                from_=self.my_whatsapp_number,
-                date_sent=datetime.utcnow().date(),
-                limit=10
-            )
-            return [msg.body for msg in messages if msg.body.startswith("@")]
-        except Exception as e:
-            logging.error(f"Failed to poll WhatsApp messages: {str(e)}")
-            return []
 
 # Backend API endpoints
 @app.route('/api/agent-status', methods=['GET'])
