@@ -6,8 +6,20 @@ services:
     environment:
       - DOMAIN_NAME=youragency.com
       - GRAFANA_URL=grafana.youragency.com
+      - DEEPSEEK_KEY=${DEEPSEEK_KEY}
+      - HOSTINGER_SMTP_HOST=${HOSTINGER_SMTP_HOST}
+      - TWILIO_SID=${TWILIO_SID}
+      - TWILIO_TOKEN=${TWILIO_TOKEN}
+      - WHATSAPP_NUMBER=${WHATSAPP_NUMBER}
+      - HOSTINGER_EMAIL=${HOSTINGER_EMAIL}
+      - HOSTINGER_SMTP_PASS=${HOSTINGER_SMTP_PASS}
+      - SMARTPROXY_API_KEY=${SMARTPROXY_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     deploy:
-      replicas: 10
+      replicas: 10  # 10 instances for load balancing and redundancy
     depends_on:
       - postgres
       - grafana

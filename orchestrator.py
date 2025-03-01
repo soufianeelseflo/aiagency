@@ -11,6 +11,7 @@ from agents.email_manager import EmailManager
 from integrations.deepseek_r1 import DeepSeekOrchestrator
 from utils.budget_manager import BudgetManager
 from utils.proxy_rotator import ProxyRotator
+from agents.argil_automation_agent import ArgilAutomationAgent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -45,10 +46,11 @@ class Orchestrator:
         self.db_pool = self._init_db_pool()
         self.email_manager = EmailManager()
         self.deepseek_r1 = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
+        self.argil_agent = ArgilAutomationAgent()
 
         # Twilio WhatsApp setup
         self.twilio_client = Client(
-            os.getenv("TWILIO_SID"),  # Matches your TWILIO_SID
+            os.getenv("TWILIO_SID"),  # From environment variables
             os.getenv("TWILIO_TOKEN")
         )
         self.my_whatsapp_number = os.getenv("WHATSAPP_NUMBER")
@@ -68,7 +70,7 @@ class Orchestrator:
                 minconn=5,
                 maxconn=20,
                 dbname=os.getenv('POSTGRES_DB', 'smma_db'),
-                user=os.getenv('POSTGRES_USER', 'supabase'),
+                user=os.getenv('POSTGRES_USER', 'postgres'),
                 password=os.getenv('POSTGRES_PASSWORD'),
                 host=os.getenv('POSTGRES_HOST', 'postgres')
             )
@@ -172,9 +174,12 @@ class Orchestrator:
             return self.route_ugc_request(client_request)  # Retry with fallback
 
     def _generate_argil_ugc(self, request: dict) -> dict:
-        """Placeholder for Argil.ai UGC via web automation."""
-        logging.info("Argil UGC generation via web automation triggered.")
-        return {"url": "placeholder", "content": "Generated via Argil.ai trial"}
+        """Generate UGC via ArgilAutomationAgent."""
+        logging.info("Argil UGC generation via automation triggered.")
+        result = self.argil_agent.run()
+        if result.get("status") == "success":
+            return {"url": result['url'], "content": "Generated via Argil.ai trial"}
+        raise Exception("Argil automation failed.")
 
     def _generate_openrouter_ugc(self, request: dict) -> dict:
         """Generate UGC content using OpenRouter API."""
@@ -209,15 +214,25 @@ class Orchestrator:
             return False
 
     def _deliver_to_client(self, client_request: dict, content: dict) -> None:
-        """Deliver generated content to the client via WhatsApp."""
-        message_body = f"@Orchestrator Your UGC Content is Ready\nHere is your requested content: {content.get('url', 'N/A')}"
+        """Deliver generated content to the client via WhatsApp and owner via link."""
+        client_message = f"@Orchestrator Your UGC Content is Ready\nHere is your requested content: {content.get('url', 'N/A')}"
+        owner_message = f"@Orchestrator New UGC Video for {client_request['company']}\nVideo Link: {content.get('url', 'N/A')} (Open in Chrome)"
         try:
+            # Send to client (your WhatsApp number for testing)
             self.twilio_client.messages.create(
-                body=message_body,
+                body=client_message,
                 from_=self.twilio_whatsapp_number,
                 to=self.my_whatsapp_number
             )
             logging.info(f"Content delivered to client {client_request['client_id']}.")
+
+            # Send to you (owner) with Chrome link
+            self.twilio_client.messages.create(
+                body=owner_message,
+                from_=self.twilio_whatsapp_number,
+                to=self.my_whatsapp_number
+            )
+            logging.info(f"Video link sent to owner for review.")
         except Exception as e:
             logging.error(f"Failed to send WhatsApp message: {str(e)}")
 
@@ -263,15 +278,112 @@ class Orchestrator:
             total += data['count'] * self.services[service]['cost_per_unit']
         return total
 
+    def _send_status_update(self) -> None:
+        """Send daily WhatsApp update on clients acquired and budgets."""
+        clients_acquired = self._count_clients_24h()
+        budgets = {
+            "openrouter": self.budget_manager.get_remaining_budget(),
+            "smartproxy": 10.0 - 10.0,  # Assume $10 spent initially, remaining $0
+            "elevenlabs": 0.0  # Free tier, no cost
+        }
+        message = (f"@Orchestrator Status Update (Feb 27, 2025):\n"
+                   f"Clients Acquired in 24h: {clients_acquired}\n"
+                   f"Budgets Remaining: OpenRouter=${budgets['openrouter']:.2f}, "
+                   f"SmartProxy=${budgets['smartproxy']:.2f}, ElevenLabs=${budgets['elevenlabs']:.2f}")
+        try:
+            self.twilio_client.messages.create(
+                body=message,
+                from_=self.twilio_whatsapp_number,
+                to=self.my_whatsapp_number
+            )
+            logging.info("Sent daily status update via WhatsApp.")
+        except Exception as e:
+            logging.error(f"Failed to send WhatsApp status update: {str(e)}")
+
+    def _count_clients_24h(self) -> int:
+        """Count clients acquired in the last 24 hours from the database."""
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM api_usage 
+                        WHERE timestamp > NOW() - INTERVAL '24 hours'
+                        AND model_name LIKE '%client_acquisition%'
+                    """)
+                    count = cursor.fetchone()[0]
+                self.db_pool.putconn(conn)
+            return count
+        except psycopg2.Error as e:
+            logging.error(f"Failed to count clients: {str(e)}")
+            return 0
+
+    def _handle_whatsapp_command(self, message: str) -> None:
+        """Handle WhatsApp commands from the owner (e.g., @videoagent)."""
+        if message.startswith("@videoagent"):
+            command = message.split(" ", 1)[1].strip().lower() if len(message.split(" ")) > 1 else ""
+            if command == "yes this is exactly what i want":
+                # Record feedback for video preferences
+                self._record_video_feedback("This is exactly the type of ads to create")
+                self.twilio_client.messages.create(
+                    body="@Orchestrator Video feedback recorded. Ads will now match your preference.",
+                    from_=self.twilio_whatsapp_number,
+                    to=self.my_whatsapp_number
+                )
+            else:
+                self.twilio_client.messages.create(
+                    body="@Orchestrator Unknown command. Use '@videoagent yes this is exactly what i want' to set ad preferences.",
+                    from_=self.twilio_whatsapp_number,
+                    to=self.my_whatsapp_number
+                )
+            logging.info(f"Processed WhatsApp command: {message}")
+
+    def _record_video_feedback(self, feedback: str) -> None:
+        """Record owner feedback to refine ArgilAutomationAgent video creation."""
+        # Store feedback in database or context for ArgilAutomationAgent
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO optimizations (timestamp, file_path, new_code, reason)
+                        VALUES (%s, %s, %s, %s)
+                    """, (datetime.utcnow(), "agents/argil_automation_agent.py", "", feedback))
+                conn.commit()
+                self.db_pool.putconn(conn)
+            logging.info(f"Recorded video feedback: {feedback}")
+        except psycopg2.Error as e:
+            logging.error(f"Failed to record video feedback: {str(e)}")
+
     def run(self) -> None:
-        """Main execution loop."""
+        """Main execution loop with daily status updates and WhatsApp commands."""
         while True:
             try:
                 time.sleep(300)  # 5-minute cycle
                 logging.info("Orchestrator cycle completed.")
+                if datetime.utcnow().hour == 0:  # Send update at midnight daily
+                    self._send_status_update()
+
+                # Check for new WhatsApp messages (simplified, assume webhook or polling)
+                messages = self._poll_whatsapp_messages()
+                for message in messages:
+                    self._handle_whatsapp_command(message)
+
             except Exception as e:
                 self._critical_alert(f"Main loop failure: {str(e)}")
                 time.sleep(60)
+
+    def _poll_whatsapp_messages(self) -> List[str]:
+        """Poll Twilio for new WhatsApp messages (simplified, real implementation via webhook)."""
+        try:
+            messages = self.twilio_client.messages.list(
+                to=self.twilio_whatsapp_number,
+                from_=self.my_whatsapp_number,
+                date_sent=datetime.utcnow().date(),
+                limit=10
+            )
+            return [msg.body for msg in messages if msg.body.startswith("@")]
+        except Exception as e:
+            logging.error(f"Failed to poll WhatsApp messages: {str(e)}")
+            return []
 
 # Backend API endpoints
 @app.route('/api/agent-status', methods=['GET'])

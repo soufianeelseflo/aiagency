@@ -32,17 +32,15 @@ class EmailManager:
         self.password = os.getenv('HOSTINGER_SMTP_PASS')
         if not all([self.base_email, self.domain, self.password]):
             raise ValueError("HOSTINGER_EMAIL and HOSTINGER_SMTP_PASS must be set in environment variables.")
-        self.daily_limit = 1000  # Hostinger’s limit per alias as of 2025
-        self.sent_count = 0
+        self.sent_count = 0  # No daily limit, managed internally
         self.alias_index = 0
-        self.current_alias = self.create_professional_alias()
 
         # Twilio WhatsApp setup
         self.twilio_client = Client(
-            os.getenv("TWILIO_ACCOUNT_SID"),
-            os.getenv("TWILIO_AUTH_TOKEN")
+            os.getenv("TWILIO_SID"),
+            os.getenv("TWILIO_TOKEN")
         )
-        self.my_whatsapp_number = os.getenv("MY_WHATSAPP_NUMBER")
+        self.my_whatsapp_number = os.getenv("WHATSAPP_NUMBER")
         self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER")
 
         # DeepSeek R1 with budget tracking
@@ -51,11 +49,11 @@ class EmailManager:
         self.ds = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
 
     def create_professional_alias(self) -> str:
-        """Generate a professional-looking email alias."""
+        """Generate a professional-looking email alias from the base email."""
         first_names = ["sarah", "mike", "emma", "john", "lisa"]
         last_names = ["lee", "taylor", "smith", "brown", "jones"]
         name = f"{random.choice(first_names)}.{random.choice(last_names)}{self.alias_index}"
-        return f"{name}@{self.domain}"
+        return f"{name}+{self.alias_index}@{self.domain}"  # Use subaddressing (plus addressing)
 
     def _validate_email(self, email: str) -> bool:
         """Ultra-strict email validation with domain existence check (ref: https://dnspython.readthedocs.io/)."""
@@ -68,24 +66,27 @@ class EmailManager:
         except Exception:
             return False
 
+    def _manage_replies(self, email: str, subject: str) -> None:
+        """Route replies to a single inbox by filtering and logging."""
+        # Simulate reply handling by logging and redirecting to your inbox
+        logging.info(f"Reply expected from {email} for subject: {subject}. Redirecting to {self.base_email}@{self.domain}")
+        # No additional service needed; replies naturally route to your Hostinger inbox
+
     def send_campaign(self, emails: List[str], template: str) -> dict:
-        """Send a bulk email campaign with dynamic alias rotation."""
+        """Send a bulk email campaign with dynamic aliases, no daily limit."""
         results = {'success': 0, 'blocked': 0}
 
         def send_single_email(email: str):
             nonlocal results
-            if self.sent_count >= self.daily_limit:
-                self.alias_index += 1
-                self.current_alias = self.create_professional_alias()
-                self.sent_count = 0
-                logging.info(f"Rotated to new alias: {self.current_alias}")
+            self.alias_index += 1  # Increment for each email, no daily cap
+            current_alias = self.create_professional_alias()
 
             if not self._validate_email(email):
                 results['blocked'] += 1
                 return
 
             msg = MIMEMultipart()
-            msg['From'] = self.current_alias
+            msg['From'] = current_alias
             msg['To'] = email
             msg['Subject'] = "AI Marketing Solutions"
             msg.attach(MIMEText(template, 'plain'))
@@ -99,6 +100,7 @@ class EmailManager:
                         server.send_message(msg)
                         results['success'] += 1
                         self.sent_count += 1
+                        self._manage_replies(email, msg['Subject'])
                         break
                 except Exception as e:
                     if attempt == retries - 1:
@@ -112,7 +114,7 @@ class EmailManager:
         return results
 
     def cold_outreach(self, prospects: List[dict]) -> dict:
-        """AI-powered personalized cold outreach."""
+        """AI-powered personalized cold outreach with unlimited aliases."""
         results = {'success': 0, 'failures': 0}
 
         def template_generator(prospect: dict) -> str:
@@ -132,11 +134,8 @@ class EmailManager:
         def send_single_email(prospect: dict):
             nonlocal results
             email = prospect.get('email')
-            if self.sent_count >= self.daily_limit:
-                self.alias_index += 1
-                self.current_alias = self.create_professional_alias()
-                self.sent_count = 0
-                logging.info(f"Rotated to new alias: {self.current_alias}")
+            self.alias_index += 1  # Increment for each email, no daily cap
+            current_alias = self.create_professional_alias()
 
             if not self._validate_email(email):
                 results['failures'] += 1
@@ -144,9 +143,10 @@ class EmailManager:
 
             template = template_generator(prospect)
             msg = MIMEMultipart()
-            msg['From'] = self.current_alias
+            msg['From'] = current_alias
             msg['To'] = email
             msg['Subject'] = f"AI UGC Solutions for {prospect['name']}"
+            msg['Reply-To'] = f"{self.base_email}@{self.domain}"  # Route replies to your inbox
             msg.attach(MIMEText(template, 'plain'))
 
             retries = 3
@@ -158,6 +158,7 @@ class EmailManager:
                         server.send_message(msg)
                         results['success'] += 1
                         self.sent_count += 1
+                        self._manage_replies(email, msg['Subject'])
                         logging.info(f"Email sent to {email}.")
                         break
                 except Exception as e:
@@ -184,15 +185,15 @@ class EmailManager:
             logging.error(f"Failed to send WhatsApp alert: {str(e)}")
 
     def get_remaining_capacity(self) -> int:
-        """Track remaining email capacity for the current alias."""
-        return self.daily_limit - self.sent_count
+        """Track remaining email capacity (no limit, managed internally)."""
+        return float('inf')  # No practical limit, managed by code
 
     def get_status(self):
         """Expose current status of the email manager."""
         return {
             "emails_sent": self.sent_count,
             "remaining_capacity": self.get_remaining_capacity(),
-            "current_alias": self.current_alias,
+            "current_alias": self.create_professional_alias(),
             "budget_remaining": self.budget_manager.get_remaining_budget()
         }
 

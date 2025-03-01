@@ -4,16 +4,22 @@ import random
 import string
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from utils.proxy_rotator import ProxyRotator
+from integrations.argil_ai import ArgilVideoProducer
+from agents.research_engine import ResearchEngine
+from utils.budget_manager import BudgetManager
 
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class ArgilAutomationAgent:
     def __init__(self):
-        """Initialize the agent with proxy rotator and URLs."""
-        self.proxy_rotator = ProxyRotator()  # Assumes ProxyRotator handles SmartProxy API key
+        """Initialize the agent with proxy rotator, Argil.ai, and research tools."""
+        self.proxy_rotator = ProxyRotator()
         self.argil_register_url = "https://app.argil.ai/register"
-        self.disposable_email_url = "https://tempmail.plus/en/"  # TempMail as disposable email service
+        self.disposable_email_url = "https://tempmail.plus/en/"
+        self.argil_producer = ArgilVideoProducer()
+        self.research_engine = ResearchEngine()
+        self.budget_manager = BudgetManager()
 
     async def generate_disposable_email(self, page):
         """Generate a disposable email using TempMail."""
@@ -92,49 +98,74 @@ class ArgilAutomationAgent:
         match = re.search(r'\b\d{6}\b', email_text)
         return match.group(0) if match else None
 
-    async def run_registration(self):
-        """Execute the full registration process."""
+    async def find_client_images(self, client_data: dict) -> list:
+        """Use ResearchEngine to find Google images related to the client."""
+        if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=500):
+            logging.error("Budget exceeded for image search.")
+            return []
+        query = f"images related to {client_data['company']} website or products"
+        images = self.research_engine.document_search(query, max_tokens=500)
+        return [img['url'] for img in json.loads(images) if 'url' in img] if images else []
+
+    async def create_ugc_video(self, client_data: dict) -> dict:
+        """Create a UGC video with an AI avatar, client background, and voice."""
+        # Generate disposable account for Argil.ai
         proxy = self.proxy_rotator.get_proxy()
         proxy_config = {"server": proxy}
 
         async with async_playwright() as p:
             try:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    proxy=proxy_config  # Ref: https://playwright.dev/python/docs/network#http-proxy
-                )
+                browser = await p.chromium.launch(headless=True, proxy=proxy_config)
                 page = await browser.new_page()
 
-                # Generate disposable email and random password
                 email = await self.generate_disposable_email(page)
                 password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
 
-                # Register on Argil.ai
                 success = await self.register_argil_account(email, password, page)
                 if not success:
-                    raise Exception("Registration failed.")
+                    raise Exception("Argil.ai registration failed.")
 
-                # Retrieve and verify code
                 code = await self.retrieve_verification_code(page)
                 if not code:
-                    raise Exception("Failed to retrieve verification code.")
+                    raise Exception("Verification code retrieval failed.")
 
                 verified = await self.complete_verification(code, page)
                 if not verified:
-                    raise Exception("Verification failed.")
+                    raise Exception("Argil.ai verification failed.")
 
+                # Create avatar and video
+                avatar_name = f"Avatar_{client_data['company']}"
+                dataset_url = "https://example.com/dataset_video.mp4"  # Placeholder, replace with actual URL
+                consent_url = "https://example.com/consent_video.mp4"  # Placeholder, replace with actual URL
+                avatar = self.argil_producer.create_avatar(avatar_name, dataset_url, consent_url)
+
+                # Find client-related background images
+                background_images = await self.find_client_images(client_data)
+                background_url = background_images[0] if background_images else "https://via.placeholder.com/1920x1080"  # Default if no images
+
+                # Generate video with avatar speaking, client background
+                video_prompt = f"""
+                Create a simple UGC video:
+                - Avatar: {avatar_name}
+                - Script: "Hey [name], boost your [industry] with our ads—save time and money!"
+                - Background: {background_url}
+                - Style: Casual, human-like, with the avatar in front, background related to {client_data['company']}
+                """
+                if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=2000):
+                    raise Exception("Budget exceeded for video creation.")
+                video = self.argil_producer.generate_video(avatar['video_id'], resolution="1080p")
                 await browser.close()
-                return {"status": "success", "email": email, "password": password}
+                return {"video_id": video['id'], "url": video['url']}
 
             except Exception as e:
-                logging.error(f"Registration process failed: {str(e)}")
+                logging.error(f"UGC video creation failed: {str(e)}")
                 await browser.close()
                 return {"status": "failure", "error": str(e)}
 
     def run(self):
         """Synchronous wrapper for async execution."""
         import asyncio
-        return asyncio.run(self.run_registration())
+        return asyncio.run(self.create_ugc_video({"company": "EcomElite", "industry": "E-commerce"}))
 
 if __name__ == "__main__":
     agent = ArgilAutomationAgent()

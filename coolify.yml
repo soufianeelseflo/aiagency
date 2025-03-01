@@ -6,9 +6,15 @@ services:
       context: .
       dockerfile: Dockerfile.agent
     environment:
-      SUPABASE_URL: ${SUPABASE_URL}
       DEEPSEEK_KEY: ${DEEPSEEK_KEY}
       HOSTINGER_SMTP_HOST: ${HOSTINGER_SMTP_HOST}
+      TWILIO_SID: ${TWILIO_SID}
+      TWILIO_TOKEN: ${TWILIO_TOKEN}
+      WHATSAPP_NUMBER: ${WHATSAPP_NUMBER}
+      HOSTINGER_EMAIL: ${HOSTINGER_EMAIL}
+      HOSTINGER_SMTP_PASS: ${HOSTINGER_SMTP_PASS}
+      SMARTPROXY_API_KEY: ${SMARTPROXY_API_KEY}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
     ports:
       - '8080:8080'
     healthcheck:
@@ -22,19 +28,19 @@ services:
         parallelism: 2
         delay: 10s
 
-  supabase:
-    image: supabase/postgres:14-alpine
+  postgres:
+    image: postgres:15
     environment:
-      POSTGRES_USER: supabase
-      POSTGRES_PASSWORD: ${SUPABASE_PASSWORD}
-      POSTGRES_DB: smma_db
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - supabase-data:/var/lib/postgresql/data:rw
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "supabase"]
+      test: ["CMD", "pg_isready", "-U", "postgres"]
       interval: 5s
       timeout: 15s
       retries: 20
 
 volumes:
-  supabase-data:
+  postgres_data:
