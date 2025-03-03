@@ -1,3 +1,4 @@
+# soufianeelseflo-aiagency/coolify.yml
 version: '3.5'
 services:
   smma-agent:
@@ -6,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile.agent
     environment:
-      DEEPSEEK_KEY: ${DEEPSEEK_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}  # Renamed from DEEPSEEK_KEY
       HOSTINGER_SMTP_HOST: ${HOSTINGER_SMTP_HOST}
       TWILIO_SID: ${TWILIO_SID}
       TWILIO_TOKEN: ${TWILIO_TOKEN}
@@ -15,10 +16,18 @@ services:
       HOSTINGER_SMTP_PASS: ${HOSTINGER_SMTP_PASS}
       SMARTPROXY_API_KEY: ${SMARTPROXY_API_KEY}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+      VIDEO_STORAGE_URL: ${VIDEO_STORAGE_URL}
+      DATASET_URL: ${DATASET_URL}
+      CONSENT_URL: ${CONSENT_URL}
+      DEFAULT_BACKGROUND_URL: ${DEFAULT_BACKGROUND_URL}
+      TOTAL_BUDGET: ${TOTAL_BUDGET}
+      TWIML_BIN_URL: ${TWIML_BIN_URL}
+      TWILIO_VOICE_NUMBER: ${TWILIO_VOICE_NUMBER}
+      TWILIO_WHATSAPP_NUMBER: ${TWILIO_WHATSAPP_NUMBER}
     ports:
-      - '8080:8080'
+      - '${AGENT_PORT:-8080}:${AGENT_PORT:-8080}'
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:${AGENT_PORT:-8080}/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -27,7 +36,6 @@ services:
       update_config:
         parallelism: 2
         delay: 10s
-
   postgres:
     image: postgres:15
     environment:
@@ -41,6 +49,5 @@ services:
       interval: 5s
       timeout: 15s
       retries: 20
-
 volumes:
   postgres_data:
