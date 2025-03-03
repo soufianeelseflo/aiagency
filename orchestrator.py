@@ -17,6 +17,7 @@ from utils.proxy_rotator import ProxyRotator
 from agents.argil_automation_agent import ArgilAutomationAgent
 import psycopg2
 from psycopg2 import pool
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
@@ -155,22 +156,6 @@ class Orchestrator:
         except TwilioRestException as e:
             logging.error(f"Failed to send update: {str(e)}")
 
-    def _critical_alert(self, message: str) -> None:
-        try:
-            self.twilio_client.messages.create(
-                body=f"@Orchestrator CRITICAL: {message}",
-                from_=self.twilio_whatsapp_number,
-                to=self.my_whatsapp_number
-            )
-            if self.budget_manager.get_remaining_budget() < 5:
-                self.twilio_client.messages.create(
-                    body=f"Budget Low: ${self.budget_manager.get_remaining_budget():.2f}!",
-                    from_=self.twilio_whatsapp_number,
-                    to=self.my_whatsapp_number
-                )
-        except TwilioRestException as e:
-            logging.error(f"Failed to send alert: {str(e)}")
-
     def _extract_phone_number(self, whatsapp_number: str) -> str:
         return whatsapp_number[len("whatsapp:"):] if whatsapp_number.startswith("whatsapp:") else whatsapp_number
 
@@ -185,7 +170,6 @@ class Orchestrator:
             logging.info(f"Call to {to_number}: SID {call.sid}")
         except TwilioRestException as e:
             logging.error(f"Failed to call: {str(e)}")
-            self._critical_alert(f"Voice call failed: {e}")
 
     def _poll_whatsapp_messages(self):
         try:
@@ -219,6 +203,9 @@ class Orchestrator:
         elif message == "@orchestrator call_me":
             self._initiate_voice_call()
             self._send_status_update("Calling you!")
+        elif message == "@voiceagent call_me":
+            self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
+            self._send_status_update("Voice Agent calling you!")
         elif message == "@orchestrator begin":
             self.start_time = time.time()
             self.run_initial_campaign()
@@ -228,22 +215,21 @@ class Orchestrator:
         logging.info(f"Processed command: '{message}' from {from_number}")
 
     def _decide_next_action(self) -> str:
-        """Genius-level decision-making: prioritize high-ROI tasks within budget."""
         remaining_budget = self.budget_manager.get_remaining_budget()
         revenue = self._get_total_revenue()
         time_elapsed = (time.time() - self.start_time) / 3600 if self.start_time else 0
         
         if revenue >= self.short_term_goal:
-            return "scale_clients"  # Move to long-term growth
-        elif time_elapsed < 24 and remaining_budget > 20:
-            return "acquire_new_client"  # Aggressive client hunt
+            return "scale_clients"
+        elif time_elapsed < 24 and remaining_budget > 10:  # Adjusted for tighter budget
+            return "acquire_new_client"
         elif remaining_budget > 5:
-            return "service_existing_clients"  # Maximize current deals
+            return "service_existing_clients"
         else:
-            return "optimize_costs"  # Stretch remaining budget
+            return "optimize_costs"
 
     def _optimize_strategy(self) -> dict:
-        if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=1000):
+        if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500):  # Lower tokens for budget
             return {"strategy": "default", "expected_roi": 0}
         revenue = self._get_total_revenue()
         growth = (revenue - self.last_revenue) / max(1, self.last_revenue) if self.last_revenue else 1
@@ -254,16 +240,20 @@ class Orchestrator:
         - Exclude: Europe
         - Best ROI: {self.best_roi_value} with {self.best_roi_strategy or 'none'}
         - Revenue Growth: {growth*100:.1f}% in last cycle
+        - Avoid: Strategies used in last 24h with ROI < 1000
         - Strategy: Exploit if ROI > 1000 or growth > 10%, else innovate
         Return JSON: {{strategy: str, expected_roi: float}}
         """
-        response = self.deepseek_r1.query(prompt, max_tokens=1000)
+        response = self.deepseek_r1.query(prompt, max_tokens=500)
         strategy = json.loads(response['choices'][0]['message']['content'])
         with self.db_pool.getconn() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO strategies (strategy_name, revenue, cost, roi, uses) VALUES (%s, %s, %s, %s, %s)",
                     (strategy["strategy"], 0, 0, strategy["expected_roi"], 1)
+                )
+                cursor.execute(
+                    "DELETE FROM strategies WHERE roi < 1000 AND timestamp > NOW() - INTERVAL '24 hours'"
                 )
             conn.commit()
             self.db_pool.putconn(conn)
@@ -281,18 +271,22 @@ class Orchestrator:
 
     def run_initial_campaign(self):
         video_result = self.argil_agent.run()
-        if video_result["status"] == "success":
+        total_cost = video_result.get("cost", 0) if video_result["status"] == "success" else 0
+        if video_result["status"] == "success" and self.budget_manager.can_afford(additional_cost=total_cost):
+            self.budget_manager.log_usage(0, 0, additional_cost=total_cost)
             self._send_status_update(f"Video ready: {video_result['url']}")
-            leads = self.acquisition_engine.genius_outreach(num_leads=10)
-            total_cost = 0
-            for lead in leads:
+            leads = self.acquisition_engine.genius_outreach(num_leads=50)
+            def call_lead(lead):
+                if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):  # Call cost
+                    return
                 if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
                     voice_result = self.voice_agent.handle_lead(lead)
-                    total_cost += voice_result["cost"]
+                    total_cost = voice_result["cost"]
+                    self.budget_manager.log_usage(input_tokens=500 if "innovated" in voice_result["strategy"] else 0, 
+                                                 output_tokens=500 if "innovated" in voice_result["strategy"] else 0, 
+                                                 additional_cost=total_cost)
                     if voice_result["outcome"] == "completed":
                         roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
-                        self.best_roi_strategy = "voice_pitch_initial"
-                        self.best_roi_value = roi
                         with self.db_pool.getconn() as conn:
                             with conn.cursor() as cursor:
                                 cursor.execute(
@@ -303,54 +297,71 @@ class Orchestrator:
                             conn.commit()
                             self.db_pool.putconn(conn)
                         self._send_status_update(f"$5000 from {lead['company']}—ROI: {roi:.0f}x!")
-                        break
-            self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"See your UGC: {video_result['url']}")
+                        self.email_manager.send_contract(lead["email"])
+            with ThreadPoolExecutor(max_workers=50) as executor:
+                executor.map(call_lead, leads)
+            if self.budget_manager.can_afford(input_tokens=500, output_tokens=500):
+                self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"See your UGC: {video_result['url']}")
 
     def run(self):
         while self._get_total_revenue() < self.revenue_goal:
             try:
-                if self.first_video_approved:
+                if self.first_video_approved and self.budget_manager.get_remaining_budget() > 5:
                     self._reinvest_profits()
-                    next_action = self._decide_next_action()
-                    if next_action == "acquire_new_client":
-                        strategy = self._optimize_strategy()
-                        leads = self.acquisition_engine.genius_outreach(num_leads=10)
-                        total_cost = 0
-                        for lead in leads:
-                            if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
-                                voice_result = self.voice_agent.handle_lead(lead)
-                                total_cost += voice_result["cost"]
-                                if voice_result["outcome"] == "completed":
-                                    roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
-                                    with self.db_pool.getconn() as conn:
-                                        with conn.cursor() as cursor:
-                                            cursor.execute(
-                                                "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
-                                                "VALUES (%s, %s, %s, %s, %s, %s)",
-                                                (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
-                                            )
-                                        conn.commit()
-                                        self.db_pool.putconn(conn)
-                                    self._send_status_update(f"${voice_result['context']['revenue']} from {lead['company']}!")
-                                    break
-                    elif next_action == "service_existing_clients":
-                        # Upsell or follow up with existing clients (simplified here)
-                        video_result = self.argil_agent.run()
-                        if video_result["status"] == "success":
-                            self._send_status_update(f"New video for clients: {video_result['url']}")
-                    elif next_action == "scale_clients":
-                        leads = self.acquisition_engine.genius_outreach(num_leads=50)
-                        self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], "Scale with AI UGC!")
-                    elif next_action == "optimize_costs":
-                        self._send_status_update("Optimizing costs—pausing aggressive outreach.")
-                        time.sleep(600)  # Wait and conserve budget
+                    strategy = self._optimize_strategy()
+                    leads = self.acquisition_engine.genius_outreach(num_leads=50)
+                    def call_lead(lead):
+                        if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
+                            return
+                        if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
+                            voice_result = self.voice_agent.handle_lead(lead)
+                            total_cost = voice_result["cost"]
+                            self.budget_manager.log_usage(input_tokens=500 if "innovated" in voice_result["strategy"] else 0, 
+                                                         output_tokens=500 if "innovated" in voice_result["strategy"] else 0, 
+                                                         additional_cost=total_cost)
+                            if voice_result["outcome"] == "completed":
+                                roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
+                                with self.db_pool.getconn() as conn:
+                                    with conn.cursor() as cursor:
+                                        cursor.execute(
+                                            "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
+                                            "VALUES (%s, %s, %s, %s, %s, %s)",
+                                            (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
+                                        )
+                                    conn.commit()
+                                    self.db_pool.putconn(conn)
+                                self._send_status_update(f"${voice_result['context']['revenue']} from {lead['company']}!")
+                                self.email_manager.send_contract(lead["email"])
+                    with ThreadPoolExecutor(max_workers=50) as executor:
+                        executor.map(call_lead, leads)
                 time.sleep(300)
                 messages = self._poll_whatsapp_messages()
                 for msg, sender in messages:
                     self._handle_whatsapp_command(msg, sender)
             except Exception as e:
-                self._critical_alert(f"Loop crashed: {str(e)}")
+                logging.error(f"Loop crashed: {str(e)}")
                 time.sleep(60)
+
+    def handle_web_command(self, command: str) -> str:
+        if command == "begin":
+            self.start_time = time.time()
+            self.run_initial_campaign()
+            return "Started campaign—check WhatsApp or UI!"
+        elif command.startswith("call client"):
+            lead_email = command.split(" ")[-1]
+            leads = self.acquisition_engine.genius_outreach(num_leads=1)
+            for lead in leads:
+                if lead["email"] == lead_email and self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
+                    self.voice_agent.handle_lead(lead)
+                    return f"Calling {lead_email}!"
+            return "Client not found or budget too low."
+        elif command == "call me":
+            if self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
+                self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
+                return "Voice Agent calling you!"
+            return "Budget too low for test call."
+        else:
+            return "Unknown command—try 'begin', 'call me', or 'call client email@example.com'"
 
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():
@@ -360,9 +371,29 @@ def get_agent_status():
 def initialize_agency():
     try:
         orchestrator.run_initial_campaign()
-        return jsonify({"message": "Agency initialized—check WhatsApp!"})
+        return jsonify({"message": "Agency initialized—check WhatsApp or UI!"})
     except Exception as e:
         logging.error(f"Init failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/send-command', methods=['POST'])
+def send_command():
+    try:
+        data = request.get_json()
+        agent = data.get("agent")
+        command = data.get("command")
+        if not agent or not command:
+            return jsonify({"error": "Missing agent or command"}), 400
+        if agent == "orchestrator":
+            result = orchestrator.handle_web_command(command)
+        elif agent == "voice_agent":
+            result = orchestrator.voice_agent.handle_web_command(command)
+        else:
+            return jsonify({"error": "Unknown agent"}), 400
+        logging.info(f"Sent command to {agent}: {command}")
+        return jsonify({"message": f"Command sent to {agent}", "result": result})
+    except Exception as e:
+        logging.error(f"Failed to send command: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":

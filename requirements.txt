@@ -6,3 +6,5 @@ playwright==1.47.0
 transformers==4.44.2  
 faiss-cpu==1.8.0  
 tenacity==8.5.0  
+Flask-Limiter
+reportlab==4.2.2

@@ -404,6 +404,21 @@ class VoiceSalesAgent:
         self._save_context(client_id, script, outcome, response_context, revenue, total_cost)
         return {"call_sid": call_sid, "strategy": script, "outcome": outcome, "context": response_context, "cost": total_cost}
 
+    def get_status(self) -> dict:
+        return {
+            "calls_made": len(self.update_queue),
+            "total_revenue": sum([item[4] for item in self.update_queue]),  # revenue from update_queue
+            "remaining_budget": self.budget_manager.get_remaining_budget()
+        }
+
+    def handle_web_command(self, command: str) -> str:
+        if command.startswith("call client"):
+            lead_email = command.split(" ")[-1]
+            lead = {"email": lead_email, "phone": "+12025550123", "company": "Unknown", "industry": "Unknown", "pains": "Unknown"}
+            self.handle_lead(lead)
+            return f"Calling {lead_email}!"
+        return "Unknown command—try 'call client email@example.com'"
+
 if __name__ == "__main__":
     agent = VoiceSalesAgent("US")
     lead = {"company": "EcomElite", "email": "sales@ecomelite.com", "phone": "+12025550123", "industry": "E-commerce", "pains": "High ad costs"}
