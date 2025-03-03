@@ -3,7 +3,7 @@ import os
 import json
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, jsonify, request
 from twilio.rest import Client
 from twilio.base.exceptions import TwilioRestException
@@ -23,83 +23,65 @@ app = Flask(__name__)
 
 class Orchestrator:
     def __init__(self):
-        self.budget_manager = BudgetManager(
-            total_budget=float(os.getenv("TOTAL_BUDGET", "20.0")),
-            input_cost_per_million=float(os.getenv("INPUT_COST_PER_M", "0.80")),
-            output_cost_per_million=float(os.getenv("OUTPUT_COST_PER_M", "2.40"))
-        )
+        self.budget_manager = BudgetManager(total_budget=50.0)
         self.proxy_rotator = ProxyRotator()
-        self.services = {
-            "argil_ugc": {"endpoint": None, "cost_per_unit": 0.0, "fallback": "open_router_ugc", "rate_limit": (int(os.getenv("ARGIL_RATE_LIMIT", "50")), 60)},
-            "open_router_ugc": {"endpoint": os.getenv("OPEN_ROUTER_ENDPOINT", "https://openrouter.ai/api/v1/ugc"), "cost_per_unit": float(os.getenv("OPEN_ROUTER_COST", "0.10")), "rate_limit": (int(os.getenv("OPEN_ROUTER_RATE_LIMIT", "100")), 60)}
-        }
         self.db_pool = self._init_db_pool()
         self.email_manager = EmailManager()
         self.acquisition_engine = AcquisitionEngine()
         self.legal_agent = LegalComplianceAgent()
         self.deepseek_r1 = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
         self.argil_agent = ArgilAutomationAgent()
+        self.voice_agent = VoiceSalesAgent()
         self.twilio_client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
         self.my_whatsapp_number = os.getenv("WHATSAPP_NUMBER")
-        if not self.my_whatsapp_number:
-            raise ValueError("WHATSAPP_NUMBER must be set.")
         self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
         self.twiml_bin_url = os.getenv("TWIML_BIN_URL")
-        if not self.twiml_bin_url:
-            raise ValueError("TWIML_BIN_URL must be set.")
         self.twilio_voice_number = os.getenv("TWILIO_VOICE_NUMBER")
-        if not self.twilio_voice_number:
-            raise ValueError("TWILIO_VOICE_NUMBER must be set.")
-        self.service_usage = {service: {'count': 0, 'errors': 0} for service in self.services}
-        self.last_optimization = datetime.utcnow()
+        for var in ["TWILIO_SID", "TWILIO_TOKEN", "WHATSAPP_NUMBER", "TWIML_BIN_URL", "TWILIO_VOICE_NUMBER"]:
+            if not os.getenv(var):
+                raise ValueError(f"{var} must be set.")
+        self.revenue_goal = 100_000_000
         self.first_video_approved = False
         self.initialize_database()
+        self.best_roi_strategy = None
+        self.best_roi_value = 0
+        self.start_time = None
+        self.last_revenue = 0
 
     def _init_db_pool(self):
-        """Initialize PostgreSQL per https://www.psycopg.org/docs/pool.html"""
         try:
             pool = psycopg2.pool.ThreadedConnectionPool(
-                minconn=int(os.getenv("DB_MIN_CONN", "5")),
-                maxconn=int(os.getenv("DB_MAX_CONN", "20")),
+                minconn=5, maxconn=20,
                 dbname=os.getenv('POSTGRES_DB', 'smma_db'),
                 user=os.getenv('POSTGRES_USER', 'postgres'),
                 password=os.getenv('POSTGRES_PASSWORD'),
                 host=os.getenv('POSTGRES_HOST', 'postgres')
             )
-            logging.info("Database pool initialized.")
+            logging.info("DB pool initialized.")
             return pool
         except psycopg2.Error as e:
-            logging.error(f"Failed to initialize DB pool: {str(e)}")
+            logging.error(f"Failed to init DB: {str(e)}")
             raise
 
     def initialize_database(self):
-        """Ensure tables exist."""
         create_tables_query = """
-        CREATE TABLE IF NOT EXISTS api_usage (
-            id SERIAL PRIMARY KEY,
-            model_name VARCHAR(255),
-            tokens_used INT,
-            cost FLOAT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS critical_alerts (
-            id SERIAL PRIMARY KEY,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            message TEXT,
-            resolved BOOLEAN DEFAULT FALSE
-        );
-        CREATE TABLE IF NOT EXISTS optimizations (
-            id SERIAL PRIMARY KEY,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            file_path VARCHAR(255),
-            new_code TEXT,
-            reason TEXT
-        );
         CREATE TABLE IF NOT EXISTS client_interactions (
             id SERIAL PRIMARY KEY,
             client_id VARCHAR(255),
             interaction_type VARCHAR(50),
             details JSONB,
+            revenue FLOAT DEFAULT 0,
+            cost FLOAT DEFAULT 0,
+            roi FLOAT DEFAULT 0,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS strategies (
+            id SERIAL PRIMARY KEY,
+            strategy_name VARCHAR(255),
+            revenue FLOAT DEFAULT 0,
+            cost FLOAT DEFAULT 0,
+            roi FLOAT DEFAULT 0,
+            uses INT DEFAULT 0,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
@@ -109,67 +91,59 @@ class Orchestrator:
                     cursor.execute(create_tables_query)
                 conn.commit()
                 self.db_pool.putconn(conn)
-                logging.info("Database tables initialized.")
+            logging.info("Database initialized.")
         except psycopg2.Error as e:
-            logging.error(f"Database initialization failed: {str(e)}")
+            logging.error(f"DB init failed: {str(e)}")
             raise
 
     def get_status(self):
-        """Expose status."""
         return {
-            "service_usage": self.service_usage,
-            "last_optimization": self.last_optimization.isoformat(),
-            "total_costs": self._calculate_costs(),
             "remaining_budget": self.budget_manager.get_remaining_budget(),
-            "first_video_approved": self.first_video_approved,
-            "remaining_emails": self.email_manager.get_remaining_emails()
+            "total_revenue": self._get_total_revenue(),
+            "total_cost": self._get_total_cost(),
+            "best_roi_strategy": self.best_roi_strategy,
+            "best_roi_value": self.best_roi_value,
+            "clients_24h": self._count_clients_24h(),
+            "hours_running": (time.time() - self.start_time) / 3600 if self.start_time else 0
         }
 
-    def update_parameters(self, updates):
-        """Update parameters per https://flask.palletsprojects.com/en/3.0.x/"""
-        for key, value in updates.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-                logging.info(f"Updated parameter {key} to {value}")
-
-    def _critical_alert(self, message: str) -> None:
-        """Send alerts via Twilio per https://www.twilio.com/docs/sms/api"""
-        try:
-            self.twilio_client.messages.create(
-                body=f"@Orchestrator CRITICAL: {message}",
-                from_=self.twilio_whatsapp_number,
-                to=self.my_whatsapp_number
-            )
-            remaining_budget = self.budget_manager.get_remaining_budget()
-            if remaining_budget < self.budget_manager.total_budget * 0.2:
-                self.twilio_client.messages.create(
-                    body=f"@Orchestrator Budget Alert: ${remaining_budget:.2f} left!",
-                    from_=self.twilio_whatsapp_number,
-                    to=self.my_whatsapp_number
-                )
-        except TwilioRestException as e:
-            logging.error(f"Failed to send alert: {str(e)}")
+    def _get_total_revenue(self) -> float:
         try:
             with self.db_pool.getconn() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(
-                        "INSERT INTO critical_alerts (timestamp, message, resolved) VALUES (%s, %s, %s)",
-                        (datetime.utcnow(), message, False)
-                    )
-                conn.commit()
+                    cursor.execute("SELECT SUM(revenue) FROM client_interactions")
+                    revenue = cursor.fetchone()[0] or 0
                 self.db_pool.putconn(conn)
+            return revenue
         except psycopg2.Error as e:
-            logging.error(f"Failed to log alert: {str(e)}")
+            logging.error(f"Failed to get revenue: {str(e)}")
+            return 0
 
-    def _calculate_costs(self) -> float:
-        """Calculate service costs."""
-        total = 0.0
-        for service, data in self.service_usage.items():
-            total += data['count'] * self.services[service]['cost_per_unit']
-        return total
+    def _get_total_cost(self) -> float:
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT SUM(cost) FROM client_interactions")
+                    cost = cursor.fetchone()[0] or 0
+                self.db_pool.putconn(conn)
+            return cost
+        except psycopg2.Error as e:
+            logging.error(f"Failed to get cost: {str(e)}")
+            return 0
+
+    def _count_clients_24h(self) -> int:
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT COUNT(*) FROM client_interactions WHERE revenue > 0 AND timestamp > NOW() - INTERVAL '24 hours'")
+                    count = cursor.fetchone()[0]
+                self.db_pool.putconn(conn)
+            return count
+        except psycopg2.Error as e:
+            logging.error(f"Failed to count clients: {str(e)}")
+            return 0
 
     def _send_status_update(self, message: str) -> None:
-        """Send real-time updates."""
         try:
             self.twilio_client.messages.create(
                 body=f"@Orchestrator Update: {message}",
@@ -180,31 +154,26 @@ class Orchestrator:
         except TwilioRestException as e:
             logging.error(f"Failed to send update: {str(e)}")
 
-    def _count_clients_24h(self) -> int:
-        """Count clients acquired."""
+    def _critical_alert(self, message: str) -> None:
         try:
-            with self.db_pool.getconn() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        SELECT COUNT(*) FROM api_usage 
-                        WHERE timestamp > NOW() - INTERVAL '24 hours'
-                        AND model_name LIKE '%client_acquisition%'
-                    """)
-                    count = cursor.fetchone()[0]
-                self.db_pool.putconn(conn)
-            return count
-        except psycopg2.Error as e:
-            logging.error(f"Failed to count clients: {str(e)}")
-            return 0
+            self.twilio_client.messages.create(
+                body=f"@Orchestrator CRITICAL: {message}",
+                from_=self.twilio_whatsapp_number,
+                to=self.my_whatsapp_number
+            )
+            if self.budget_manager.get_remaining_budget() < 5:
+                self.twilio_client.messages.create(
+                    body=f"Budget Low: ${self.budget_manager.get_remaining_budget():.2f}!",
+                    from_=self.twilio_whatsapp_number,
+                    to=self.my_whatsapp_number
+                )
+        except TwilioRestException as e:
+            logging.error(f"Failed to send alert: {str(e)}")
 
     def _extract_phone_number(self, whatsapp_number: str) -> str:
-        """Extract E.164 number."""
-        if whatsapp_number.startswith("whatsapp:"):
-            return whatsapp_number[len("whatsapp:"):]
-        return whatsapp_number
+        return whatsapp_number[len("whatsapp:"):] if whatsapp_number.startswith("whatsapp:") else whatsapp_number
 
     def _initiate_voice_call(self):
-        """Initiate voice call."""
         try:
             to_number = self._extract_phone_number(self.my_whatsapp_number)
             call = self.twilio_client.calls.create(
@@ -212,13 +181,12 @@ class Orchestrator:
                 to=to_number,
                 from_=self.twilio_voice_number
             )
-            logging.info(f"Initiated call to {to_number}: SID {call.sid}")
+            logging.info(f"Call to {to_number}: SID {call.sid}")
         except TwilioRestException as e:
-            logging.error(f"Failed to initiate call: {str(e)}")
+            logging.error(f"Failed to call: {str(e)}")
             self._critical_alert(f"Voice call failed: {e}")
 
     def _poll_whatsapp_messages(self):
-        """Poll WhatsApp per https://www.twilio.com/docs/sms/api"""
         try:
             messages = self.twilio_client.messages.list(
                 to=self.twilio_whatsapp_number,
@@ -231,9 +199,7 @@ class Orchestrator:
             return []
 
     def _handle_whatsapp_command(self, message: str, from_number: str) -> None:
-        """Handle commands."""
         if from_number != self.my_whatsapp_number:
-            logging.warning(f"Unauthorized attempt from {from_number}")
             self.twilio_client.messages.create(
                 body="Unauthorized access.",
                 from_=self.twilio_whatsapp_number,
@@ -244,110 +210,138 @@ class Orchestrator:
             command = message.split(" ", 1)[1].strip().lower() if len(message.split(" ")) > 1 else ""
             if command == "yes" and not self.first_video_approved:
                 self.first_video_approved = True
-                self._record_video_feedback("First video approved.")
-                self.twilio_client.messages.create(
-                    body="@Orchestrator First video approved! Starting operations.",
-                    from_=self.twilio_whatsapp_number,
-                    to=self.my_whatsapp_number
-                )
+                self._send_status_update("Video approved—full speed ahead!")
             elif command == "yes this is exactly what i want":
-                self._record_video_feedback("This is the ad type to create.")
-                self.twilio_client.messages.create(
-                    body="@Orchestrator Feedback recorded.",
-                    from_=self.twilio_whatsapp_number,
-                    to=self.my_whatsapp_number
-                )
+                self._send_status_update("Video style locked—maxing profits!")
             else:
-                self.twilio_client.messages.create(
-                    body="@Orchestrator Unknown command.",
-                    from_=self.twilio_whatsapp_number,
-                    to=self.my_whatsapp_number
-                )
+                self._send_status_update("Unknown video command.")
         elif message == "@orchestrator call_me":
             self._initiate_voice_call()
-            self.twilio_client.messages.create(
-                body="@Orchestrator Initiating call.",
-                from_=self.twilio_whatsapp_number,
-                to=self.my_whatsapp_number
-            )
+            self._send_status_update("Calling you!")
         elif message == "@orchestrator begin":
-            self.argil_agent.run()
-            self._send_status_update("Agency initialized, video generation started!")
+            self.start_time = time.time()
+            self.run_initial_campaign()
+            self._send_status_update("$5000 in 24h—here we go!")
         else:
-            self.twilio_client.messages.create(
-                body="@Orchestrator Unknown command.",
-                from_=self.twilio_whatsapp_number,
-                to=self.my_whatsapp_number
-            )
+            self._send_status_update("Unknown command.")
         logging.info(f"Processed command: '{message}' from {from_number}")
 
-    def _record_video_feedback(self, feedback: str) -> None:
-        """Record feedback."""
-        try:
-            with self.db_pool.getconn() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("""
-                        INSERT INTO optimizations (timestamp, file_path, new_code, reason)
-                        VALUES (%s, %s, %s, %s)
-                    """, (datetime.utcnow(), "agents/argil_automation_agent.py", "", feedback))
-                conn.commit()
-                self.db_pool.putconn(conn)
-            logging.info(f"Recorded feedback: {feedback}")
-        except psycopg2.Error as e:
-            logging.error(f"Failed to record feedback: {str(e)}")
+    def _optimize_strategy(self) -> dict:
+        revenue = self._get_total_revenue()
+        growth = (revenue - self.last_revenue) / max(1, self.last_revenue) if self.last_revenue else 1
+        self.last_revenue = revenue
+        if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=1000):
+            return {"strategy": "default", "expected_roi": 0}
+        prompt = f"""
+        Optimize strategy for nexusplan.store ($50 budget):
+        - Goal: $5000 in 24h, $100M revenue
+        - Tools: DeepSeek R1, SmartProxy, ElevenLabs, Twilio, Hostinger SMTP
+        - Exclude: Europe
+        - Best ROI: {self.best_roi_value} with {self.best_roi_strategy or 'none'}
+        - Revenue Growth: {growth*100:.1f}% in last cycle
+        - Strategy: Exploit if ROI > 1000 or growth > 10%, else innovate
+        Return JSON: {{strategy: str, expected_roi: float}}
+        """
+        response = self.deepseek_r1.query(prompt, max_tokens=1000)
+        strategy = json.loads(response['choices'][0]['message']['content'])
+        with self.db_pool.getconn() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO strategies (strategy_name, revenue, cost, roi, uses) VALUES (%s, %s, %s, %s, %s)",
+                    (strategy["strategy"], 0, 0, strategy["expected_roi"], 1)
+                )
+            conn.commit()
+            self.db_pool.putconn(conn)
+        logging.info(f"Optimized: {strategy}")
+        return strategy
 
-    def run(self) -> None:
-        """Main loop."""
-        while True:
+    def _reinvest_profits(self):
+        revenue = self._get_total_revenue()
+        cost = self._get_total_cost()
+        profit = revenue - cost
+        if profit > 50:
+            self.budget_manager.total_budget += profit
+            self._send_status_update(f"Reinvested ${profit:.2f}—new budget: ${self.budget_manager.total_budget:.2f}!")
+            logging.info(f"Reinvested ${profit:.2f}")
+
+    def run_initial_campaign(self):
+        video_result = self.argil_agent.run()
+        if video_result["status"] == "success":
+            self._send_status_update(f"Video ready: {video_result['url']}")
+            leads = self.acquisition_engine.genius_outreach(num_leads=100)
+            total_cost = 0
+            for lead in leads[:10]:
+                voice_result = self.voice_agent.handle_lead(lead)
+                total_cost += voice_result["cost"]
+                if voice_result["outcome"] == "completed":
+                    roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
+                    self.best_roi_strategy = "voice_pitch"
+                    self.best_roi_value = roi
+                    with self.db_pool.getconn() as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute(
+                                "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
+                                "VALUES (%s, %s, %s, %s, %s, %s)",
+                                (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
+                            )
+                        conn.commit()
+                        self.db_pool.putconn(conn)
+                    self._send_status_update(f"$5000 from {lead['company']}—ROI: {roi:.0f}x!")
+                    break
+            self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"See your UGC: {video_result['url']}")
+
+    def run(self):
+        while self._get_total_revenue() < self.revenue_goal:
             try:
                 if self.first_video_approved:
-                    lead = {"company": "TechCo", "phone": "+12025550123", "industry": "Tech", "pains": "Low engagement", "email": "lead@techco.com", "decision_maker_email": "dm@techco.com", "news": "Recent funding"}
-                    if not self.acquisition_engine.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
-                        outreach_result = self.acquisition_engine.cold_outreach(lead)
-                        if outreach_result["status"] == "prepared_for_email":
-                            remaining = self.email_manager.get_remaining_emails()
-                            if remaining > 0:
-                                self.email_manager.send_campaign([lead["decision_maker_email"]], outreach_result["email_payload"]["body"])
-                                self._send_status_update(f"New client acquired: {lead['company']}!")
-                            else:
-                                self._critical_alert("Daily email limit reached.")
-                        voice_agent = VoiceSalesAgent()
-                        voice_result = voice_agent.handle_lead(lead, {"response": "Interested"})
-                        logging.info(f"Voice call result: {json.dumps(voice_result, indent=2)}")
-                        if voice_result["outcome"] == "completed":
-                            self._send_status_update(f"Client {lead['company']} confirmed via call!")
+                    self._reinvest_profits()
+                    strategy = self._optimize_strategy()
+                    if strategy["expected_roi"] > 1000 or (self._get_total_revenue() - self.last_revenue) / max(1, self.last_revenue) > 0.1:
+                        leads = self.acquisition_engine.genius_outreach(num_leads=100)
+                        total_cost = 0
+                        for lead in leads:
+                            if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
+                                voice_result = self.voice_agent.handle_lead(lead)
+                                total_cost += voice_result["cost"]
+                                if voice_result["outcome"] == "completed":
+                                    roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
+                                    with self.db_pool.getconn() as conn:
+                                        with conn.cursor() as cursor:
+                                            cursor.execute(
+                                                "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
+                                                "VALUES (%s, %s, %s, %s, %s, %s)",
+                                                (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
+                                            )
+                                        conn.commit()
+                                        self.db_pool.putconn(conn)
+                                    self._send_status_update(f"${voice_result['context']['revenue']} from {lead['company']}!")
+                    else:
+                        video_result = self.argil_agent.run()
+                        if video_result["status"] == "success":
+                            leads = self.acquisition_engine.genius_outreach(num_leads=100)
+                            self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"New UGC: {video_result['url']}")
+                            self._send_status_update("Testing new video style!")
                 time.sleep(300)
-                logging.info("Cycle completed.")
                 messages = self._poll_whatsapp_messages()
-                for message_body, from_number in messages:
-                    self._handle_whatsapp_command(message_body, from_number)
-                if self.budget_manager.get_remaining_budget() < 10:
-                    self._send_status_update(f"Budget low: ${self.budget_manager.get_remaining_budget():.2f} left!")
+                for msg, sender in messages:
+                    self._handle_whatsapp_command(msg, sender)
             except Exception as e:
-                self._critical_alert(f"Main loop failure: {str(e)}")
+                self._critical_alert(f"Loop crashed: {str(e)}")
                 time.sleep(60)
 
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():
     return jsonify(orchestrator.get_status())
 
-@app.route('/api/update-agent', methods=['POST'])
-def update_agent():
-    data = request.get_json()
-    updates = data.get("updates", {})
-    orchestrator.update_parameters(updates)
-    return jsonify({"message": "Orchestrator updated."})
-
 @app.route('/api/initialize', methods=['POST'])
 def initialize_agency():
     try:
-        orchestrator.argil_agent.run()
-        orchestrator._send_status_update("Agency initialized, video generation started!")
-        return jsonify({"message": "Agency initialized, check WhatsApp!"})
+        orchestrator.run_initial_campaign()
+        return jsonify({"message": "Agency initialized—check WhatsApp!"})
     except Exception as e:
-        logging.error(f"Initialization failed: {str(e)}")
+        logging.error(f"Init failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()
-    app.run(host=os.getenv("WEB_UI_HOST", "0.0.0.0"), port=int(os.getenv("WEB_UI_PORT", "5000")))
+    app.run(host="0.0.0.0", port=5000)
