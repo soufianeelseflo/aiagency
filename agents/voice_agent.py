@@ -63,7 +63,7 @@ class VoiceSalesAgent:
         self._load_rag_data()
         self.current_language = self._determine_language(country_code)
         self.language_switches = 0
-        self.pricing = {"base": 5000, "min": 3000, "discount_step": 500}
+        self.pricing = {"base": 7000, "min": 3000, "discount_step": 500}  # Updated pricing
         self.boss_number = os.getenv("WHATSAPP_NUMBER")[9:]
 
     def _initialize_database(self):
@@ -257,9 +257,9 @@ class VoiceSalesAgent:
         Innovate a concise sales script for {lead_data['company']}:
         - Industry: {lead_data['industry']}
         - Pain Points: {lead_data['pains']}
-        - Goal: $5000 sale
+        - Goal: $7000 sale
         - Past Successes: {rag_context or 'None—go big!'}
-        - Tone: Friendly, profit-driven
+        - Tone: Friendly, profit-driven, professional
         - Keep it short (under 200 chars)
         Return script text.
         """
@@ -294,14 +294,13 @@ class VoiceSalesAgent:
     def _negotiate_pricing(self, context: Dict) -> str:
         objections = context.get("objections", 0)
         current_price = max(self.pricing["min"], self.pricing["base"] - (self.pricing["discount_step"] * objections))
-        return f"${current_price}/mo—AI UGC rocks!"
+        return f"${current_price}/mo—AI UGC rocks!"  # Professional, not salesy
 
     def generate_sales_script(self, lead_data: Dict, context: Dict) -> str:
         client_id = lead_data.get('email', 'anonymous')
         cached_script = self.cache.get(f"script_{client_id}")
         if cached_script:
             return cached_script
-
         is_boss = client_id == "anonymous" and "video_type" in lead_data
         strategy = self._select_strategy(lead_data, context)
         country_code = lead_data.get("country_code", "US")
@@ -316,7 +315,6 @@ class VoiceSalesAgent:
                 intro = f"Switching to {client_language}—deal time!"
             else:
                 intro = f"Hey {lead_data.get('name', 'there')}! "
-
         pricing = self._negotiate_pricing(context) if not is_boss else ""
         script_template = self.scripts.get(strategy, "Hey [name], big wins with us!")
         script = f"{intro}{script_template.replace('[name]', lead_data.get('name', 'there')).replace('[company]', lead_data['company'])}"
@@ -324,14 +322,13 @@ class VoiceSalesAgent:
             script += f" {pricing} Let’s double your cash!"
         if is_boss:
             script = f"{intro}Boss, video {lead_data['video_type']} at {lead_data['video_url']}!"
-
         token_cost = (500 / 1_000_000 * 0.80) + (500 / 1_000_000 * 2.40) if "innovated" in strategy else 0
         self.budget_manager.log_usage(input_tokens=500 if "innovated" in strategy else 0, output_tokens=500 if "innovated" in strategy else 0)
         self.cache.set(f"script_{client_id}", script)
         return script
 
     def synthesize_voice(self, script: str) -> str:
-        script = script[:500]  # Keep it short to save costs
+        script = script[:500]
         voice_settings = VoiceSettings(stability=0.4, similarity_boost=0.7, style=0.1, use_speaker_boost=True)
         try:
             audio = generate(
@@ -343,7 +340,7 @@ class VoiceSalesAgent:
             )
             audio_file = f"call_{int(time.time())}_{''.join(random.choices(string.ascii_lowercase, k=5))}.mp4"
             save(audio, audio_file)
-            char_cost = len(script) * 0.0002  # $0.20/1000 chars
+            char_cost = len(script) * 0.0002
             self.budget_manager.log_usage(0, 0, additional_cost=char_cost)
             logging.info(f"Synthesized audio: {audio_file}, cost: ${char_cost:.4f}")
             return audio_file
@@ -360,7 +357,7 @@ class VoiceSalesAgent:
                 status_callback=self.callback_url,
                 status_callback_event=['completed']
             )
-            twilio_cost = 0.013  # $0.013/min, 1 min
+            twilio_cost = 0.013
             self.budget_manager.log_usage(0, 0, additional_cost=twilio_cost)
             logging.info(f"Call to {lead_number}: {call.sid}, cost: ${twilio_cost:.4f}")
             return call.sid
@@ -390,11 +387,9 @@ class VoiceSalesAgent:
         script = self.generate_sales_script(lead_data, context)
         audio_file = self.synthesize_voice(script)
         call_sid = self.initiate_call(self.boss_number if is_boss else lead_data['phone'], audio_file)
-
         total_cost = (500 / 1_000_000 * 0.80 + 500 / 1_000_000 * 2.40 if "innovated" in script else 0) + len(script) * 0.0002 + 0.013
-
         outcome = self.get_call_outcome(call_sid)
-        revenue = 5000 if outcome == "completed" and not is_boss else 0
+        revenue = context.get("revenue", 7000) if outcome == "completed" and not is_boss else 0
         response_context = {
             "response": context.get("response", "Interested"),
             "objections": context.get("objections", 0) + (1 if outcome in ['failed', 'busy', 'no-answer'] and not is_boss else 0),
@@ -407,7 +402,7 @@ class VoiceSalesAgent:
     def get_status(self) -> dict:
         return {
             "calls_made": len(self.update_queue),
-            "total_revenue": sum([item[4] for item in self.update_queue]),  # revenue from update_queue
+            "total_revenue": sum([item[4] for item in self.update_queue]),
             "remaining_budget": self.budget_manager.get_remaining_budget()
         }
 

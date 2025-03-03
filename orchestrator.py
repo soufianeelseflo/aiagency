@@ -10,6 +10,7 @@ from twilio.base.exceptions import TwilioRestException
 from agents.email_manager import EmailManager
 from agents.executor import AcquisitionEngine
 from agents.voice_agent import VoiceSalesAgent
+from agents.browser_agent import BrowserAgent
 from agents.legal_compliance_agent import LegalComplianceAgent
 from integrations.deepseek_r1 import DeepSeekOrchestrator
 from utils.budget_manager import BudgetManager
@@ -33,6 +34,7 @@ class Orchestrator:
         self.deepseek_r1 = DeepSeekOrchestrator(self.budget_manager, proxy_rotator=self.proxy_rotator)
         self.argil_agent = ArgilAutomationAgent()
         self.voice_agent = VoiceSalesAgent()
+        self.browser_agent = BrowserAgent()
         self.twilio_client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
         self.my_whatsapp_number = os.getenv("WHATSAPP_NUMBER")
         self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
@@ -218,10 +220,9 @@ class Orchestrator:
         remaining_budget = self.budget_manager.get_remaining_budget()
         revenue = self._get_total_revenue()
         time_elapsed = (time.time() - self.start_time) / 3600 if self.start_time else 0
-        
         if revenue >= self.short_term_goal:
             return "scale_clients"
-        elif time_elapsed < 24 and remaining_budget > 10:  # Adjusted for tighter budget
+        elif time_elapsed < 24 and remaining_budget > 10:
             return "acquire_new_client"
         elif remaining_budget > 5:
             return "service_existing_clients"
@@ -229,7 +230,7 @@ class Orchestrator:
             return "optimize_costs"
 
     def _optimize_strategy(self) -> dict:
-        if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500):  # Lower tokens for budget
+        if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500):
             return {"strategy": "default", "expected_roi": 0}
         revenue = self._get_total_revenue()
         growth = (revenue - self.last_revenue) / max(1, self.last_revenue) if self.last_revenue else 1
@@ -270,6 +271,8 @@ class Orchestrator:
             logging.info(f"Reinvested ${profit:.2f}")
 
     def run_initial_campaign(self):
+        # Ensure active Argil account
+        account = asyncio.run(self.browser_agent.ensure_argil_account())
         video_result = self.argil_agent.run()
         total_cost = video_result.get("cost", 0) if video_result["status"] == "success" else 0
         if video_result["status"] == "success" and self.budget_manager.can_afford(additional_cost=total_cost):
@@ -277,7 +280,7 @@ class Orchestrator:
             self._send_status_update(f"Video ready: {video_result['url']}")
             leads = self.acquisition_engine.genius_outreach(num_leads=50)
             def call_lead(lead):
-                if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):  # Call cost
+                if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
                     return
                 if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
                     voice_result = self.voice_agent.handle_lead(lead)
@@ -310,6 +313,8 @@ class Orchestrator:
                     self._reinvest_profits()
                     strategy = self._optimize_strategy()
                     leads = self.acquisition_engine.genius_outreach(num_leads=50)
+                    # Ensure Argil account before video creation
+                    account = asyncio.run(self.browser_agent.ensure_argil_account())
                     def call_lead(lead):
                         if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
                             return
