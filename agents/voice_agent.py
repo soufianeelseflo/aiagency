@@ -63,7 +63,7 @@ class VoiceSalesAgent:
         self._load_rag_data()
         self.current_language = self._determine_language(country_code)
         self.language_switches = 0
-        self.pricing = {"base": 7000, "min": 3000, "discount_step": 500}
+        self.pricing = {"base": 5000, "min": 3000, "discount_step": 500}
         self.boss_number = os.getenv("WHATSAPP_NUMBER")[9:]
 
     def _initialize_database(self):
@@ -250,19 +250,20 @@ class VoiceSalesAgent:
         return strategy
 
     def _innovate_strategy(self, lead_data: Dict, context: Dict) -> str:
-        if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=1000):
+        if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500):
             return random.choice(list(self.scripts.keys()))
         rag_context = self._fetch_rag_context(lead_data, context)
         prompt = f"""
-        Innovate a sales script for {lead_data['company']}:
+        Innovate a concise sales script for {lead_data['company']}:
         - Industry: {lead_data['industry']}
         - Pain Points: {lead_data['pains']}
         - Goal: $5000 sale
         - Past Successes: {rag_context or 'None—go big!'}
         - Tone: Friendly, profit-driven
+        - Keep it short (under 200 chars)
         Return script text.
         """
-        response = self.ds.query(prompt, max_tokens=1000)
+        response = self.ds.query(prompt, max_tokens=500)
         script = response['choices'][0]['message']['content']
         strategy_name = f"innovated_{random.randint(1000, 9999)}"
         self.scripts[strategy_name] = script
@@ -293,7 +294,7 @@ class VoiceSalesAgent:
     def _negotiate_pricing(self, context: Dict) -> str:
         objections = context.get("objections", 0)
         current_price = max(self.pricing["min"], self.pricing["base"] - (self.pricing["discount_step"] * objections))
-        return f"${current_price:,}/month—elite AI UGC, massive gains!"
+        return f"${current_price}/mo—AI UGC rocks!"
 
     def generate_sales_script(self, lead_data: Dict, context: Dict) -> str:
         client_id = lead_data.get('email', 'anonymous')
@@ -312,25 +313,25 @@ class VoiceSalesAgent:
             if client_language != self.current_language and self.language_switches == 0:
                 self.current_language = client_language
                 self.language_switches += 1
-                intro = f"Noticed you’re comfy with {client_language}—let’s roll!"
+                intro = f"Switching to {client_language}—deal time!"
             else:
-                intro = f"Sticking with {self.current_language}—here’s the deal!"
+                intro = f"Hey {lead_data.get('name', 'there')}! "
 
         pricing = self._negotiate_pricing(context) if not is_boss else ""
-        script_template = self.scripts.get(strategy, "Hey [name], imagine crushing it with us!")
-        script = f"{intro}\n{script_template.replace('[name]', lead_data.get('name', 'there')).replace('[company]', lead_data['company'])}"
+        script_template = self.scripts.get(strategy, "Hey [name], big wins with us!")
+        script = f"{intro}{script_template.replace('[name]', lead_data.get('name', 'there')).replace('[company]', lead_data['company'])}"
         if not is_boss:
-            script += f"\n{pricing} What’s your biggest challenge? Let’s double your revenue!"
+            script += f" {pricing} Let’s double your cash!"
         if is_boss:
-            script = f"{intro}\nBoss, here’s a new video type: {lead_data['video_type']} at {lead_data['video_url']}!"
+            script = f"{intro}Boss, video {lead_data['video_type']} at {lead_data['video_url']}!"
 
-        token_cost = (1000 / 1_000_000 * 0.80) + (1000 / 1_000_000 * 2.40) if "innovated" in strategy else 0
-        self.budget_manager.log_usage(input_tokens=1000 if "innovated" in strategy else 0, output_tokens=1000 if "innovated" in strategy else 0)
+        token_cost = (500 / 1_000_000 * 0.80) + (500 / 1_000_000 * 2.40) if "innovated" in strategy else 0
+        self.budget_manager.log_usage(input_tokens=500 if "innovated" in strategy else 0, output_tokens=500 if "innovated" in strategy else 0)
         self.cache.set(f"script_{client_id}", script)
         return script
 
     def synthesize_voice(self, script: str) -> str:
-        script = script[:9000]
+        script = script[:500]  # Keep it short to save costs
         voice_settings = VoiceSettings(stability=0.4, similarity_boost=0.7, style=0.1, use_speaker_boost=True)
         try:
             audio = generate(
@@ -342,7 +343,7 @@ class VoiceSalesAgent:
             )
             audio_file = f"call_{int(time.time())}_{''.join(random.choices(string.ascii_lowercase, k=5))}.mp4"
             save(audio, audio_file)
-            char_cost = len(script) * 0.0002  # $0.20/1000 chars (ElevenLabs estimate)
+            char_cost = len(script) * 0.0002  # $0.20/1000 chars
             self.budget_manager.log_usage(0, 0, additional_cost=char_cost)
             logging.info(f"Synthesized audio: {audio_file}, cost: ${char_cost:.4f}")
             return audio_file
@@ -359,7 +360,7 @@ class VoiceSalesAgent:
                 status_callback=self.callback_url,
                 status_callback_event=['completed']
             )
-            twilio_cost = 0.013  # $0.013/min, assume 1 min
+            twilio_cost = 0.013  # $0.013/min, 1 min
             self.budget_manager.log_usage(0, 0, additional_cost=twilio_cost)
             logging.info(f"Call to {lead_number}: {call.sid}, cost: ${twilio_cost:.4f}")
             return call.sid
@@ -390,7 +391,7 @@ class VoiceSalesAgent:
         audio_file = self.synthesize_voice(script)
         call_sid = self.initiate_call(self.boss_number if is_boss else lead_data['phone'], audio_file)
 
-        total_cost = (1000 / 1_000_000 * 0.80 + 1000 / 1_000_000 * 2.40 if "innovated" in script else 0) + len(script) * 0.0002 + 0.013
+        total_cost = (500 / 1_000_000 * 0.80 + 500 / 1_000_000 * 2.40 if "innovated" in script else 0) + len(script) * 0.0002 + 0.013
 
         outcome = self.get_call_outcome(call_sid)
         revenue = 5000 if outcome == "completed" and not is_boss else 0

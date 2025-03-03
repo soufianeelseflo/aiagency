@@ -41,6 +41,7 @@ class Orchestrator:
             if not os.getenv(var):
                 raise ValueError(f"{var} must be set.")
         self.revenue_goal = 100_000_000
+        self.short_term_goal = 5000
         self.first_video_approved = False
         self.initialize_database()
         self.best_roi_strategy = None
@@ -226,16 +227,30 @@ class Orchestrator:
             self._send_status_update("Unknown command.")
         logging.info(f"Processed command: '{message}' from {from_number}")
 
-    def _optimize_strategy(self) -> dict:
+    def _decide_next_action(self) -> str:
+        """Genius-level decision-making: prioritize high-ROI tasks within budget."""
+        remaining_budget = self.budget_manager.get_remaining_budget()
         revenue = self._get_total_revenue()
-        growth = (revenue - self.last_revenue) / max(1, self.last_revenue) if self.last_revenue else 1
-        self.last_revenue = revenue
+        time_elapsed = (time.time() - self.start_time) / 3600 if self.start_time else 0
+        
+        if revenue >= self.short_term_goal:
+            return "scale_clients"  # Move to long-term growth
+        elif time_elapsed < 24 and remaining_budget > 20:
+            return "acquire_new_client"  # Aggressive client hunt
+        elif remaining_budget > 5:
+            return "service_existing_clients"  # Maximize current deals
+        else:
+            return "optimize_costs"  # Stretch remaining budget
+
+    def _optimize_strategy(self) -> dict:
         if not self.budget_manager.can_afford(input_tokens=1000, output_tokens=1000):
             return {"strategy": "default", "expected_roi": 0}
+        revenue = self._get_total_revenue()
+        growth = (revenue - self.last_revenue) / max(1, self.last_revenue) if self.last_revenue else 1
         prompt = f"""
-        Optimize strategy for nexusplan.store ($50 budget):
-        - Goal: $5000 in 24h, $100M revenue
-        - Tools: DeepSeek R1, SmartProxy, ElevenLabs, Twilio, Hostinger SMTP
+        Optimize strategy for AI agency ($50 budget):
+        - Goal: $5000 in 24h, $100M long-term
+        - Tools: DeepSeek R1, SmartProxy, ElevenLabs, Twilio
         - Exclude: Europe
         - Best ROI: {self.best_roi_value} with {self.best_roi_strategy or 'none'}
         - Revenue Growth: {growth*100:.1f}% in last cycle
@@ -268,26 +283,27 @@ class Orchestrator:
         video_result = self.argil_agent.run()
         if video_result["status"] == "success":
             self._send_status_update(f"Video ready: {video_result['url']}")
-            leads = self.acquisition_engine.genius_outreach(num_leads=100)
+            leads = self.acquisition_engine.genius_outreach(num_leads=10)
             total_cost = 0
-            for lead in leads[:10]:
-                voice_result = self.voice_agent.handle_lead(lead)
-                total_cost += voice_result["cost"]
-                if voice_result["outcome"] == "completed":
-                    roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
-                    self.best_roi_strategy = "voice_pitch"
-                    self.best_roi_value = roi
-                    with self.db_pool.getconn() as conn:
-                        with conn.cursor() as cursor:
-                            cursor.execute(
-                                "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
-                                "VALUES (%s, %s, %s, %s, %s, %s)",
-                                (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
-                            )
-                        conn.commit()
-                        self.db_pool.putconn(conn)
-                    self._send_status_update(f"$5000 from {lead['company']}—ROI: {roi:.0f}x!")
-                    break
+            for lead in leads:
+                if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
+                    voice_result = self.voice_agent.handle_lead(lead)
+                    total_cost += voice_result["cost"]
+                    if voice_result["outcome"] == "completed":
+                        roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
+                        self.best_roi_strategy = "voice_pitch_initial"
+                        self.best_roi_value = roi
+                        with self.db_pool.getconn() as conn:
+                            with conn.cursor() as cursor:
+                                cursor.execute(
+                                    "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
+                                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                                    (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
+                                )
+                            conn.commit()
+                            self.db_pool.putconn(conn)
+                        self._send_status_update(f"$5000 from {lead['company']}—ROI: {roi:.0f}x!")
+                        break
             self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"See your UGC: {video_result['url']}")
 
     def run(self):
@@ -295,9 +311,10 @@ class Orchestrator:
             try:
                 if self.first_video_approved:
                     self._reinvest_profits()
-                    strategy = self._optimize_strategy()
-                    if strategy["expected_roi"] > 1000 or (self._get_total_revenue() - self.last_revenue) / max(1, self.last_revenue) > 0.1:
-                        leads = self.acquisition_engine.genius_outreach(num_leads=100)
+                    next_action = self._decide_next_action()
+                    if next_action == "acquire_new_client":
+                        strategy = self._optimize_strategy()
+                        leads = self.acquisition_engine.genius_outreach(num_leads=10)
                         total_cost = 0
                         for lead in leads:
                             if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
@@ -315,12 +332,18 @@ class Orchestrator:
                                         conn.commit()
                                         self.db_pool.putconn(conn)
                                     self._send_status_update(f"${voice_result['context']['revenue']} from {lead['company']}!")
-                    else:
+                                    break
+                    elif next_action == "service_existing_clients":
+                        # Upsell or follow up with existing clients (simplified here)
                         video_result = self.argil_agent.run()
                         if video_result["status"] == "success":
-                            leads = self.acquisition_engine.genius_outreach(num_leads=100)
-                            self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"New UGC: {video_result['url']}")
-                            self._send_status_update("Testing new video style!")
+                            self._send_status_update(f"New video for clients: {video_result['url']}")
+                    elif next_action == "scale_clients":
+                        leads = self.acquisition_engine.genius_outreach(num_leads=50)
+                        self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], "Scale with AI UGC!")
+                    elif next_action == "optimize_costs":
+                        self._send_status_update("Optimizing costs—pausing aggressive outreach.")
+                        time.sleep(600)  # Wait and conserve budget
                 time.sleep(300)
                 messages = self._poll_whatsapp_messages()
                 for msg, sender in messages:
