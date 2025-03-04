@@ -19,7 +19,7 @@ services:
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     deploy:
-      replicas: 10  # 10 instances for load balancing and redundancy
+      replicas: 10 
     depends_on:
       - postgres
       - grafana
