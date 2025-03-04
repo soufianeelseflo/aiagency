@@ -8,4 +8,7 @@ faiss-cpu==1.8.0
 tenacity==8.5.0  
 Flask-Limiter
 reportlab==4.2.2
-transformers>=4.48.0
+transformers==4.48.0
+gradio==5.11.0 
+
+
