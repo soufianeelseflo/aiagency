@@ -202,10 +202,10 @@ class Orchestrator:
                 self._send_status_update("Video style locked—maxing profits!")
             else:
                 self._send_status_update("Unknown video command.")
-        elif message == "@orchestrator call_me":
+        elif message == "@orchestrator call me":
             self._initiate_voice_call()
             self._send_status_update("Calling you!")
-        elif message == "@voiceagent call_me":
+        elif message == "@voiceagent call me":
             self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
             self._send_status_update("Voice Agent calling you!")
         elif message == "@orchestrator begin":
