@@ -1,4 +1,4 @@
-# soufianeelseflo-aiagency/coolify.yml
+# coolify.yml
 version: '3.5'
 services:
   smma-agent:
@@ -7,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile.agent
     environment:
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}  # Renamed from DEEPSEEK_KEY
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       HOSTINGER_SMTP_HOST: ${HOSTINGER_SMTP_HOST}
       TWILIO_SID: ${TWILIO_SID}
       TWILIO_TOKEN: ${TWILIO_TOKEN}
@@ -24,10 +24,12 @@ services:
       TWIML_BIN_URL: ${TWIML_BIN_URL}
       TWILIO_VOICE_NUMBER: ${TWILIO_VOICE_NUMBER}
       TWILIO_WHATSAPP_NUMBER: ${TWILIO_WHATSAPP_NUMBER}
+      DATABASE_URL: ${DATABASE_URL}
     ports:
-      - '${AGENT_PORT:-8080}:${AGENT_PORT:-8080}'
+      - "5000:5000"  # Map to Flask port
+    command: "python orchestrator.py"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${AGENT_PORT:-8080}/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3

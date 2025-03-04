@@ -1,4 +1,4 @@
-# soufianeelseflo-aiagency/orchestrator.py
+# orchestrator.py (full updated file)
 import os
 import json
 import time
@@ -19,13 +19,14 @@ from agents.argil_automation_agent import ArgilAutomationAgent
 import psycopg2
 from psycopg2 import pool
 from concurrent.futures import ThreadPoolExecutor
+import asyncio
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 
 class Orchestrator:
     def __init__(self):
-        self.budget_manager = BudgetManager(total_budget=50.0)
+        self.budget_manager = BudgetManager(total_budget=float(os.getenv("TOTAL_BUDGET", 50.0)))
         self.proxy_rotator = ProxyRotator()
         self.db_pool = self._init_db_pool()
         self.email_manager = EmailManager()
@@ -40,7 +41,7 @@ class Orchestrator:
         self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
         self.twiml_bin_url = os.getenv("TWIML_BIN_URL")
         self.twilio_voice_number = os.getenv("TWILIO_VOICE_NUMBER")
-        for var in ["TWILIO_SID", "TWILIO_TOKEN", "WHATSAPP_NUMBER", "TWIML_BIN_URL", "TWILIO_VOICE_NUMBER"]:
+        for var in ["TWILIO_SID", "TWILIO_TOKEN", "WHATSAPP_NUMBER", "TWIML_BIN_URL", "TWILIO_VOICE_NUMBER", "DATABASE_URL"]:
             if not os.getenv(var):
                 raise ValueError(f"{var} must be set.")
         self.revenue_goal = 100_000_000
@@ -56,10 +57,7 @@ class Orchestrator:
         try:
             pool = psycopg2.pool.ThreadedConnectionPool(
                 minconn=5, maxconn=20,
-                dbname=os.getenv('POSTGRES_DB', 'smma_db'),
-                user=os.getenv('POSTGRES_USER', 'postgres'),
-                password=os.getenv('POSTGRES_PASSWORD'),
-                host=os.getenv('POSTGRES_HOST', 'postgres')
+                dsn=os.getenv('DATABASE_URL')
             )
             logging.info("DB pool initialized.")
             return pool
@@ -235,7 +233,7 @@ class Orchestrator:
         revenue = self._get_total_revenue()
         growth = (revenue - self.last_revenue) / max(1, self.last_revenue) if self.last_revenue else 1
         prompt = f"""
-        Optimize strategy for AI agency ($50 budget):
+        Optimize strategy for AI agency (${self.budget_manager.total_budget} budget):
         - Goal: $5000 in 24h, $100M long-term
         - Tools: DeepSeek R1, SmartProxy, ElevenLabs, Twilio
         - Exclude: Europe
@@ -271,7 +269,6 @@ class Orchestrator:
             logging.info(f"Reinvested ${profit:.2f}")
 
     def run_initial_campaign(self):
-        # Ensure active Argil account
         account = asyncio.run(self.browser_agent.ensure_argil_account())
         video_result = self.argil_agent.run()
         total_cost = video_result.get("cost", 0) if video_result["status"] == "success" else 0
@@ -313,7 +310,6 @@ class Orchestrator:
                     self._reinvest_profits()
                     strategy = self._optimize_strategy()
                     leads = self.acquisition_engine.genius_outreach(num_leads=50)
-                    # Ensure Argil account before video creation
                     account = asyncio.run(self.browser_agent.ensure_argil_account())
                     def call_lead(lead):
                         if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
@@ -367,6 +363,14 @@ class Orchestrator:
             return "Budget too low for test call."
         else:
             return "Unknown command—try 'begin', 'call_me', or 'call client email@example.com'"
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    try:
+        return jsonify({"status": "healthy"}), 200
+    except Exception as e:
+        logging.error(f"Health check failed: {str(e)}")
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():
