@@ -1,4 +1,4 @@
-# orchestrator.py (full updated file)
+# orchestrator.py (updated from a779444d)
 import os
 import json
 import time
@@ -364,14 +364,6 @@ class Orchestrator:
         else:
             return "Unknown command—try 'begin', 'call_me', or 'call client email@example.com'"
 
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    try:
-        return jsonify({"status": "healthy"}), 200
-    except Exception as e:
-        logging.error(f"Health check failed: {str(e)}")
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
-
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():
     return jsonify(orchestrator.get_status())
@@ -404,6 +396,18 @@ def send_command():
     except Exception as e:
         logging.error(f"Failed to send command: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    try:
+        with orchestrator.db_pool.getconn() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+            orchestrator.db_pool.putconn(conn)
+        return jsonify({"status": "healthy"}), 200
+    except Exception as e:
+        logging.error(f"Health check failed: {str(e)}")
+        return jsonify({"status": "unhealthy", "error": str(e)}), 503
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()

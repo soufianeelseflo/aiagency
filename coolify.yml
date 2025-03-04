@@ -6,6 +6,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.agent
+    command: python orchestrator.py  # Fix logs error
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       HOSTINGER_SMTP_HOST: ${HOSTINGER_SMTP_HOST}
@@ -26,18 +27,12 @@ services:
       TWILIO_WHATSAPP_NUMBER: ${TWILIO_WHATSAPP_NUMBER}
       DATABASE_URL: ${DATABASE_URL}
     ports:
-      - "5000:5000"  # Map to Flask port
-    command: "python orchestrator.py"
+      - "5000:5000"  # Match Flask
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-    deploy:
-      replicas: 3
-      update_config:
-        parallelism: 2
-        delay: 10s
   postgres:
     image: postgres:15
     environment:
