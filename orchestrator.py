@@ -202,10 +202,10 @@ class Orchestrator:
                 self._send_status_update("Video style locked—maxing profits!")
             else:
                 self._send_status_update("Unknown video command.")
-        elif message == "@orchestrator call me":
+        elif message == "@orchestrator call_me":
             self._initiate_voice_call()
             self._send_status_update("Calling you!")
-        elif message == "@voiceagent call me":
+        elif message == "@voiceagent call_me":
             self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
             self._send_status_update("Voice Agent calling you!")
         elif message == "@orchestrator begin":
@@ -360,13 +360,13 @@ class Orchestrator:
                     self.voice_agent.handle_lead(lead)
                     return f"Calling {lead_email}!"
             return "Client not found or budget too low."
-        elif command == "call me":
+        elif command == "call_me":
             if self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
                 self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
                 return "Voice Agent calling you!"
             return "Budget too low for test call."
         else:
-            return "Unknown command—try 'begin', 'call me', or 'call client email@example.com'"
+            return "Unknown command—try 'begin', 'call_me', or 'call client email@example.com'"
 
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():
