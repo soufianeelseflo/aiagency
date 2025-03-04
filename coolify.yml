@@ -1,7 +1,7 @@
 version: '3.5'
 services:
-  smma-agent:
-    image: smma-agent:${CI_COMMIT_SHA}
+  aiagency:
+    image: aiagency:${CI_COMMIT_SHA}
     build:
       context: .
       dockerfile: Dockerfile.agent
