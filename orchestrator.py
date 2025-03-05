@@ -20,7 +20,7 @@ from psycopg2 import pool
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 
-# Configure logging
+# Configure logging for debugging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
@@ -32,7 +32,7 @@ class Orchestrator:
         self.proxy_rotator = ProxyRotator()
         self.db_pool = self._init_db_pool()
 
-        # SMTP setup with fallback
+        # Robust SMTP setup
         smtp_pass = os.getenv("HOSTINGER_SMTP_PASS", "")
         smtp_host = os.getenv("HOSTINGER_SMTP", "smtp.hostinger.com")
         smtp_port = int(os.getenv("SMTP_PORT", 587))
@@ -42,8 +42,7 @@ class Orchestrator:
         self.email_manager = None
         if smtp_pass and smtp_host and smtp_email:
             try:
-                self.email_manager = EmailManager(smtp_host=smtp_host, smtp_port=smtp_port, smtp_user=smtp_email,
-                                                  smtp_pass=smtp_pass)
+                self.email_manager = EmailManager(smtp_host=smtp_host, smtp_port=smtp_port, smtp_user=smtp_email, smtp_pass=smtp_pass)
                 logging.info("EmailManager initialized.")
             except Exception as e:
                 logging.error(f"EmailManager init failed: {str(e)}—email disabled.")
@@ -65,8 +64,7 @@ class Orchestrator:
         self.twiml_bin_url = os.getenv("TWIML_BIN_URL", "")
         self.twilio_voice_number = os.getenv("TWILIO_VOICE_NUMBER", "")
 
-        required_vars = ["TWILIO_SID", "TWILIO_TOKEN", "WHATSAPP_NUMBER", "TWIML_BIN_URL", "TWILIO_VOICE_NUMBER",
-                         "DATABASE_URL"]
+        required_vars = ["TWILIO_SID", "TWILIO_TOKEN", "WHATSAPP_NUMBER", "TWIML_BIN_URL", "TWILIO_VOICE_NUMBER", "DATABASE_URL"]
         missing_vars = [var for var in required_vars if not os.getenv(var)]
         if missing_vars:
             logging.warning(f"Missing vars: {', '.join(missing_vars)}—some features limited.")
@@ -79,6 +77,7 @@ class Orchestrator:
         self.best_roi_value = 0
         self.start_time = None
         self.last_revenue = 0
+
 
     def _init_db_pool(self):
         try:
@@ -174,8 +173,7 @@ class Orchestrator:
         try:
             with self.db_pool.getconn() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT COUNT(*) FROM client_interactions WHERE revenue > 0 AND timestamp > NOW() - INTERVAL '24 hours'")
+                    cursor.execute("SELECT COUNT(*) FROM client_interactions WHERE revenue > 0 AND timestamp > NOW() - INTERVAL '24 hours'")
                     count = cursor.fetchone()[0]
                 self.db_pool.putconn(conn)
             return count
@@ -198,8 +196,7 @@ class Orchestrator:
             logging.error(f"Failed to send update: {str(e)}")
 
     def _extract_phone_number(self, whatsapp_number: str) -> str:
-        return whatsapp_number[len("whatsapp:"):] if whatsapp_number.startswith(
-            "whatsapp:") else whatsapp_number
+        return whatsapp_number[len("whatsapp:"):] if whatsapp_number.startswith("whatsapp:") else whatsapp_number
 
     def _initiate_voice_call(self):
         if not self.twilio_client:
@@ -234,6 +231,7 @@ class Orchestrator:
         if not self.twilio_client:
             logging.warning("Twilio not configured—command skipped.")
             return
+
         if from_number != self.my_whatsapp_number:
             self.twilio_client.messages.create(
                 body="Unauthorized access.",
@@ -255,9 +253,7 @@ class Orchestrator:
             self._initiate_voice_call()
             self._send_status_update("Calling you!")
         elif message == "@voiceagent call_me":
-            self.voice_agent.handle_lead(
-                {"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number),
-                 "company": "Test", "industry": "Test", "pains": "Test"})
+            self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
             self._send_status_update("Voice Agent calling you!")
         elif message == "@orchestrator begin":
             self.start_time = time.time()
@@ -287,14 +283,13 @@ class Orchestrator:
 
         revenue = self._get_total_revenue()
         growth = (revenue - self.last_revenue) / max(1, self.last_revenue) if self.last_revenue else 1
-
         prompt = f"""
         Optimize strategy for AI agency (${self.budget_manager.total_budget} budget):
         - Goal: $5000 in 24h, $100M long-term
         - Tools: DeepSeek R1, SmartProxy, ElevenLabs, Twilio
         - Exclude: Europe
         - Best ROI: {self.best_roi_value} with {self.best_roi_strategy or 'none'}
-        - Revenue Growth: {growth * 100:.1f}% in last cycle
+        - Revenue Growth: {growth*100:.1f}% in last cycle
         - Avoid: Strategies used in last 24h with ROI < 1000
         - Strategy: Exploit if ROI > 1000 or growth > 10%, else innovate
         Return JSON: {{strategy: str, expected_roi: float}}
@@ -321,11 +316,9 @@ class Orchestrator:
         revenue = self._get_total_revenue()
         cost = self._get_total_cost()
         profit = revenue - cost
-
         if profit > 50:
             self.budget_manager.total_budget += profit
-            self._send_status_update(
-                f"Reinvested ${profit:.2f}—new budget: ${self.budget_manager.total_budget:.2f}!")
+            self._send_status_update(f"Reinvested ${profit:.2f}—new budget: ${self.budget_manager.total_budget:.2f}!")
             logging.info(f"Reinvested ${profit:.2f}")
 
     def run_initial_campaign(self):
@@ -336,6 +329,7 @@ class Orchestrator:
         if video_result["status"] == "success" and self.budget_manager.can_afford(additional_cost=total_cost):
             self.budget_manager.log_usage(0, 0, additional_cost=total_cost)
             self._send_status_update(f"Video ready: {video_result['url']}")
+
             leads = self.acquisition_engine.genius_outreach(num_leads=50)
 
             def call_lead(lead):
@@ -357,9 +351,7 @@ class Orchestrator:
                                     cursor.execute(
                                         "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
                                         "VALUES (%s, %s, %s, %s, %s, %s)",
-                                        (
-                                        lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"],
-                                        total_cost, roi)
+                                        (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
                                     )
                                 conn.commit()
                                 self.db_pool.putconn(conn)
@@ -371,8 +363,8 @@ class Orchestrator:
                 executor.map(call_lead, leads)
 
             if self.budget_manager.can_afford(input_tokens=500, output_tokens=500) and self.email_manager:
-                self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads],
-                                                 f"See your UGC: {video_result['url']}")
+                self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"See your UGC: {video_result['url']}")
+
 
     def run(self):
         while self._get_total_revenue() < self.revenue_goal:
@@ -384,11 +376,9 @@ class Orchestrator:
                     account = asyncio.run(self.browser_agent.ensure_argil_account())
 
                     def call_lead(lead):
-                        if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500,
-                                                             additional_cost=0.15):
+                        if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
                             return
-                        if not self.legal_agent.is_european(
-                                self.acquisition_engine.get_country_from_phone(lead["phone"])):
+                        if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
                             voice_result = self.voice_agent.handle_lead(lead)
                             total_cost = voice_result["cost"]
                             self.budget_manager.log_usage(
@@ -404,9 +394,7 @@ class Orchestrator:
                                             cursor.execute(
                                                 "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
                                                 "VALUES (%s, %s, %s, %s, %s, %s)",
-                                                (
-                                                lead["email"], "voice", json.dumps(voice_result),
-                                                voice_result["context"]["revenue"], total_cost, roi)
+                                                (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
                                             )
                                         conn.commit()
                                         self.db_pool.putconn(conn)
@@ -421,6 +409,7 @@ class Orchestrator:
                 messages = self._poll_whatsapp_messages()
                 for msg, sender in messages:
                     self._handle_whatsapp_command(msg, sender)
+
             except Exception as e:
                 logging.error(f"Loop crashed: {str(e)}")
                 time.sleep(60)
@@ -432,18 +421,15 @@ class Orchestrator:
             return "Started campaign—check WhatsApp or UI!"
         elif command.startswith("call client"):
             lead_email = command.split(" ")[-1]
-            leads = self.acquisition_engine.genius_outreach(num_leads=1)
+            leads = self.acquisition_engine.genius_outreach(num_leads=1)  # Fetch only one lead for efficiency
             for lead in leads:
-                if lead["email"] == lead_email and self.budget_manager.can_afford(input_tokens=500, output_tokens=500,
-                                                                                  additional_cost=0.15):
+                if lead["email"] == lead_email and self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
                     self.voice_agent.handle_lead(lead)
                     return f"Calling {lead_email}!"
             return "Client not found or budget too low."
         elif command == "call_me":
             if self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
-                self.voice_agent.handle_lead(
-                    {"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number),
-                     "company": "Test", "industry": "Test", "pains": "Test"})
+                self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
                 return "Voice Agent calling you!"
             return "Budget too low for test call."
         else:
@@ -452,8 +438,11 @@ class Orchestrator:
 
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():
-    return jsonify(orchestrator.get_status())
-
+    try:
+        return jsonify(orchestrator.get_status())
+    except Exception as e:
+        logging.error(f"Agent status failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/initialize', methods=['POST'])
 def initialize_agency():
@@ -464,13 +453,13 @@ def initialize_agency():
         logging.error(f"Init failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-
 @app.route('/api/send-command', methods=['POST'])
 def send_command():
     try:
         data = request.get_json()
         agent = data.get("agent")
         command = data.get("command")
+
         if not agent or not command:
             return jsonify({"error": "Missing agent or command"}), 400
 
@@ -483,10 +472,10 @@ def send_command():
 
         logging.info(f"Sent command to {agent}: {command}")
         return jsonify({"message": f"Command sent to {agent}", "result": result})
+
     except Exception as e:
         logging.error(f"Failed to send command: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -498,9 +487,8 @@ def health_check():
                     cursor.execute("SELECT 1")
                 orchestrator.db_pool.putconn(conn)
         except Exception as e:
-            logging.error(f"Health check DB failed: {str(e)}")
+            logging.error(f"DB health check failed: {str(e)}")
     return jsonify({"status": "healthy"}), 200
-
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()
