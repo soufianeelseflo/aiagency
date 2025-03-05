@@ -1,7 +1,10 @@
+================================================
+File: docker-compose.yml
+================================================
 version: '3.8'
 
 services:
-  ai_orchestrator:
+  aiagency:
     build: .
     environment:
       - DOMAIN_NAME=youragency.com
@@ -18,25 +21,37 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-    deploy:
-      replicas: 10 
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - VIDEO_STORAGE_URL=${VIDEO_STORAGE_URL}
+      - DATASET_URL=${DATASET_URL}
+      - CONSENT_URL=${CONSENT_URL}
+      - DEFAULT_BACKGROUND_URL=${DEFAULT_BACKGROUND_URL}
+      - TOTAL_BUDGET=${TOTAL_BUDGET}
+      - TWIML_BIN_URL=${TWIML_BIN_URL}
+      - TWILIO_VOICE_NUMBER=${TWILIO_VOICE_NUMBER}
+      - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER}
+      - DATABASE_URL=${DATABASE_URL}
+    ports:
+      - "5000:80" 
     depends_on:
       - postgres
       - grafana
+    deploy:
+      replicas: 10
 
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
   grafana:
-    image: grafana/grafana-enterprise
+    image: grafana/grafana-enterprise:latest
     environment:
-      GF_INSTALL_PLUGINS: grafana-postgresql-datasource
+      - GF_INSTALL_PLUGINS=grafana-postgresql-datasource
     volumes:
       - grafana_data:/var/lib/grafana
     ports:

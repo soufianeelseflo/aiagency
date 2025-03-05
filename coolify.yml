@@ -1,3 +1,6 @@
+================================================
+File: coolify.yml
+================================================
 version: '3.5'
 services:
   aiagency:
@@ -5,45 +8,53 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: python orchestrator.py  
+    command: python app.py
     environment:
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      HOSTINGER_SMTP_HOST: ${HOSTINGER_SMTP_HOST}
-      TWILIO_SID: ${TWILIO_SID}
-      TWILIO_TOKEN: ${TWILIO_TOKEN}
-      WHATSAPP_NUMBER: ${WHATSAPP_NUMBER}
-      HOSTINGER_EMAIL: ${HOSTINGER_EMAIL}
-      HOSTINGER_SMTP_PASS: ${HOSTINGER_SMTP_PASS}
-      SMARTPROXY_API_KEY: ${SMARTPROXY_API_KEY}
-      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
-      VIDEO_STORAGE_URL: ${VIDEO_STORAGE_URL}
-      DATASET_URL: ${DATASET_URL}
-      CONSENT_URL: ${CONSENT_URL}
-      DEFAULT_BACKGROUND_URL: ${DEFAULT_BACKGROUND_URL}
-      TOTAL_BUDGET: ${TOTAL_BUDGET}
-      TWIML_BIN_URL: ${TWIML_BIN_URL}
-      TWILIO_VOICE_NUMBER: ${TWILIO_VOICE_NUMBER}
-      TWILIO_WHATSAPP_NUMBER: ${TWILIO_WHATSAPP_NUMBER}
-      DATABASE_URL: ${DATABASE_URL}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - HOSTINGER_SMTP_HOST=${HOSTINGER_SMTP_HOST}
+      - TWILIO_SID=${TWILIO_SID}
+      - TWILIO_TOKEN=${TWILIO_TOKEN}
+      - WHATSAPP_NUMBER=${WHATSAPP_NUMBER}
+      - HOSTINGER_EMAIL=${HOSTINGER_EMAIL}
+      - HOSTINGER_SMTP_PASS=${HOSTINGER_SMTP_PASS}
+      - SMARTPROXY_API_KEY=${SMARTPROXY_API_KEY}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - VIDEO_STORAGE_URL=${VIDEO_STORAGE_URL}
+      - DATASET_URL=${DATASET_URL}
+      - CONSENT_URL=${CONSENT_URL}
+      - DEFAULT_BACKGROUND_URL=${DEFAULT_BACKGROUND_URL}
+      - TOTAL_BUDGET=${TOTAL_BUDGET}
+      - TWIML_BIN_URL=${TWIML_BIN_URL}
+      - TWILIO_VOICE_NUMBER=${TWILIO_VOICE_NUMBER}
+      - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER}
+      - DATABASE_URL=${DATABASE_URL}
+      - DOMAIN_NAME=youragency.com
+      - GRAFANA_URL=grafana.youragency.com
+      - DEEPSEEK_KEY=${DEEPSEEK_KEY}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     ports:
-      - "5000:5000"
+      - "5000:80"  
     healthcheck:
-      test: ["CMD", "wget", "--spider", "http://localhost:5000/health"]
+      test: ["CMD", "wget", "--spider", "http://localhost:80/api/agent-status"]
       interval: 30s
-      timeout: 5s  # Shortened for faster feedback
+      timeout: 5s
       retries: 3
+
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres"]
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
       interval: 5s
       timeout: 15s
       retries: 20
+
 volumes:
   postgres_data:
