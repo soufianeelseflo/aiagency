@@ -4,7 +4,7 @@ services:
     image: aiagency:${CI_COMMIT_SHA}
     build:
       context: .
-      dockerfile: docker-compose.yml
+      dockerfile: Dockerfile
     command: python orchestrator.py  
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
