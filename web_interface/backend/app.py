@@ -23,6 +23,7 @@ app = Flask(__name__)
 # Log environment variables for debugging
 logger.info(f"WEB_UI_HOST: {os.getenv('WEB_UI_HOST', '0.0.0.0')}")
 logger.info(f"WEB_UI_PORT: {os.getenv('WEB_UI_PORT', '80')}")
+logger.info(f"CHROME_USER_DATA: {os.getenv('CHROME_USER_DATA', 'Not set')}")
 
 try:
     acquisition_engine = AcquisitionEngine()
