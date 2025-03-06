@@ -24,6 +24,6 @@ COPY web_interface/backend/ .
 
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 80  # Open the door here!
+EXPOSE 80 
 
 CMD ["python", "app.py"]
