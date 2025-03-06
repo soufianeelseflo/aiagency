@@ -17,11 +17,12 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Log environment variables for debugging
+# Log environment variables and startup for debugging
 logger.info(f"WEB_UI_HOST: {os.getenv('WEB_UI_HOST', '0.0.0.0')}")
 logger.info(f"WEB_UI_PORT: {os.getenv('WEB_UI_PORT', '80')}")
 logger.info(f"CHROME_USER_DATA: {os.getenv('CHROME_USER_DATA', 'Not set')}")
 logger.info(f"DATABASE_URL: {os.getenv('DATABASE_URL', 'Not set')}")
+logger.info("Attempting to start Flask app...")
 
 try:
     acquisition_engine = AcquisitionEngine()

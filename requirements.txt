@@ -9,4 +9,4 @@ flask-limiter==3.10.1
 reportlab==4.2.2
 transformers==4.48.0
 gradio==5.11.0
-openrouter==1.0.0  
+openrouter==1.0.0
