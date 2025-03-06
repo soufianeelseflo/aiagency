@@ -24,6 +24,6 @@ COPY web_interface/backend/ .
 
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 80  # Robot listens here!
+EXPOSE 80  # Open the door here!
 
 CMD ["python", "app.py"]
