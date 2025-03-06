@@ -3,12 +3,12 @@ import os
 import logging
 from flask import Flask, jsonify, request
 from agents.executor import AcquisitionEngine
-from agents.email_manager import EmailManager
+from integrations.email_manager import EmailManager  # Look in the right box!
 from agents.research_engine import ResearchEngine
 from agents.voice_agent import VoiceSalesAgent
 from orchestrator import Orchestrator
 
-# Configure logging
+# Set up a little diary to track what’s happening
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -18,10 +18,9 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Log environment variables and startup for debugging
+# Write in the diary what’s starting
 logger.info(f"WEB_UI_HOST: {os.getenv('WEB_UI_HOST', '0.0.0.0')}")
 logger.info(f"WEB_UI_PORT: {os.getenv('WEB_UI_PORT', '80')}")
-logger.info(f"CHROME_USER_DATA: {os.getenv('CHROME_USER_DATA', 'Not set')}")
 logger.info(f"DATABASE_URL: {os.getenv('DATABASE_URL', 'Not set')}")
 logger.info("Attempting to start Flask app...")
 
