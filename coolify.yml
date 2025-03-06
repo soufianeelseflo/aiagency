@@ -1,13 +1,10 @@
-================================================
-File: coolify.yml
-================================================
 version: '3.5'
 services:
   aiagency:
     image: aiagency:${CI_COMMIT_SHA}
     build:
       context: .
-      dockerfile: Dockerfile 
+      dockerfile: Dockerfile  
     command: python app.py
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
@@ -23,7 +20,6 @@ services:
       - TWIML_BIN_URL=${TWIML_BIN_URL}
       - TWILIO_VOICE_NUMBER=${TWILIO_VOICE_NUMBER}
       - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER}
-      - DEEPSEEK_KEY=${DEEPSEEK_KEY}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -31,8 +27,9 @@ services:
       - CHROME_PATH=${CHROME_PATH}
       - CHROME_USER_DATA=${CHROME_USER_DATA} 
       - CHROME_PERSISTENT_SESSION=${CHROME_PERSISTENT_SESSION}
+      - DATABASE_URL=${DATABASE_URL}
     ports:
-      - "5000:80"  
+      - "5000:80"
     healthcheck:
       test: ["CMD", "wget", "--spider", "http://localhost:80/api/agent-status"]
       interval: 30s

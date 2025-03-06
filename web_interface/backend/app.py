@@ -1,6 +1,3 @@
-================================================
-File: web_interface/backend/app.py
-================================================
 import os
 import logging
 from flask import Flask, jsonify, request
@@ -24,6 +21,7 @@ app = Flask(__name__)
 logger.info(f"WEB_UI_HOST: {os.getenv('WEB_UI_HOST', '0.0.0.0')}")
 logger.info(f"WEB_UI_PORT: {os.getenv('WEB_UI_PORT', '80')}")
 logger.info(f"CHROME_USER_DATA: {os.getenv('CHROME_USER_DATA', 'Not set')}")
+logger.info(f"DATABASE_URL: {os.getenv('DATABASE_URL', 'Not set')}")
 
 try:
     acquisition_engine = AcquisitionEngine()
