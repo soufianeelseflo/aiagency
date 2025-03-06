@@ -22,8 +22,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # Install openrouter explicitly
 RUN pip install openrouter==1.0.0
 
-# Copy the Flask app from web_interface/backend/
-COPY web_interface/backend/app.py .
+# Copy the entire web_interface/backend/ directory
+COPY web_interface/backend/ .
 
 # Set environment variable for unbuffered output
 ENV PYTHONUNBUFFERED=1
