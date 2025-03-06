@@ -23,8 +23,11 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # Install openrouter explicitly
 RUN pip install openrouter==1.0.0
 
-# Copy root-level agents/ and web_interface/backend/
+# Copy root-level dirs
 COPY agents/ ./agents/
+COPY integrations/ ./integrations/
+COPY utils/ ./utils/
+COPY orchestrator.py .
 COPY web_interface/backend/ .
 
 # Set environment variable for unbuffered output
