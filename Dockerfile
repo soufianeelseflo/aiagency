@@ -13,17 +13,17 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
- libpq-dev gcc \
- libx11-6 libxkbcommon-x11-0 libglib2.0-0 libnss3 libatk1.0-0 \
- libatk-bridge2.0-0 libcups2 libdrm2 libxcomposite1 libxdamage1 \
- libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 ffmpeg \
- curl \
- && rm -rf /var/lib/apt/lists/*
+    libpq-dev gcc \
+    libx11-6 libxkbcommon-x11-0 libglib2.0-0 libnss3 libatk1.0-0 \
+    libatk-bridge2.0-0 libcups2 libdrm2 libxcomposite1 libxdamage1 \
+    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
- && playwright install --with-deps chromium
+    && playwright install --with-deps chromium
 
 # Copy frontend build
 COPY --from=frontend /app/web_interface/frontend/build ./static
@@ -31,9 +31,11 @@ COPY --from=frontend /app/web_interface/frontend/build ./static
 # Copy backend and orchestrator
 COPY web_interface/backend/ ./web_interface/backend/
 COPY orchestrator.py .
-COPY agents/ ./agents/ 2>/dev/null || :
-COPY integrations/ ./integrations/ 2>/dev/null || :
-COPY utils/ ./utils/ 2>/dev/null || :
+
+# Copy optional directories only if they exist
+COPY agents/ ./agents/  # Remove if agents/ doesn’t exist in your repo
+COPY integrations/ ./integrations/  # Remove if integrations/ doesn’t exist
+COPY utils/ ./utils/  # Remove if utils/ doesn’t exist
 
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_APP=web_interface/backend/app.py
@@ -42,6 +44,6 @@ ENV FLASK_ENV=production
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=3s \
- CMD curl -f http://localhost:80/health || exit 1
+  CMD curl -f http://localhost:80/health || exit 1
 
 CMD ["gunicorn", "--bind", "0.0.0.0:80", "web_interface.backend.app:app"]
