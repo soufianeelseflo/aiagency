@@ -1,8 +1,8 @@
-flask==3.0.3  #
-gunicorn==22.0.0  
-psycopg2-binary==2.9.9  
-twilio==9.0.5 
-requests==2.31.0  
-playwright==1.44.0  
-deepgram-sdk==3.2.0  
-elevenlabs==0.3.1  
+flask==3.0.3  # Web framework
+gunicorn==22.0.0  # WSGI server
+psycopg2-binary==2.9.9  # PostgreSQL adapter
+twilio==9.0.5  # Twilio integration
+requests==2.31.0  # HTTP requests
+playwright==1.44.0  # Browser automation
+deepgram-sdk==3.2.0  # Deepgram API
+elevenlabs==1.52.0  # ElevenLabs API, updated to latest stable version
