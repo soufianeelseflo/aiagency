@@ -7,3 +7,4 @@ tenacity==8.5.0
 openrouter==1.0.0     
 numpy==1.26.4         
 phonenumbers==8.13.47 
+dnspython==2.6.1
