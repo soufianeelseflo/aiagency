@@ -20,7 +20,6 @@ from psycopg2 import pool
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -29,17 +28,15 @@ orchestrator = None
 
 class Orchestrator:
     def __init__(self):
-        # Validate required env vars
         required_vars = ["TWILIO_SID", "TWILIO_TOKEN", "WHATSAPP_NUMBER", "TWIML_BIN_URL", "TWILIO_VOICE_NUMBER", "DATABASE_URL"]
         missing = [var for var in required_vars if not os.getenv(var)]
         if missing:
-            logger.error(f"Missing env vars: {', '.join(missing)}. Some features will be limited.")
+            logger.error(f"Missing env vars: {', '.join(missing)}")
 
         self.budget_manager = BudgetManager(total_budget=float(os.getenv("TOTAL_BUDGET", 50.0)))
         self.proxy_rotator = ProxyRotator()
         self.db_pool = self._init_db_pool()
 
-        # SMTP setup
         smtp_pass = os.getenv("HOSTINGER_SMTP_PASS", "")
         smtp_host = os.getenv("HOSTINGER_SMTP", "smtp.hostinger.com")
         smtp_port = int(os.getenv("SMTP_PORT", 587))
@@ -50,7 +47,7 @@ class Orchestrator:
                 self.email_manager = EmailManager(smtp_host=smtp_host, smtp_port=smtp_port, smtp_user=smtp_email, smtp_pass=smtp_pass)
                 logger.info("EmailManager initialized.")
             except Exception as e:
-                logger.error(f"EmailManager init failed: {str(e)}—email disabled.")
+                logger.error(f"EmailManager init failed: {str(e)}")
 
         self.acquisition_engine = AcquisitionEngine()
         self.legal_agent = LegalComplianceAgent()
@@ -86,7 +83,7 @@ class Orchestrator:
             logger.info("DB pool initialized.")
             return pool
         except psycopg2.Error as e:
-            logger.error(f"Failed to init DB: {str(e)}—DB disabled.")
+            logger.error(f"Failed to init DB: {str(e)}")
             return None
 
     def initialize_database(self):
@@ -351,6 +348,40 @@ class Orchestrator:
             if self.budget_manager.can_afford(input_tokens=500, output_tokens=500) and self.email_manager:
                 self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"See your UGC: {video_result['url']}")
 
+    def run_web_campaign(self):
+        """Run a campaign triggered from the web interface to generate revenue."""
+        if self.start_time is None:
+            self.start_time = time.time()
+        leads = self.acquisition_engine.genius_outreach(num_leads=10)  # Smaller batch for web
+        def call_lead(lead):
+            if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
+                return
+            voice_result = self.voice_agent.handle_lead(lead)
+            total_cost = voice_result["cost"]
+            self.budget_manager.log_usage(
+                input_tokens=500 if "innovated" in voice_result["strategy"] else 0,
+                output_tokens=500 if "innovated" in voice_result["strategy"] else 0,
+                additional_cost=total_cost
+            )
+            if voice_result["outcome"] == "completed":
+                roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
+                if self.db_pool:
+                    with self.db_pool.getconn() as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute(
+                                "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
+                                "VALUES (%s, %s, %s, %s, %s, %s)",
+                                (lead["email"], "web_voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
+                            )
+                        conn.commit()
+                        self.db_pool.putconn(conn)
+                self._send_status_update(f"${voice_result['context']['revenue']} from {lead['company']} via web!")
+                if self.email_manager:
+                    self.email_manager.send_contract(lead["email"])
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(call_lead, leads)
+        self._reinvest_profits()
+
     def run(self):
         while self._get_total_revenue() < self.revenue_goal:
             try:
@@ -399,7 +430,10 @@ class Orchestrator:
         if command == "begin":
             self.start_time = time.time()
             self.run_initial_campaign()
-            return "Started campaign—check WhatsApp or UI!"
+            return "Started initial campaign—check WhatsApp or UI!"
+        elif command == "make_money":
+            self.run_web_campaign()
+            return "Running web campaign to generate revenue—check status!"
         elif command.startswith("call client"):
             lead_email = command.split(" ")[-1]
             leads = self.acquisition_engine.genius_outreach(num_leads=1)
@@ -414,7 +448,7 @@ class Orchestrator:
                 return "Voice Agent calling you!"
             return "Budget too low for test call."
         else:
-            return "Unknown command—try 'begin', 'call_me', or 'call client email@example.com'"
+            return "Unknown command—try 'begin', 'make_money', 'call_me', or 'call client email@example.com'"
 
 @app.route('/api/agent-status', methods=['GET'])
 def get_agent_status():

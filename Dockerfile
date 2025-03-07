@@ -1,16 +1,15 @@
 # Stage 1: Build the React frontend
 FROM node:18 AS frontend
 WORKDIR /app/web_interface/frontend
-COPY web_interface/frontend/package.json web_interface/frontend/package-lock.json* ./
+COPY web_interface/frontend/ ./
 RUN npm install
-COPY web_interface/frontend ./
 RUN npm run build
 
 # Stage 2: Build the Python backend
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install system dependencies for Playwright and Flask
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     libpq-dev gcc \
     libx11-6 libxkbcommon-x11-0 libglib2.0-0 libnss3 libatk1.0-0 \
@@ -33,7 +32,6 @@ COPY agents/ ./agents/
 COPY integrations/ ./integrations/
 COPY utils/ ./utils/
 
-# Environment variables (set by Coolify)
 ENV PYTHONUNBUFFERED=1
 ENV FLASK_APP=web_interface/backend/app.py
 ENV FLASK_ENV=production
