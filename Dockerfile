@@ -1,7 +1,8 @@
 
+# Step 1: Build the robot’s face (frontend) with Node.js
 FROM node:18 as frontend
-WORKDIR /app/web_interface/frontend 
-COPY web_interface/frontend /app/web_interface/frontend 
+WORKDIR /app/web_interface/frontend  # Changed!
+COPY web_interface/frontend /app/web_interface/frontend  # Changed!
 ENV REACT_APP_API_BASE_URL=/api
 RUN npm install && npm run build
 
