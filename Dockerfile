@@ -1,15 +1,16 @@
-# Step 1: Build the robot’s face (frontend) with Node.js
-FROM node:18 as frontend
+# Stage 1: Build the React frontend
+FROM node:18 AS frontend
 WORKDIR /app/web_interface/frontend
-COPY web_interface/frontend /app/web_interface/frontend
-ENV REACT_APP_API_BASE_URL=/api
-RUN npm install && npm run build
+COPY web_interface/frontend/package.json web_interface/frontend/package-lock.json* ./
+RUN npm install
+COPY web_interface/frontend ./
+RUN npm run build
 
-# Step 2: Build the robot’s brain (backend) with Python
+# Stage 2: Build the Python backend
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies for Playwright and Flask
 RUN apt-get update && apt-get install -y \
     libpq-dev gcc \
     libx11-6 libxkbcommon-x11-0 libglib2.0-0 libnss3 libatk1.0-0 \
@@ -17,26 +18,29 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements.txt and install Python dependencies
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium
 
-# Copy the built frontend into the ROOT of the app directory
-COPY --from=frontend /app/web_interface/frontend/build .
+# Copy frontend build
+COPY --from=frontend /app/web_interface/frontend/build ./static
 
-# Copy the backend code
+# Copy backend and orchestrator
+COPY web_interface/backend/ ./web_interface/backend/
+COPY orchestrator.py .
 COPY agents/ ./agents/
 COPY integrations/ ./integrations/
 COPY utils/ ./utils/
-COPY orchestrator.py .
-COPY web_interface/backend/ ./
 
-# Set environment variables
+# Environment variables (set by Coolify)
 ENV PYTHONUNBUFFERED=1
+ENV FLASK_APP=web_interface/backend/app.py
+ENV FLASK_ENV=production
 
-# Expose the port the app runs on
 EXPOSE 80
 
-# Start the app
-CMD ["python", "app.py"]
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD curl -f http://localhost:80/health || exit 1
+
+CMD ["gunicorn", "--bind", "0.0.0.0:80", "web_interface.backend.app:app"]

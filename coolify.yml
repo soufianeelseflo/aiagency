@@ -1,46 +1,36 @@
-
-version: '3.5'
+version: '3.8'
 services:
   aiagency:
-    image: aiagency:${CI_COMMIT_SHA}
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["python", "app.py"]
     environment:
+      - HOSTINGER_EMAIL=${HOSTINGER_EMAIL}
+      - HOSTINGER_SMTP=${HOSTINGER_SMTP}
+      - HOSTINGER_SMTP_PASS=${HOSTINGER_SMTP_PASS}
+      - LEMON_SQUEEZY_API=${LEMON_SQUEEZY_API}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - HOSTINGER_SMTP_HOST=${HOSTINGER_SMTP_HOST}
+      - SMARTPROXY_API_KEY=${SMARTPROXY_API_KEY}
+      - SMTP_PORT=${SMTP_PORT}
       - TWILIO_SID=${TWILIO_SID}
       - TWILIO_TOKEN=${TWILIO_TOKEN}
       - WHATSAPP_NUMBER=${WHATSAPP_NUMBER}
-      - HOSTINGER_EMAIL=${HOSTINGER_EMAIL}
-      - HOSTINGER_SMTP_PASS=${HOSTINGER_SMTP_PASS}
-      - SMARTPROXY_API_KEY=${SMARTPROXY_API_KEY}
-      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-      - VIDEO_STORAGE_URL=${VIDEO_STORAGE_URL}
-      - TWIML_BIN_URL=${TWIML_BIN_URL}
       - TWILIO_VOICE_NUMBER=${TWILIO_VOICE_NUMBER}
       - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - REACT_APP_API_BASE_URL=${REACT_APP_API_BASE_URL}
+      - TWIML_BIN_URL=${TWIML_BIN_URL}
+      - VIDEO_STORAGE_URL=${VIDEO_STORAGE_URL}
       - CHROME_PATH=${CHROME_PATH}
       - CHROME_USER_DATA=${CHROME_USER_DATA}
       - CHROME_PERSISTENT_SESSION=${CHROME_PERSISTENT_SESSION}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - REACT_APP_API_BASE_URL=/api
       - DATABASE_URL=${DATABASE_URL}
-      - DEEPGRAM_API_KEY={DEEPGRAM_API_KEY}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.aiagency.rule=Host(`nexusplan.store`)" 
+      - "traefik.http.routers.aiagency.entrypoints=websecure"
+      - "traefik.http.routers.aiagency.tls=true"
+      - "traefik.http.services.aiagency.loadbalancer.server.port=80"
     ports:
-      - "5000:80"
-
-  postgres:
-    image: postgres:15
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  postgres_data:
+      - "5000:80"  
