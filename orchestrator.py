@@ -25,7 +25,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 
-
 class Orchestrator:
     def __init__(self):
         self.budget_manager = BudgetManager(total_budget=float(os.getenv("TOTAL_BUDGET", 50.0)))
@@ -77,7 +76,6 @@ class Orchestrator:
         self.best_roi_value = 0
         self.start_time = None
         self.last_revenue = 0
-
 
     def _init_db_pool(self):
         try:
@@ -366,130 +364,129 @@ class Orchestrator:
                 self.email_manager.send_campaign([lead["decision_maker_email"] for lead in leads], f"See your UGC: {video_result['url']}")
 
 
-    def run(self):
-        while self._get_total_revenue() < self.revenue_goal:
-            try:
-                if self.first_video_approved and self.budget_manager.get_remaining_budget() > 5:
-                    self._reinvest_profits()
-                    strategy = self._optimize_strategy()
-                    leads = self.acquisition_engine.genius_outreach(num_leads=50)
-                    account = asyncio.run(self.browser_agent.ensure_argil_account())
+        def run(self):
+            while self._get_total_revenue() < self.revenue_goal:
+                try:
+                    if self.first_video_approved and self.budget_manager.get_remaining_budget() > 5:
+                        self._reinvest_profits()
+                        strategy = self._optimize_strategy()
+                        leads = self.acquisition_engine.genius_outreach(num_leads=50)
+                        account = asyncio.run(self.browser_agent.ensure_argil_account())
 
-                    def call_lead(lead):
-                        if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
-                            return
-                        if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
-                            voice_result = self.voice_agent.handle_lead(lead)
-                            total_cost = voice_result["cost"]
-                            self.budget_manager.log_usage(
-                                input_tokens=500 if "innovated" in voice_result["strategy"] else 0,
-                                output_tokens=500 if "innovated" in voice_result["strategy"] else 0,
-                                additional_cost=total_cost
-                            )
-                            if voice_result["outcome"] == "completed":
-                                roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
-                                if self.db_pool:
-                                    with self.db_pool.getconn() as conn:
-                                        with conn.cursor() as cursor:
-                                            cursor.execute(
-                                                "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
-                                                "VALUES (%s, %s, %s, %s, %s, %s)",
-                                                (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
-                                            )
-                                        conn.commit()
-                                        self.db_pool.putconn(conn)
-                                self._send_status_update(f"${voice_result['context']['revenue']} from {lead['company']}!")
-                                if self.email_manager:
-                                    self.email_manager.send_contract(lead["email"])
+                        def call_lead(lead):
+                            if not self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
+                                return
+                            if not self.legal_agent.is_european(self.acquisition_engine.get_country_from_phone(lead["phone"])):
+                                voice_result = self.voice_agent.handle_lead(lead)
+                                total_cost = voice_result["cost"]
+                                self.budget_manager.log_usage(
+                                    input_tokens=500 if "innovated" in voice_result["strategy"] else 0,
+                                    output_tokens=500 if "innovated" in voice_result["strategy"] else 0,
+                                    additional_cost=total_cost
+                                )
+                                if voice_result["outcome"] == "completed":
+                                    roi = (voice_result["context"]["revenue"] - total_cost) / total_cost
+                                    if self.db_pool:
+                                        with self.db_pool.getconn() as conn:
+                                            with conn.cursor() as cursor:
+                                                cursor.execute(
+                                                    "INSERT INTO client_interactions (client_id, interaction_type, details, revenue, cost, roi) "
+                                                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                                                    (lead["email"], "voice", json.dumps(voice_result), voice_result["context"]["revenue"], total_cost, roi)
+                                                )
+                                            conn.commit()
+                                            self.db_pool.putconn(conn)
+                                    self._send_status_update(f"${voice_result['context']['revenue']} from {lead['company']}!")
+                                    if self.email_manager:
+                                        self.email_manager.send_contract(lead["email"])
 
-                    with ThreadPoolExecutor(max_workers=50) as executor:
-                        executor.map(call_lead, leads)
+                        with ThreadPoolExecutor(max_workers=50) as executor:
+                            executor.map(call_lead, leads)
 
-                time.sleep(300)
-                messages = self._poll_whatsapp_messages()
-                for msg, sender in messages:
-                    self._handle_whatsapp_command(msg, sender)
+                    time.sleep(300)
+                    messages = self._poll_whatsapp_messages()
+                    for msg, sender in messages:
+                        self._handle_whatsapp_command(msg, sender)
 
-            except Exception as e:
-                logging.error(f"Loop crashed: {str(e)}")
-                time.sleep(60)
+                except Exception as e:
+                    logging.error(f"Loop crashed: {str(e)}")
+                    time.sleep(60)
 
-    def handle_web_command(self, command: str) -> str:
-        if command == "begin":
-            self.start_time = time.time()
-            self.run_initial_campaign()
-            return "Started campaign—check WhatsApp or UI!"
-        elif command.startswith("call client"):
-            lead_email = command.split(" ")[-1]
-            leads = self.acquisition_engine.genius_outreach(num_leads=1)  # Fetch only one lead for efficiency
-            for lead in leads:
-                if lead["email"] == lead_email and self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
-                    self.voice_agent.handle_lead(lead)
-                    return f"Calling {lead_email}!"
-            return "Client not found or budget too low."
-        elif command == "call_me":
-            if self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
-                self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
-                return "Voice Agent calling you!"
-            return "Budget too low for test call."
-        else:
-            return "Unknown command—try 'begin', 'call_me', or 'call client email@example.com'"
+        def handle_web_command(self, command: str) -> str:
+            if command == "begin":
+                self.start_time = time.time()
+                self.run_initial_campaign()
+                return "Started campaign—check WhatsApp or UI!"
+            elif command.startswith("call client"):
+                lead_email = command.split(" ")[-1]
+                leads = self.acquisition_engine.genius_outreach(num_leads=1)  # Fetch only one lead for efficiency
+                for lead in leads:
+                    if lead["email"] == lead_email and self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
+                        self.voice_agent.handle_lead(lead)
+                        return f"Calling {lead_email}!"
+                return "Client not found or budget too low."
+            elif command == "call_me":
+                if self.budget_manager.can_afford(input_tokens=500, output_tokens=500, additional_cost=0.15):
+                    self.voice_agent.handle_lead({"email": "test@owner.com", "phone": self._extract_phone_number(self.my_whatsapp_number), "company": "Test", "industry": "Test", "pains": "Test"})
+                    return "Voice Agent calling you!"
+                return "Budget too low for test call."
+            else:
+                return "Unknown command—try 'begin', 'call_me', or 'call client email@example.com'"
 
-
-@app.route('/api/agent-status', methods=['GET'])
-def get_agent_status():
-    try:
-        return jsonify(orchestrator.get_status())
-    except Exception as e:
-        logging.error(f"Agent status failed: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/initialize', methods=['POST'])
-def initialize_agency():
-    try:
-        orchestrator.run_initial_campaign()
-        return jsonify({"message": "Agency initialized—check WhatsApp or UI!"})
-    except Exception as e:
-        logging.error(f"Init failed: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/send-command', methods=['POST'])
-def send_command():
-    try:
-        data = request.get_json()
-        agent = data.get("agent")
-        command = data.get("command")
-
-        if not agent or not command:
-            return jsonify({"error": "Missing agent or command"}), 400
-
-        if agent == "orchestrator":
-            result = orchestrator.handle_web_command(command)
-        elif agent == "voice_agent":
-            result = orchestrator.voice_agent.handle_web_command(command)  # Assuming voice_agent has a similar method
-        else:
-            return jsonify({"error": "Unknown agent"}), 400
-
-        logging.info(f"Sent command to {agent}: {command}")
-        return jsonify({"message": f"Command sent to {agent}", "result": result})
-
-    except Exception as e:
-        logging.error(f"Failed to send command: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    # Always return healthy to keep Traefik happy, log DB issues if any
-    if orchestrator.db_pool:
+    @app.route('/api/agent-status', methods=['GET'])
+    def get_agent_status():
         try:
-            with orchestrator.db_pool.getconn() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT 1")
-                orchestrator.db_pool.putconn(conn)
+            return jsonify(orchestrator.get_status())
         except Exception as e:
-            logging.error(f"DB health check failed: {str(e)}")
-    return jsonify({"status": "healthy"}), 200
+            logging.error(f"Agent status failed: {str(e)}")
+            return jsonify({"error": str(e)}), 500
 
-if __name__ == "__main__":
-    orchestrator = Orchestrator()
-    app.run(host="0.0.0.0", port=80)
+    @app.route('/api/initialize', methods=['POST'])
+    def initialize_agency():
+        try:
+            orchestrator.run_initial_campaign()
+            return jsonify({"message": "Agency initialized—check WhatsApp or UI!"})
+        except Exception as e:
+            logging.error(f"Init failed: {str(e)}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/api/send-command', methods=['POST'])
+    def send_command():
+        try:
+            data = request.get_json()
+            agent = data.get("agent")
+            command = data.get("command")
+
+            if not agent or not command:
+                return jsonify({"error": "Missing agent or command"}), 400
+
+            if agent == "orchestrator":
+                result = orchestrator.handle_web_command(command)
+            elif agent == "voice_agent":
+                result = orchestrator.voice_agent.handle_web_command(command)  # Assuming voice_agent has a similar method
+            else:
+                return jsonify({"error": "Unknown agent"}), 400
+
+            logging.info(f"Sent command to {agent}: {command}")
+            return jsonify({"message": f"Command sent to {agent}", "result": result})
+
+        except Exception as e:
+            logging.error(f"Failed to send command: {str(e)}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/health', methods=['GET'])
+    def health_check():
+        # Always return healthy to keep Traefik happy, log DB issues if any
+        if orchestrator.db_pool:
+            try:
+                with orchestrator.db_pool.getconn() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+                    orchestrator.db_pool.putconn(conn)
+            except Exception as e:
+                logging.error(f"DB health check failed: {str(e)}")
+        return jsonify({"status": "healthy"}), 200
+
+    if __name__ == "__main__":
+        orchestrator = Orchestrator()
+        app.run(host="0.0.0.0", port=80)
