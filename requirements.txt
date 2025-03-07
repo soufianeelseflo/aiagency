@@ -5,4 +5,5 @@ twilio==9.0.5  # Twilio integration
 requests==2.31.0  # HTTP requests
 playwright==1.44.0  # Browser automation
 deepgram-sdk==3.2.0  # Deepgram API
-elevenlabs==1.52.0  # ElevenLabs API, updated to latest stable version
+elevenlabs==1.52.0  # ElevenLabs API
+phonenumbers==8.13.31  # Phone number parsing for executor.py
