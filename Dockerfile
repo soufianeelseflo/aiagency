@@ -1,11 +1,11 @@
-# Step 1: Build the control panel (frontend) with Node.js
-FROM node:18 AS frontend
-WORKDIR /app
-COPY web_interface/frontend /app
+
+FROM node:18 as frontend
+WORKDIR /app/web_interface/frontend 
+COPY web_interface/frontend /app/web_interface/frontend 
 ENV REACT_APP_API_BASE_URL=/api
 RUN npm install && npm run build
 
-# Step 2: Build the robot’s brain (backend) with Python
+
 FROM python:3.11-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y \
