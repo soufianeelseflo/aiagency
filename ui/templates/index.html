@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>AI Agency Control Panel</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        button {
+            padding: 10px;
+            margin: 5px;
+        }
+
+        .video-container {
+            margin-top: 20px;
+        }
+
+        video {
+            width: 300px;
+            margin: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>AI Agency Control Panel</h1>
+    <button onclick="startSimulatedCall()">Test Voice Agent</button>
+    <button onclick="getTestVideos()">View Test Videos</button>
+    <button onclick="approveAgency()">Approve Agency</button>
+    <div id="call-result"></div>
+    <div id="videos" class="video-container"></div>
+    <script>
+        async function startSimulatedCall() {
+            const clientId = prompt("Enter client ID (or leave blank for 'test_client')") || "test_client";
+            const response = await fetch('/api/start_simulated_call', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client_id: clientId })
+            });
+            const data = await response.json();
+            document.getElementById('call-result').innerText = data.result || data.error;
+        }
+
+        async function getTestVideos() {
+            const response = await fetch('/api/get_test_videos');
+            const data = await response.json();
+            const videosDiv = document.getElementById('videos');
+            videosDiv.innerHTML = '';
+            data.videos.forEach(video => {
+                const vid = document.createElement('video');
+                vid.src = video;
+                vid.controls = true;
+                videosDiv.appendChild(vid);
+            });
+        }
+
+        async function approveAgency() {
+            await fetch('/api/approve_agency', { method: 'POST' });
+            alert('Agency approved for full operation!');
+        }
+    </script>
+</body>
+
+</html>

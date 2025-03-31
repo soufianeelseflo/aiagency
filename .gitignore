@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.so
+.env
+.env.local
+venv/
+*.log
+*.sqlite
+invoices/
+screenshots/
+visualizations/
+images/
+*.db
