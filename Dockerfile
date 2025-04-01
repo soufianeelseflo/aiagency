@@ -2,8 +2,9 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies for Playwright and other libraries
+# Install system dependencies for Playwright, curl, and other libraries
 RUN apt-get update && apt-get install -y \
+    curl \
     libnss3 \
     libatk-bridge2.0-0 \
     libxkbcommon0 \
@@ -33,6 +34,9 @@ COPY . .
 
 # Expose port
 EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 CMD curl -f http://localhost:5000 || exit 1
 
 # Command to run the application
 CMD ["python", "main.py"]

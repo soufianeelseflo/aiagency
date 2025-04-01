@@ -60,3 +60,14 @@ class EmailLog(Base):
     client_id = Column(Integer, ForeignKey('clients.id'))
     timestamp = Column(DateTime, default=lambda: datetime.now(pytz.UTC))
     status = Column(String)  # e.g., 'sent', 'responded'
+
+class Account(Base):
+    __tablename__ = 'accounts'
+    id = Column(Integer, primary_key=True)
+    service = Column(String)
+    email = Column(String)
+    password = Column(String)
+    api_key = Column(String)
+    phone = Column(String)
+    cookies = Column(Text)  # JSON-encoded
+    created_at = Column(DateTime, default=datetime.utcnow)

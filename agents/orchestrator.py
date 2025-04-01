@@ -539,18 +539,17 @@ class Orchestrator:
             await self.initialize_database()
             await self.initialize_agents()
             
-            # Run testing phase and auto-approve if successful
             await self.start_testing_phase()
             self.approved = True
             logger.info("Testing phase completed successfully. Agency approved for full operation.")
             
-            # Background tasks
             boost_task = asyncio.create_task(self.adjust_concurrency())
             monitor_task = asyncio.create_task(self.monitor_agents())
             sandbox_task = asyncio.create_task(self.manage_sandbox())
             cleanup_task = asyncio.create_task(self.cleanup_old_logs())
+            reuse_task = asyncio.create_task(self.agents['browsing'].reuse_accounts_periodically())
             agent_tasks = [asyncio.create_task(agent.run()) for agent in self.agents.values()]
-            await asyncio.gather(*agent_tasks, boost_task, monitor_task, sandbox_task, cleanup_task)
+            await asyncio.gather(*agent_tasks, boost_task, monitor_task, sandbox_task, cleanup_task, reuse_task)
         except Exception as e:
             logger.error(f"Agency run failed: {e}")
             await self.report_error("Orchestrator", str(e))

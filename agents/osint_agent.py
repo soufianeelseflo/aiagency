@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import random
@@ -776,6 +777,41 @@ class OSINTAgent:
                 vulnerabilities.extend(device['vulns'])
                 risk_score += len(device['vulns']) * 10  # Weighted risk
         return {"vulnerabilities": list(set(vulnerabilities)), "risk_score": min(risk_score, 100)}
+    
+    async def run_reconng(self, target):
+        """Run Recon-ng for free OSINT data collection."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["recon-ng", "-m", "recon/domains-hosts/hackertarget", "-o", f"TARGET={target}", "-e"],
+                capture_output=True, text=True, timeout=300
+            )
+            output = result.stdout
+            logger.info(f"Recon-ng output for {target}: {output}")
+            return {"reconng": output}
+        except Exception as e:
+            logger.error(f"Recon-ng failed for {target}: {e}")
+            return {"error": str(e)}
+
+    async def run_osint_workflow(self, target, tools):
+        logger.info(f"Starting OSINT workflow for target: {target} with tools: {tools}")
+        data_id = await self.collect_data(target, tools)
+        if data_id:
+            logger.info(f"Data collected for {target}, proceeding to analysis (ID: {data_id})")
+            await self.analyze_data(data_id)
+            if 'reconng' in tools:
+                reconng_data = await self.run_reconng(target)
+                async with self.session_maker() as session:
+                    osint_data = await session.get(OSINTData, data_id)
+                    raw_data = json.loads(osint_data.raw_data)
+                    raw_data.update(reconng_data)
+                    osint_data.raw_data = json.dumps(raw_data)
+                    await session.commit()
+            logger.info(f"Analysis completed for {target}, proceeding to visualization")
+            await self.visualize_data(data_id)
+            logger.info(f"Visualization completed for {target}, workflow finished")
+        else:
+            logger.warning(f"Data collection failed for {target}, workflow aborted")
 
     async def run_maltego_visualization(self, raw_data, analysis_results):
         """Generate a Maltego graph from raw OSINT data and analysis results."""
@@ -856,8 +892,17 @@ class OSINTAgent:
         self.tool_success_rates[tool] = min(max(new_rate, 0), 1)
         logger.info(f"Updated success rate for {tool}: {self.tool_success_rates[tool]}")
 
+    async def run_shodan_web(self, target):
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(f"https://www.shodan.io/search?query={target}", wait_until="networkidle")
+            results = await page.content()
+            await browser.close()
+            return {"html": results}
+
+    @retry(stop=stop_after_attempt(50), wait=wait_exponential(multiplier=1, min=5, max=60))
     async def run_osint_workflow(self, target, tools):
-        """Orchestrate a full OSINT workflow with real-time adaptability."""
         logger.info(f"Starting OSINT workflow for target: {target} with tools: {tools}")
         data_id = await self.collect_data(target, tools)
         if data_id:

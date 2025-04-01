@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import random
@@ -74,6 +75,8 @@ class BrowsingAgent:
         self.proxy_pool = []
         self._initialize_proxy_pool()
         self.proxy_service_usage = {}
+        self.openrouter_client = None
+        self.deepseek_client = None 
 
     async def generate_test_videos(self, industries):
         """Generate mock video URLs for testing."""
@@ -227,6 +230,7 @@ class BrowsingAgent:
         except Exception:
             return False
         return False
+    
 
     async def infer_signup_steps(self, service_url):
         prompt = f"""
@@ -259,23 +263,43 @@ class BrowsingAgent:
                 logger.warning(f"Failed to infer steps with {client.base_url}: {e}")
         raise Exception("All clients failed to infer signup steps.")
 
-    async def create_account(self, service_url):
-        """Create an account for any service with adaptive learning."""
-        # Extract domain name to use as service identifier for caching/strategy
-        try:
-            service = service_url.split('//')[-1].split('/')[0].replace('www.', '')
-        except Exception:
-            logger.error(f"Could not extract domain from service_url: {service_url}")
-            service = service_url # Fallback
 
+    async def _store_account(self, service, email, password, api_key, phone, cookies=None):
+        """Store account details securely in PostgreSQL."""
+        encrypted_password = encrypt_data(password)
+        encrypted_api_key = encrypt_data(api_key) if api_key else None
+        encrypted_phone = encrypt_data(phone) if phone else None
+        async with self.session_maker() as session:
+            await session.execute("""
+                INSERT INTO accounts (service, email, password, api_key, phone, cookies, created_at)
+                VALUES (:service, :email, :password, :api_key, :phone, :cookies, :created_at)
+                ON CONFLICT (service, email) DO UPDATE SET
+                    password = EXCLUDED.password,
+                    api_key = EXCLUDED.api_key,
+                    phone = EXCLUDED.phone,
+                    cookies = EXCLUDED.cookies
+            """, {
+                "service": service,
+                "email": email,
+                "password": encrypted_password,
+                "api_key": encrypted_api_key,
+                "phone": encrypted_phone,
+                "cookies": json.dumps(cookies) if cookies else None,
+                "created_at": datetime.utcnow()
+            })
+            await session.commit()
+            logger.info(f"Stored account for {service} with email {email}")
+
+
+    async def create_account(self, service_url):
+        """Create an account for any service with adaptive learning and cookie storage."""
+        service = service_url.split('//')[-1].split('/')[0].replace('www.', '')
         while self.active_browsers >= self.get_allowed_concurrency():
             await asyncio.sleep(1)
 
         async with self.browser_semaphore:
             self.active_browsers += 1
-            strategy_id = None # Initialize strategy_id
-            proxy = await self.get_next_proxy(service) # Pass service for cooldown
-            # Track proxy cost
+            proxy = await self.get_next_proxy(service)
             proxy_cost = 0.01
             await self.orchestrator.agents['budget'].track_expense(
                 proxy_cost, "Proxy", f"Proxy cost for creating account on {service}"
@@ -287,102 +311,98 @@ class BrowsingAgent:
                     'username': proxy['username'],
                     'password': proxy['password']
                 })
-                context = await browser.new_context(user_agent=fake.user_agent()) # Add user agent spoofing
+                context = await browser.new_context(user_agent=fake.user_agent())
                 page = await context.new_page()
-                phone = None # Initialize phone variable
+                phone = None
 
                 try:
-                    # Generate credentials
-                    email = await self._get_temporary_email(page, service) # Pass service for caching context
+                    email = await self._get_temporary_email(page, service)
                     password = fake.password(length=12, special_chars=True)
                     name = fake.name()
 
-                    # Load or infer strategy
                     loaded_strategies = await self.load_strategies(service)
                     if loaded_strategies and loaded_strategies[0]['success_rate'] > 0.5:
-                         steps = loaded_strategies[0]['steps']
-                         strategy_id = loaded_strategies[0]['id']
-                         logger.info(f"Using loaded strategy (ID: {strategy_id}) for {service}")
+                        steps = loaded_strategies[0]['steps']
+                        strategy_id = loaded_strategies[0]['id']
+                        logger.info(f"Using loaded strategy (ID: {strategy_id}) for {service}")
                     else:
-                        logger.info(f"Inferring new strategy for {service}")
                         steps = await self.infer_signup_steps(service_url)
-                        if not steps: # Handle inference failure
-                            raise Exception(f"Failed to infer signup steps for {service_url}")
-                        strategy_id = await self.save_strategy(service, steps, 1.0) # Save newly inferred strategy
+                        strategy_id = await self.save_strategy(service, steps, 1.0)
                         logger.info(f"Saved new strategy (ID: {strategy_id}) for {service}")
 
-                    # Execute steps
                     for step in steps:
                         logger.info(f"Executing step for {service}: {step['action']}")
-                        try:
-                            if step['action'] == 'navigate':
-                                await page.goto(step['url'], wait_until='networkidle', timeout=60000)
-                            elif step['action'] == 'type':
-                                value_to_type = {'email': email, 'password': password, 'name': name}.get(step.get('field'), step.get('value'))
-                                if value_to_type is None:
-                                     logger.warning(f"No value found for step: {step}")
-                                     continue
-                                await page.fill(step['selector'], value_to_type, timeout=30000)
-                            elif step['action'] == 'click':
-                                await page.click(step['selector'], timeout=30000)
+                        if step['action'] == 'navigate':
+                            await page.goto(step['url'], wait_until='networkidle', timeout=60000)
+                        elif step['action'] == 'type':
+                            value = {'email': email, 'password': password, 'name': name}.get(step.get('field'), step.get('value'))
+                            if value:
+                                await page.fill(step['selector'], value, timeout=30000)
+                        elif step['action'] == 'click':
+                            await page.click(step['selector'], timeout=30000)
+                        await asyncio.sleep(random.uniform(1.5, 3.0))
 
-                            await asyncio.sleep(random.uniform(1.5, 3.0)) # Slightly longer human-like delay
-                            await self.log_attempt(service, json.dumps(step), True) # Log step success
-
-                        except Exception as e:
-                            await self.log_attempt(service, json.dumps(step), False) # Log step failure
-                            logger.error(f"Step failed for {service}: {step} - {e}")
-                            raise Exception(f"Step {step.get('action', 'unknown')} failed: {e}") # Re-raise to fail account creation
-
-                    # Handle verification dynamically based on the last step's flags
                     last_step = steps[-1]
-                    if last_step.get('requires_verification'):
-                        verification_type = last_step.get('type')
-                        verification_selector = last_step.get('verification_selector')
-                        submit_selector = 'button[type="submit"], input[type="submit"], button:contains("Verify"), button:contains("Confirm")' # Common submit selectors
+                    if last_step.get('requires_verification') and last_step.get('verification_selector'):
+                        if last_step.get('type') == 'email':
+                            code = await self._get_email_verification_code(page, email)
+                            await page.fill(last_step['verification_selector'], code)
+                            await page.click('button[type="submit"]')
+                        elif last_step.get('type') == 'phone':
+                            phone = await self._get_temporary_phone_number(page)
+                            sms_code = await self._get_sms_code(page, phone)
+                            await page.fill(last_step['verification_selector'], sms_code)
+                            await page.click('button[type="submit"]')
 
-                        if not verification_selector:
-                             logger.error(f"Verification required but no verification_selector defined for service {service}")
-                             raise Exception("Missing verification selector in strategy")
-
-                        if verification_type == 'email':
-                            logger.info(f"Attempting email verification for {service}")
-                            code = await self._get_email_verification_code(page, email) # Re-use page
-                            await page.fill(verification_selector, code)
-                            await page.click(submit_selector) # Click generic submit
-                            logger.info(f"Email verification submitted for {service}")
-                        elif verification_type == 'phone':
-                            logger.info(f"Attempting phone verification for {service}")
-                            phone = await self._get_temporary_phone_number(page) # Re-use page
-                            # Assume phone number input field was handled in steps, just need code
-                            sms_code = await self._get_sms_code(page, phone) # Re-use page
-                            await page.fill(verification_selector, sms_code)
-                            await page.click(submit_selector) # Click generic submit
-                            logger.info(f"Phone verification submitted for {service}")
-                        else:
-                             logger.warning(f"Unknown verification type '{verification_type}' for service {service}")
-                             # Proceed without verification if type is unknown/missing
-
-                        await asyncio.sleep(random.uniform(2, 4)) # Wait after verification submit
-
-                    # Extract API key (if applicable/possible) - Best effort
-                    api_key = await self._extract_api_key(page, service) # Re-use page
-
-                    # Store account details
-                    await self._store_account(service, email, password, api_key, phone) # Pass phone if obtained
-                    if strategy_id: await self.update_strategy_success(strategy_id, True)
+                    api_key = await self._extract_api_key(page, service)
+                    cookies = await context.cookies()
+                    await self._store_account(service, email, password, api_key, phone, cookies)
+                    if strategy_id:
+                        await self.update_strategy_success(strategy_id, True)
                     logger.info(f"Successfully created account for {service} with email {email}")
                     return {'email': email, 'api_key': api_key}
 
                 except Exception as e:
-                    if strategy_id: await self.update_strategy_success(strategy_id, False)
+                    if strategy_id:
+                        await self.update_strategy_success(strategy_id, False)
                     logger.error(f"Account creation failed for {service_url}: {e}", exc_info=True)
-                    # Don't re-raise here, let finally block handle cleanup
-                    return None # Indicate failure
+                    return None
                 finally:
                     self.active_browsers -= 1
                     await browser.close()
 
+    async def reuse_accounts(self):
+        """Check for services with monthly credit resets and reuse accounts."""
+        async with self.session_maker() as session:
+            accounts = await session.execute("SELECT * FROM accounts WHERE service IN ('spiderfoot.net', 'shodan.io')")
+            for account in accounts:
+                service = account['service']
+                email = account['email']
+                created_at = account['created_at']
+                now = datetime.utcnow()
+                if (now - created_at).days >= 30:  # Monthly reset check
+                    logger.info(f"Credits likely reset for {service} account {email}")
+                    await self.orchestrator.send_notification(
+                        "Credit Reset",
+                        f"Time to reuse {service} account {email} - credits may have reset!"
+                    )
+                    # Reuse the account by passing cookies if available
+                    if account['cookies']:
+                        async with async_playwright() as p:
+                            browser = await p.chromium.launch(headless=True)
+                            context = await browser.new_context()
+                            await context.add_cookies(json.loads(account['cookies']))
+                            page = await context.new_page()
+                            await page.goto(f"https://{service}", wait_until='networkidle')
+                            logger.info(f"Reused {service} account {email} with stored cookies")
+                            await browser.close()
+
+    async def reuse_accounts_periodically(self):
+        """Periodically check and reuse accounts with reset credits."""
+        while True:
+            await self.reuse_accounts()
+            await asyncio.sleep(86400)  # Daily check
+            
     async def _get_cached_email(self, service):
         """Retrieve a cached email if available."""
         async with self.session_maker() as session:
@@ -555,21 +575,35 @@ class BrowsingAgent:
         logger.info(f"Acquired API key for {service_url}: {api_key}")
         return api_key
 
-    async def _store_account(self, service, email, password, api_key, phone):
-        """Store account details in PostgreSQL."""
-        async with self.session_maker() as session:
-            await session.execute("""
-                INSERT INTO accounts (service, email, password, api_key, phone, created_at)
-                VALUES (:service, :email, :password, :api_key, :phone, :created_at)
-            """, {
-                "service": service,
-                "email": email,
-                "password": password,
-                "api_key": api_key,
-                "phone": phone,
-                "created_at": int(time.time())
-            })
-            await session.commit()
+    async def check_recurring_credits(self):
+        """Check for recurring credit resets and notify agents."""
+        while True:
+            try:
+                async with self.session_maker() as session:
+                    one_month_ago = datetime.utcnow() - timedelta(days=30)
+                    result = await session.execute(
+                        "SELECT service, email, api_key FROM accounts WHERE is_recurring = TRUE AND created_at < :threshold",
+                        {"threshold": one_month_ago}
+                    )
+                    accounts = result.fetchall()
+                    for service, email, api_key in accounts:
+                        agent_name = self.get_agent_for_service(service)
+                        if agent_name and agent_name in self.agents:
+                            await self.agents[agent_name].notify_recurring_account(service, email, api_key)
+                            logger.info(f"Notified {agent_name} of recurring account for {service}: {email}")
+                            await self.send_notification(
+                                "Recurring Credits Available",
+                                f"Account for {service} with email {email} has refreshed credits."
+                            )
+                    await session.execute(
+                        "UPDATE accounts SET created_at = :now WHERE is_recurring = TRUE AND created_at < :threshold",
+                        {"now": datetime.utcnow(), "threshold": one_month_ago}
+                    )
+                    await session.commit()
+                await asyncio.sleep(86400)  # Check daily
+            except Exception as e:
+                logger.error(f"Recurring credits check failed: {e}")
+                await asyncio.sleep(3600)
 
     async def monitor_credits(self, services):
         """Monitor credits and rotate accounts when drained."""
@@ -602,9 +636,9 @@ class BrowsingAgent:
                     # Optionally close the failed page context?
 
             if not pages:
-                 logger.error("Failed to initialize any monitoring pages. Exiting monitor_credits.")
-                 await browser.close()
-                 return
+                logger.error("Failed to initialize any monitoring pages. Exiting monitor_credits.")
+                await browser.close()
+                return
 
             while True: # Continuous monitoring loop
                 await asyncio.sleep(random.uniform(280, 320)) # Check roughly every 5 minutes
@@ -633,14 +667,14 @@ class BrowsingAgent:
                         # Process credit value
                         credit_value = 0.0
                         if credit_value_str != "Unknown":
-                             try:
-                                 # Extract numeric value, handling currency symbols etc.
-                                 numeric_part = ''.join(filter(lambda x: x.isdigit() or x == '.', credit_value_str))
-                                 if numeric_part:
-                                     credit_value = float(numeric_part)
-                                 else: credit_value = 0.0 # Treat non-numeric as zero
-                             except ValueError:
-                                 credit_value = 0.0 # Treat parsing errors as zero
+                            try:
+                                # Extract numeric value, handling currency symbols etc.
+                                numeric_part = ''.join(filter(lambda x: x.isdigit() or x == '.', credit_value_str))
+                                if numeric_part:
+                                    credit_value = float(numeric_part)
+                                else: credit_value = 0.0 # Treat non-numeric as zero
+                            except ValueError:
+                                credit_value = 0.0 # Treat parsing errors as zero
 
                         logger.info(f"Credits check for {service}: Found '{credit_value_str}', Parsed as {credit_value}")
 
@@ -673,8 +707,8 @@ class BrowsingAgent:
                             # logger.info(f"Credits OK for {service}: {credit_value}")
 
                     except PlaywrightTimeoutError:
-                         logger.error(f"Timeout during credit check/navigation for {service}. Page might be stuck.")
-                         # Consider closing and reopening the page/context for this service
+                        logger.error(f"Timeout during credit check/navigation for {service}. Page might be stuck.")
+                        # Consider closing and reopening the page/context for this service
                     except Exception as e:
                         logger.error(f"Unexpected error during credit check for {service}: {e}", exc_info=True)
                         # Consider removing the service from monitoring if errors persist

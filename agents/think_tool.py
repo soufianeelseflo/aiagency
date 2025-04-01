@@ -23,6 +23,9 @@ class ThinkTool:
         You are a genius-level AI designed to enhance the decision-making and reliability of other agents in an AI agency targeting rapid growth and extreme profitability ($6,000 in 24 hours, $100M in 9 months). Your role is to reflect on tasks, validate outputs, and solve challenges efficiently. Prioritize accuracy, cost-saving, and high-ROI actions. Adapt to dynamic situations, minimize risks, and ensure compliance with agency rules. Be resourceful, decisive, and transparent in your reasoning.
         """
 
+
+
+    @retry(stop=stop_after_attempt(50), wait=wait_exponential(multiplier=1, min=5, max=60))
     async def reflect_on_action(self, context, agent_name, task_description):
         for client, model in self.clients_models:
             try:
@@ -47,12 +50,10 @@ class ThinkTool:
                 return reflection
             except Exception as e:
                 logger.warning(f"Failed to use {client.base_url} with model {model}: {e}")
-        logger.error("All clients failed for reflect_on_action")
-        return {
-            "proceed": True,
-            "reason": "All API clients failed; proceeding with default action",
-            "next_step": "Continue with caution"
-        }
+                if client.base_url == "https://openrouter.ai/api/v1" and model == self.config.OPENROUTER_MODELS['think']:
+                    continue  # Keep trying OpenRouter until 50 retries
+                raise  # Switch to DeepSeek-R1 after 50 OpenRouter fails
+        raise Exception("All clients failed after 50 retries")
 
     async def validate_output(self, output, expected_format, agent_name):
         """Validate if an agent's output meets the expected criteria."""
