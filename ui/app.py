@@ -32,6 +32,19 @@ async def get_test_videos():
         logger.error(f"Video generation error: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/test_osint_scrape', methods=['POST'])
+async def test_osint_scrape():
+    try:
+        await orchestrator.agents['osint'].request_osint_task(
+            'collect_data', 
+            target='UGC agencies 2025', 
+            tools=['theHarvester', 'Sherlock']
+        )
+        return jsonify({"status": "OSINT scrape initiated"})
+    except Exception as e:
+        logger.error(f"OSINT scrape test failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/approve_agency', methods=['POST'])
 async def approve_agency():
     try:
@@ -80,3 +93,18 @@ async def suggest():
 
 if __name__ == "__main__":
     asyncio.run(app.run(host='0.0.0.0', port=5000))
+
+@app.route('/api/download_data', methods=['POST'])
+async def download_data():
+    data = await request.get_json()
+    password = data.get('password')
+    if password != os.getenv("DOWNLOAD_PASSWORD", "securepassword"):
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        db_path = '/app/database.db'  # Update path if using PostgreSQL
+        if not os.path.exists(db_path):
+            raise FileNotFoundError("Database file not found")
+        return await send_file(db_path, as_attachment=True, download_name="agency_data.db")
+    except Exception as e:
+        logger.error(f"Data download failed: {e}")
+        return jsonify({"error": str(e)}), 500

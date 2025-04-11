@@ -77,6 +77,20 @@ class BrowsingAgent:
         self.proxy_service_usage = {}
         self.openrouter_client = None
         self.deepseek_client = None 
+        self.required_services = ['shodan.io', 'maltego.com', 'openrouter.ai']
+        asyncio.create_task(self.check_and_create_api_keys())
+
+    async def check_and_create_api_keys(self):
+        """Check for missing API keys and queue creation tasks."""
+        async with self.session_maker() as session:
+            for service in self.required_services:
+                result = await session.execute(
+                    "SELECT COUNT(*) FROM accounts WHERE service = :service AND api_key IS NOT NULL",
+                    {"service": service}
+                )
+                if result.scalar() == 0:
+                    await self.task_queue.put({'service_url': f"https://{service}"})
+                    logger.info(f"Queued API key creation for {service}")
 
     async def generate_test_videos(self, industries):
         """Generate mock video URLs for testing."""
@@ -265,73 +279,98 @@ class BrowsingAgent:
 
 
     async def _store_account(self, service, email, password, api_key, phone, cookies=None):
-        """Store account details securely in PostgreSQL."""
-        encrypted_password = encrypt_data(password)
-        encrypted_api_key = encrypt_data(api_key) if api_key else None
-        encrypted_phone = encrypt_data(phone) if phone else None
+        """Store account details securely in Vault."""
+        vault_path = f"secret/data/accounts/{service}/{email}"
+        self.orchestrator.secure_storage.set_secret(
+            path=vault_path,
+            data={
+                "api_key": api_key,
+                "password": password,
+                "phone": phone or "",
+                "cookies": json.dumps(cookies) if cookies else ""
+            }
+        )
         async with self.session_maker() as session:
             await session.execute("""
-                INSERT INTO accounts (service, email, password, api_key, phone, cookies, created_at)
-                VALUES (:service, :email, :password, :api_key, :phone, :cookies, :created_at)
+                INSERT INTO accounts (service, email, vault_path, created_at)
+                VALUES (:service, :email, :vault_path, :created_at)
                 ON CONFLICT (service, email) DO UPDATE SET
-                    password = EXCLUDED.password,
-                    api_key = EXCLUDED.api_key,
-                    phone = EXCLUDED.phone,
-                    cookies = EXCLUDED.cookies
+                    vault_path = EXCLUDED.vault_path
             """, {
                 "service": service,
                 "email": email,
-                "password": encrypted_password,
-                "api_key": encrypted_api_key,
-                "phone": encrypted_phone,
-                "cookies": json.dumps(cookies) if cookies else None,
+                "vault_path": vault_path,
                 "created_at": datetime.utcnow()
             })
             await session.commit()
-            logger.info(f"Stored account for {service} with email {email}")
+        logger.info(f"Stored account for {service} with email {email} in Vault at {vault_path}")
+
+    async def get_api_key(self, service, email):
+        """Fetch an API key from Vault using the stored path."""
+        async with self.session_maker() as session:
+            result = await session.execute(
+                "SELECT vault_path FROM accounts WHERE service = :service AND email = :email",
+                {"service": service, "email": email}
+            )
+            row = result.fetchone()
+            if row:
+                vault_path = row[0]
+                return self.orchestrator.secure_storage.get_secret(vault_path, "api_key")
+            logger.warning(f"No API key found for {service}/{email}")
+            return None
 
 
     async def create_account(self, service_url):
-        """Create an account for any service with adaptive learning and cookie storage."""
+        """Create an account with intelligent scaling and analysis."""
         service = service_url.split('//')[-1].split('/')[0].replace('www.', '')
-        while self.active_browsers >= self.get_allowed_concurrency():
-            await asyncio.sleep(1)
+        today_count = await self.get_today_account_count(service)
+        
+        # Dynamic cap adjustment via ThinkTool
+        prompt = f"""
+        {self.meta_prompt}
+        Service: {service}
+        Today’s account count: {today_count}
+        Success rate: {self.provider_success_rates['email'].get('https://inboxes.com', 1.0)}
+        Budget remaining: {await self.orchestrator.agents['budget'].get_budget_status()['remaining_budget']}
+        Adjust daily cap (default 50) based on success rate and budget.
+        Return JSON: {{'new_cap': int}}
+        """
+        cap_response = await self.think_tool.reflect_on_action(prompt, "BrowsingAgent", "Adjust account creation cap")
+        new_cap = json.loads(cap_response).get('new_cap', 50)
+        
+        if today_count >= new_cap:
+            logger.info(f"Adjusted cap reached for {service}: {today_count}/{new_cap}")
+            return None
 
         async with self.browser_semaphore:
             self.active_browsers += 1
             proxy = await self.get_next_proxy(service)
-            proxy_cost = 0.01
-            await self.orchestrator.agents['budget'].track_expense(
-                proxy_cost, "Proxy", f"Proxy cost for creating account on {service}"
-            )
-
             async with async_playwright() as p:
+                fingerprint = {
+                    'user_agent': fake.user_agent(),
+                    'viewport': {'width': random.randint(1280, 1920), 'height': random.randint(720, 1080)},
+                    'screen': {'width': random.randint(1366, 2560), 'height': random.randint(768, 1440)}
+                }
                 browser = await p.chromium.launch(headless=True, proxy={
                     'server': f"http://{proxy['server']}",
                     'username': proxy['username'],
                     'password': proxy['password']
                 })
-                context = await browser.new_context(user_agent=fake.user_agent())
+                context = await browser.new_context(**fingerprint)
                 page = await context.new_page()
+                strategy_id = None 
                 phone = None
 
                 try:
                     email = await self._get_temporary_email(page, service)
                     password = fake.password(length=12, special_chars=True)
                     name = fake.name()
+                    phone = None 
 
-                    loaded_strategies = await self.load_strategies(service)
-                    if loaded_strategies and loaded_strategies[0]['success_rate'] > 0.5:
-                        steps = loaded_strategies[0]['steps']
-                        strategy_id = loaded_strategies[0]['id']
-                        logger.info(f"Using loaded strategy (ID: {strategy_id}) for {service}")
-                    else:
-                        steps = await self.infer_signup_steps(service_url)
-                        strategy_id = await self.save_strategy(service, steps, 1.0)
-                        logger.info(f"Saved new strategy (ID: {strategy_id}) for {service}")
+                    steps = await self.infer_signup_steps(service_url)
+                    strategy_id = await self.save_strategy(service, steps, 1.0)
 
                     for step in steps:
-                        logger.info(f"Executing step for {service}: {step['action']}")
                         if step['action'] == 'navigate':
                             await page.goto(step['url'], wait_until='networkidle', timeout=60000)
                         elif step['action'] == 'type':
@@ -340,32 +379,22 @@ class BrowsingAgent:
                                 await page.fill(step['selector'], value, timeout=30000)
                         elif step['action'] == 'click':
                             await page.click(step['selector'], timeout=30000)
-                        await asyncio.sleep(random.uniform(1.5, 3.0))
-
-                    last_step = steps[-1]
-                    if last_step.get('requires_verification') and last_step.get('verification_selector'):
-                        if last_step.get('type') == 'email':
-                            code = await self._get_email_verification_code(page, email)
-                            await page.fill(last_step['verification_selector'], code)
-                            await page.click('button[type="submit"]')
-                        elif last_step.get('type') == 'phone':
-                            phone = await self._get_temporary_phone_number(page)
-                            sms_code = await self._get_sms_code(page, phone)
-                            await page.fill(last_step['verification_selector'], sms_code)
-                            await page.click('button[type="submit"]')
+                        await asyncio.sleep(random.uniform(60, 300))
 
                     api_key = await self._extract_api_key(page, service)
                     cookies = await context.cookies()
                     await self._store_account(service, email, password, api_key, phone, cookies)
-                    if strategy_id:
-                        await self.update_strategy_success(strategy_id, True)
-                    logger.info(f"Successfully created account for {service} with email {email}")
+                    await self.update_strategy_success(strategy_id, True)
+                    logger.info(f"Created account for {service} with email {email}")
+                    
+                    # Track proxy cost
+                    await self.orchestrator.agents['budget'].track_expense(
+                        0.01, "Proxy", f"Proxy usage for {service} account creation"
+                    )
                     return {'email': email, 'api_key': api_key}
-
                 except Exception as e:
-                    if strategy_id:
-                        await self.update_strategy_success(strategy_id, False)
-                    logger.error(f"Account creation failed for {service_url}: {e}", exc_info=True)
+                    await self.update_strategy_success(strategy_id, False)
+                    logger.error(f"Account creation failed for {service_url}: {e}")
                     return None
                 finally:
                     self.active_browsers -= 1
@@ -824,15 +853,44 @@ class BrowsingAgent:
                     await browser.close()
 
     async def run(self):
-        """Run the BrowsingAgent to monitor credits and create accounts as needed."""
-        services = ['deepgram', 'twilio', 'argil.ai', 'heygen', 'descript']  # Core services for your agency
-        num_browsers = min(5, len(services))  # Cap at 5 browsers to respect VPS limits
-        browser_tasks = []
-        for i in range(num_browsers):
-            browser_services = services[i::num_browsers]  # Evenly distribute services
-            task = asyncio.create_task(self.monitor_credits(browser_services))
-            browser_tasks.append(task)
-        await asyncio.gather(*browser_tasks)
+        """Run the BrowsingAgent with intelligent account management."""
+        while True:
+            try:
+                today = datetime.utcnow().date()
+                async with self.session_maker() as session:
+                    count = await session.execute(
+                        "SELECT COUNT(*) FROM accounts WHERE service = 'openrouter.ai' AND created_at::date = :today",
+                        {"today": today}
+                    )
+                    accounts_today = count.scalar() or 0
+                    budget_status = await self.orchestrator.agents['budget'].get_budget_status()
+                    if accounts_today < 50 and budget_status['remaining_budget'] > 5.0:
+                        task = await self.task_queue.get()
+                        await self.process_queue()
+                    else:
+                        logger.info(f"Daily cap or budget limit reached: {accounts_today}/50, Budget: ${budget_status['remaining_budget']:.2f}")
+                        await asyncio.sleep(3600)
+            except Exception as e:
+                logger.error(f"Run loop failed: {e}")
+                await asyncio.sleep(60)
+
+    async def process_queue(self):
+        while True:
+            task = await self.task_queue.get()
+            try:
+                service_url = task.get('service_url', task.get('service', ''))
+                if not service_url:
+                    logger.error(f"Invalid task: {task}")
+                    continue
+                result = await self.create_account(service_url)
+                if result:
+                    await self.orchestrator.report_account_created(service_url.split('//')[-1].split('/')[0], result)
+                self._update_provider_success(service_url, bool(result))
+            except Exception as e:
+                logger.error(f"Task failed for {service_url}: {str(e)}")
+                await self.orchestrator.report_error("BrowsingAgent", str(e))
+            finally:
+                self.task_queue.task_done()
 
     async def process_task(self, task):
         """Process a task with error handling."""

@@ -42,10 +42,11 @@ class VoiceSalesAgent:
 
         # Genius-level meta-prompt for precision and compliance
         self.meta_prompt = """
-        You are an elite voice sales agent aiming for $6,000 in 24 hours and $100M in 9 months, targeting only USA clients.
-        Funds are routed to Morocco. Employ consultative selling with psychology, empathy, and strategic questioning.
-        Maintain a confident, adaptive tone—never pushy. Exclude Europe entirely.
-        Ensure full compliance with CCPA and Moroccan financial laws.
+        You are a voice sales agent for UGC Genius, an AI-powered agency helping USA businesses scale content, with funds routed to Morocco.
+        Your goal is to close deals starting at $5,000. Use consultative selling, empathy, and strategic questioning to build trust.
+        Never sound pushy or robotic. If asked about AI or credentials, say: 'I’m part of a cutting-edge team using AI to deliver top-tier UGC services.
+        We’re all about results—check out our portfolio or let’s hop on a quick call to discuss your needs.'
+        Ensure compliance with USA and Moroccan laws.
         """
 
         self.target_country = "USA"
@@ -109,14 +110,28 @@ class VoiceSalesAgent:
             return optimal_time
 
     @tenacity.retry(
-        wait=tenacity.wait_exponential(multiplier=1, min=2, max=10),
-        stop=tenacity.stop_after_attempt(3),
-        reraise=True
-    )
+    wait=tenacity.wait_exponential(multiplier=1, min=2, max=10),
+    stop=tenacity.stop_after_attempt(3),
+    reraise=True
+)
     async def handle_call(self, call_sid, client):
-        """Manage real-time calls with genius-level adaptability and persistence."""
-        if client.country != self.target_country:
-            logger.info(f"Skipping {client.name}: Not in {self.target_country}.")
+        """Manage real-time calls with legal compliance and adaptability."""
+        # Pre-call compliance check
+        compliance_context = (
+            f"Voice call to {client.name} (ID: {client.id}) in {client.country}. "
+            f"Funds routed to Morocco. USA CCPA and Moroccan financial laws apply."
+        )
+        compliance_check = await self.orchestrator.agents['legal'].validate_operation(compliance_context)
+        if not compliance_check['is_compliant']:
+            logger.warning(f"Call to {client.name} blocked: {compliance_check['issues']}")
+            await self.orchestrator.send_notification(
+                "Compliance Alert",
+                f"Call to {client.name} blocked: {compliance_check['issues']}"
+            )
+            return
+
+        if client.country != self.target_country or not client.opt_in:
+            logger.info(f"Skipping {client.name}: Not in {self.target_country} or not opted in.")
             return
 
         async with self.session_maker() as session:
@@ -128,7 +143,7 @@ class VoiceSalesAgent:
                 state = "greeting"
                 conversation_log = []
 
-        # Deepgram WebSocket for real-time audio transcription
+        # Deepgram WebSocket for real-time transcription
         deepgram_ws_url = "wss://api.deepgram.com/v1/listen?model=general-enhanced"
         async with websockets.connect(
             deepgram_ws_url,
@@ -145,10 +160,11 @@ class VoiceSalesAgent:
                     if not client_response:
                         logger.info(f"Call {call_sid} ended by client.")
                         break
+
                     # Check for AI detection attempts
                     detection_keywords = ["robot", "ai", "artificial", "bot"]
                     if any(keyword in client_response.lower() for keyword in detection_keywords):
-                        agent_response = "I’m a real helper here to focus on your success—how can I assist you today?"
+                        agent_response = "I’m part of a cutting-edge team using AI to deliver top-tier UGC services. We’re all about results—check out our portfolio or let’s hop on a quick call to discuss your needs."
                         await self.speak_response(agent_response, call_sid)
                         conversation_log.append({"role": "agent", "text": agent_response})
                         continue
@@ -166,7 +182,11 @@ class VoiceSalesAgent:
 
                     if state == "end_call":
                         logger.info(f"Call {call_sid} completed successfully.")
-                        await self.orchestrator.generate_invoice(client.id, 500)  # Assume $500 per deal
+                        # Dynamic pricing based on OSINT and conversation
+                        osint_insights = await self.orchestrator.agents['osint'].get_insights()
+                        industry_avg = osint_insights.get('industry_pricing', 5000)  # Default $5,000
+                        pricing = min(max(industry_avg * (1 + confidence - 0.5), 3000), 7000)  # $3,000–$7,000 range
+                        await self.orchestrator.generate_invoice(client.id, pricing)
                         break
             except asyncio.TimeoutError:
                 logger.error(f"Timeout in call {call_sid}.")
@@ -175,31 +195,38 @@ class VoiceSalesAgent:
                 logger.error(f"Deepgram error in call {call_sid}: {e}")
                 await self.orchestrator.report_error("VoiceSalesAgent", str(e))
             finally:
-                await self.store_call_log(client, conversation_log)
+                # Post-call compliance check
+                post_compliance = await self.orchestrator.agents['legal'].validate_operation(
+                    f"Completed call to {client.name} (ID: {client.id}). Conversation: {json.dumps(conversation_log)}"
+                )
+                outcome = "success" if post_compliance['is_compliant'] else "failed"
+                await self.store_call_log(client, conversation_log, outcome)
                 stream_task.cancel()
+    
 
     async def interpret_intent(self, response):
-        """Analyze client intent with DeepSeek-R1 using advanced prompt engineering."""
-        for client, model in self.clients_models:
-            try:    
-                prompt = f"""
-                {self.meta_prompt}
-                You are a sales intent classifier for a USA-based voice sales system directing funds to Morocco.
-                Interpret the intent of this client response: '{response}'.
-                Consider:
-                - Conversational context from prior interactions
-                - Sales psychology principles (e.g., urgency, trust-building, objection signals)
-                - Emotional undertones (e.g., excitement, frustration, skepticism)
-                Return a JSON object with:
-                - 'intent' (string): Primary intent (e.g., 'interested', 'hesitant', 'objection', 'closing')
-                - 'confidence' (float): Confidence score between 0.0 and 1.0
-                - 'sub_intents' (list): Secondary intents if detected (e.g., ['curious', 'budget_concern'])
-                - 'emotional_tone' (string): Detected emotional tone (e.g., 'positive', 'neutral', 'negative')
-                """
+        """Analyze client intent with dynamically fetched OpenRouter clients."""
+        prompt = f"""
+        {self.meta_prompt}
+        You are a sales intent classifier for a USA-based voice sales system directing funds to Morocco.
+        Interpret the intent of this client response: '{response}'.
+        Consider:
+        - Conversational context from prior interactions
+        - Sales psychology principles (e.g., urgency, trust-building, objection signals)
+        - Emotional undertones (e.g., excitement, frustration, skepticism)
+        Return a JSON object with:
+        - 'intent' (string): Primary intent (e.g., 'interested', 'hesitant', 'objection', 'closing')
+        - 'confidence' (float): Confidence score between 0.0 and 1.0
+        - 'sub_intents' (list): Secondary intents if detected (e.g., ['curious', 'budget_concern'])
+        - 'emotional_tone' (string): Detected emotional tone (e.g., 'positive', 'neutral', 'negative')
+        """
+        clients = await self.orchestrator.get_available_openrouter_clients()
+        for client in clients:
+            try:
                 intent_response = await client.chat.completions.create(
-                    model=model,
+                    model="google/gemini-2.0-flash-exp:free",
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,  # Precision-focused for intent classification
+                    temperature=0.3,
                     max_tokens=100,
                     response_format={"type": "json_object"}
                 )
@@ -211,7 +238,15 @@ class VoiceSalesAgent:
                 logger.info(f"Interpreted intent: {intent} (confidence: {confidence}, sub-intents: {sub_intents}, tone: {emotional_tone})")
                 return intent, confidence, sub_intents, emotional_tone
             except Exception as e:
-                logger.warning(f"Failed to use {client.base_url} with model {model}: {e}")
+                if "rate limit" in str(e).lower():
+                    async with self.session_maker() as session:
+                        await session.execute(
+                            "UPDATE accounts SET is_available = FALSE WHERE api_key = :api_key",
+                            {"api_key": client.api_key}
+                        )
+                        await session.commit()
+                    continue
+                logger.warning(f"Failed to use client {client.api_key}: {e}")
         logger.error("All clients failed for interpret_intent")
         return "unknown", 0.0, [], "neutral"
 
@@ -269,7 +304,8 @@ class VoiceSalesAgent:
         return next_state
 
     async def generate_agent_response(self, state, client, conversation_log):
-        """Craft a tailored response for USA clients with funds directed to Morocco."""
+        """Craft a tailored response with dynamically fetched OpenRouter clients."""
+        payment_terms = self.config.PAYMENT_TERMS
         prompt = f"""
         You are a voice sales agent for a USA-based system directing funds to Morocco.
         Current state: {state}
@@ -280,19 +316,35 @@ class VoiceSalesAgent:
         - Mentions Morocco as the fund destination where relevant
         - Ensures compliance with USA sales regulations
         """
-        try:
-            response = await self.client.chat.completions.create(
-            model=self.config.DEEPSEEK_MODEL,
-            messages=[{"role": "user", "content": "Build a website layout"}],
-                temperature=0.5,  # Balanced creativity and coherence
-                max_tokens=150
-            )
-            agent_response = response.choices[0].message.content.strip()
-            logger.info(f"Generated response for {client.name}: {agent_response}")
-            return agent_response
-        except Exception as e:
-            logger.error(f"Response generation failed: {e}")
-            return "I’m here to assist—let’s talk about how we can direct your investment to Morocco."
+        if state == "closing":
+            prompt += f"\n- Includes the payment terms: '{payment_terms}'"
+        else:
+            prompt += "\n- Does not mention payment terms yet"
+
+        clients = await self.orchestrator.get_available_openrouter_clients()
+        for client in clients:
+            try:
+                response = await client.chat.completions.create(
+                    model="google/gemini-2.0-flash-exp:free",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.5,
+                    max_tokens=150
+                )
+                agent_response = response.choices[0].message.content.strip()
+                logger.info(f"Generated response for {client.name}: {agent_response}")
+                return agent_response
+            except Exception as e:
+                if "rate limit" in str(e).lower():
+                    async with self.session_maker() as session:
+                        await session.execute(
+                            "UPDATE accounts SET is_available = FALSE WHERE api_key = :api_key",
+                            {"api_key": client.api_key}
+                        )
+                        await session.commit()
+                    continue
+                logger.warning(f"Failed to use client {client.api_key}: {e}")
+        logger.error("All clients failed for generate_agent_response")
+        return "I’m here to assist—let’s talk about how we can direct your investment to Morocco."
 
     async def speak_response(self, text, call_sid):
         """Convert text to speech using Deepgram Aura TTS and deliver via Twilio."""

@@ -1,4 +1,4 @@
-
+from datetime import datetime, timedelta
 import asyncio
 import logging
 import random
@@ -44,6 +44,12 @@ class OSINTAgent:
         self.think_tool = orchestrator.agents['think']
         self.task_queue = asyncio.Queue()
         self.max_concurrency = 10
+        self.memory_cache = {}
+
+        async def update_memory_cache(self, new_insights):
+            """Update the agent's memory cache with new insights."""
+            self.memory_cache.update(new_insights)
+            logger.info(f"Updated memory cache: {self.memory_cache}")
 
         # OSINT tool configurations
         self.shodan_api_key = os.getenv("SHODAN_API_KEY")
@@ -91,14 +97,7 @@ class OSINTAgent:
         """Select top 3 tools based on historical success."""
         return sorted(self.tool_success_rates, key=self.tool_success_rates.get, reverse=True)[:3]
         
-    async def send_to_research_agent(self, data_id):
-        """Send analyzed OSINT data to ResearchAgent for UGC and business insights."""
-        research_agent = self.orchestrator.agents.get('research')
-        if research_agent:
-            await research_agent.process_osint_data(data_id)
-            logger.info(f"Sent data ID {data_id} to ResearchAgent")
-        else:
-            logger.warning("ResearchAgent not found in orchestrator")
+
 
     async def stealth_request(self, url):
         """Make a stealthy HTTP request with anti-detection measures."""
@@ -111,14 +110,12 @@ class OSINTAgent:
                 return await response.text()
 
     async def run(self):
-        """Execute the OSINTAgent with relentless efficiency and brilliance."""
-        while True:
-            max_tasks = await self.get_available_concurrency()
-            tasks = []
-            for _ in range(min(max_tasks, self.task_queue.qsize())):
-                task = await self.task_queue.get()
-                tasks.append(self.process_task(task))
-            await asyncio.gather(*tasks)
+    from aiokafka import AIOKafkaConsumer
+    consumer = AIOKafkaConsumer('osint_tasks', bootstrap_servers='localhost:9092')
+    await consumer.start()
+    async for msg in consumer:
+        task = json.loads(msg.value.decode('utf-8'))
+        await self.process_task(task)
 
     async def process_task(self, task):
         """Process a single task with robust error handling."""
@@ -146,7 +143,7 @@ class OSINTAgent:
 
     async def collect_data(self, target, tools=None):
         selected_tools = await self.select_best_tools(target)
-        aggressive_tools = ['GoogleDorking', 'SocialMediaScraping', 'DarkPoolSearch']
+        aggressive_tools = ['GoogleDorking', 'SocialMediaScraping', 'DarkPoolSearch', 'WebcamSearch']
         tools_to_run = list(set(selected_tools + aggressive_tools))
         if tools:
             tools_to_run = list(set(tools + aggressive_tools))
@@ -154,7 +151,11 @@ class OSINTAgent:
         data = {}
         async def run_tool(tool):
             try:
-                if tool == 'GoogleDorking':
+                if tool == 'WebcamSearch':
+                    data[tool] = await self.run_webcam_search(target)
+                if tool == 'Shodan':
+                    data[tool] = await self.run_shodan_api(target)
+                elif tool == 'GoogleDorking':
                     data[tool] = await self.run_google_dorking(target)
                 elif tool == 'SocialMediaScraping':
                     data[tool] = await self.run_social_scraping(target)
@@ -182,6 +183,18 @@ class OSINTAgent:
             await session.refresh(osint_data)
             logger.info(f"Collected data for {target} with ID {osint_data.id}")
             return osint_data.id
+
+        async def run_webcam_search(self, target):
+            """Search public webcams for insights (ensure legal compliance)."""
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"http://example-webcam-api.com/search?q={target}") as response:
+                        if response.status == 200:
+                            return await response.json()
+                        return {}
+            except Exception as e:
+                logger.error(f"Webcam search failed: {e}")
+                return {}
 
         async def run_single_tool(tool):
             # async with semaphore: # Uncomment if limiting concurrency per tool
@@ -662,32 +675,28 @@ class OSINTAgent:
             logger.error(f"Browsing failed for {url}: {e}")
             return False
 
+    async def filter_relevant_data(self, analysis):
+        """Filter analysis for UGC agency relevance."""
+        relevant_data = {}
+        for segment, details in analysis.get('segments', {}).items():
+            if segment in ['emails', 'social_presence']:  # UGC-relevant
+                relevant_data[segment] = details
+        return relevant_data
+
     async def analyze_data(self, data_id):
-        """Analyze collected OSINT data with DeepSeek-R1 for genius-level insights, with robust error handling."""
+        """Analyze OSINT data and send relevant insights directly to sales agents."""
         async with self.session_maker() as session:
-            # Fetch the OSINT data from the database
             osint_data = await session.get(OSINTData, data_id)
             if not osint_data:
-                logger.error(f"OSINT data ID {data_id} not found in database.")
+                logger.error(f"OSINT data ID {data_id} not found.")
                 return
 
-            # Parse raw data with error handling
-            try:
-                raw_data = json.loads(osint_data.raw_data)
-            except json.JSONDecodeError as e:
-                logger.error(f"Malformed raw_data for ID {data_id}: {e}")
-                await self.orchestrator.report_error("OSINTAgent", f"JSON decode error in raw_data: {e}")
-                return
-
-            # Check if raw data is empty
+            raw_data = json.loads(osint_data.raw_data)
             if not raw_data:
-                logger.warning(f"No raw data available for analysis (ID: {data_id})")
+                logger.warning(f"No raw data for ID {data_id}")
                 return
 
-            # Initialize results dictionary
             analysis_results = {}
-
-            # Analyze data from each tool with individual error handling
             for tool, data in raw_data.items():
                 try:
                     if tool == "theHarvester":
@@ -696,43 +705,51 @@ class OSINTAgent:
                         analysis_results['social_presence'] = await self.analyze_social_presence(data)
                     elif tool == "Shodan":
                         analysis_results['device_vulnerabilities'] = await self.analyze_shodan_data(data)
-                    else:
-                        logger.warning(f"Unsupported tool {tool} in raw_data for ID {data_id}")
                 except Exception as e:
                     logger.error(f"Analysis failed for tool {tool} (ID: {data_id}): {e}")
                     analysis_results[tool] = {"error": str(e)}
 
-            # Use DeepSeek-R1 for advanced analysis
             prompt = f"""
             Analyze OSINT data: {json.dumps(raw_data, indent=2)}
             Segment data by type (emails, IPs, social, etc.), identify patterns, and predict trends.
             Return JSON with 'segments', 'patterns', 'predictions'.
             """
-            try:
-                response = await self.deepseek_client.chat.completions.create(
-                    model="deepseek-r1",
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    timeout=30  # Add timeout to handle network delays
-                )
-                analysis = json.loads(response.choices[0].message.content)
-                if not isinstance(analysis, dict):
-                    raise ValueError("Invalid analysis response: not a dictionary")
-            except Exception as e:
-                logger.error(f"DeepSeek-R1 analysis failed for ID {data_id}: {e}")
-                analysis = {"error": str(e)}
-
-            # Update learning model only if analysis is successful
-            if 'error' not in analysis:
-                await self.update_learning_model(analysis, tool, data_quality=1.0)
+            clients = await self.orchestrator.get_available_openrouter_clients()
+            for client in clients:
+                try:
+                    response = await client.chat.completions.create(
+                        model="google/gemini-2.5-pro-exp-03-25:free",
+                        messages=[{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"},
+                        timeout=30
+                    )
+                    analysis = json.loads(response.choices[0].message.content)
+                    break
+                except Exception as e:
+                    if "rate limit" in str(e).lower():
+                        await session.execute(
+                            "UPDATE accounts SET is_available = FALSE WHERE api_key = :api_key",
+                            {"api_key": client.api_key}
+                        )
+                        await session.commit()
+                        continue
+                    logger.warning(f"Failed to use client {client.api_key}: {e}")
             else:
-                await self.update_learning_model({}, tool, data_quality=0.0)
+                logger.error(f"All clients failed for analyze_data (ID: {data_id})")
+                analysis = {"error": "All API clients exhausted"}
 
-            # Store results and commit
             osint_data.analysis_results = json.dumps(analysis)
+            relevant_data = await self.filter_relevant_data(analysis)
+            osint_data.relevance = 'high' if relevant_data else 'low'
             await session.commit()
-            await self.send_to_research_agent(data_id)
-            logger.info(f"Data analysis completed for ID {data_id}")
+
+            # Send directly to Email and Voice Sales Agents
+            if relevant_data:
+                if 'emails' in relevant_data:
+                    await self.orchestrator.agents['email'].queue_osint_leads(relevant_data['emails'])
+                if 'social_presence' in relevant_data:
+                    await self.orchestrator.agents['voice_sales'].queue_osint_leads(relevant_data['social_presence'])
+            logger.info(f"Data analysis completed for ID {data_id}, sent to sales agents.")
 
     async def analyze_emails(self, emails):
         """Extract patterns and predict lead potential from email data."""
@@ -746,13 +763,28 @@ class OSINTAgent:
         return {"patterns": patterns, "lead_scores": lead_scores}
 
     async def predict_lead_potential(self, email):
-        """Predict lead potential using DeepSeek-R1."""
+        """Predict lead potential with dynamically fetched OpenRouter clients."""
         prompt = f"Assess lead potential for email {email}. Return a score (0-100)."
-        response = await self.deepseek_client.chat.completions.create(
-            model="deepseek-r1",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return float(response.choices[0].message.content)
+        clients = await self.orchestrator.get_available_openrouter_clients()
+        for client in clients:
+            try:
+                response = await client.chat.completions.create(
+                    model="google/gemini-2.5-pro-exp-03-25:free",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                return float(response.choices[0].message.content)
+            except Exception as e:
+                if "rate limit" in str(e).lower():
+                    async with self.session_maker() as session:
+                        await session.execute(
+                            "UPDATE accounts SET is_available = FALSE WHERE api_key = :api_key",
+                            {"api_key": client.api_key}
+                        )
+                        await session.commit()
+                    continue
+                logger.warning(f"Failed to use client {client.api_key}: {e}")
+        logger.error(f"All clients failed for predict_lead_potential: {email}")
+        return 50.0  # Fallback score
 
     async def analyze_social_presence(self, sherlock_data):
         """Analyze social media for influence and engagement trends."""
@@ -892,14 +924,15 @@ class OSINTAgent:
         self.tool_success_rates[tool] = min(max(new_rate, 0), 1)
         logger.info(f"Updated success rate for {tool}: {self.tool_success_rates[tool]}")
 
-    async def run_shodan_web(self, target):
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(f"https://www.shodan.io/search?query={target}", wait_until="networkidle")
-            results = await page.content()
-            await browser.close()
-            return {"html": results}
+    async def run_shodan_api(self, query):
+        """Run Shodan API to search for internet-connected devices."""
+        try:
+            shodan_client = shodan.Shodan(self.shodan_api_key)
+            results = shodan_client.search(query)
+            return results
+        except Exception as e:
+            logger.error(f"Shodan API failed for query {query}: {e}")
+            return {}
 
     @retry(stop=stop_after_attempt(50), wait=wait_exponential(multiplier=1, min=5, max=60))
     async def run_osint_workflow(self, target, tools):

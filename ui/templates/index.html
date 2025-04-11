@@ -1,67 +1,168 @@
 <!DOCTYPE html>
 <html>
-
 <head>
     <title>AI Agency Control Panel</title>
     <style>
         body {
-            font-family: Arial, sans-serif;
+            font-family: 'Segoe UI', Arial, sans-serif;
             margin: 20px;
+            background: #1a1a1a;
+            color: #e0e0e0;
         }
-
+        h1 {
+            color: #00ccff;
+            text-align: center;
+        }
+        .control-panel {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
         button {
-            padding: 10px;
-            margin: 5px;
+            padding: 12px 24px;
+            font-size: 16px;
+            background: #00ccff;
+            border: none;
+            border-radius: 5px;
+            color: #fff;
+            cursor: pointer;
+            transition: background 0.3s;
         }
-
+        button:hover {
+            background: #0099cc;
+        }
         .video-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
             margin-top: 20px;
         }
-
         video {
-            width: 300px;
-            margin: 10px;
+            width: 320px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+        }
+        #call-result {
+            margin-top: 20px;
+            text-align: center;
+            color: #ffcc00;
         }
     </style>
 </head>
-
 <body>
     <h1>AI Agency Control Panel</h1>
-    <button onclick="startSimulatedCall()">Test Voice Agent</button>
-    <button onclick="getTestVideos()">View Test Videos</button>
-    <button onclick="approveAgency()">Approve Agency</button>
+    <div class="control-panel">
+        <button onclick="startSimulatedCall()">Test Voice Agent</button>
+        <button onclick="getTestVideos()">View Test Videos</button>
+        <button onclick="approveAgency()">Approve Agency</button>
+        <button onclick="downloadData()">Download Data</button>
+        <button onclick="testOsintScrape()">Test OSINT Scrape</button>
+
+<script>
+
+
+async function testOsintScrape() {
+    try {
+        const response = await fetch('/api/test_osint_scrape', { method: 'POST' });
+        const data = await response.json();
+        alert(data.status || data.error);
+    } catch (e) {
+        alert(`Error: ${e.message}`);
+    }
+}
+
+async function downloadData() {
+    const password = prompt("Enter password to download data");
+    if (!password) return;
+    try {
+        const response = await fetch('/api/download_data', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password })
+        });
+        if (response.ok) {
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = 'agency_data.db';
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+        } else {
+            const data = await response.json();
+            alert(`Download failed: ${data.error}`);
+        }
+    } catch (e) {
+        alert(`Error: ${e.message}`);
+    }
+}
+</script>
+    </div>
     <div id="call-result"></div>
     <div id="videos" class="video-container"></div>
     <script>
         async function startSimulatedCall() {
             const clientId = prompt("Enter client ID (or leave blank for 'test_client')") || "test_client";
-            const response = await fetch('/api/start_simulated_call', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ client_id: clientId })
-            });
-            const data = await response.json();
-            document.getElementById('call-result').innerText = data.result || data.error;
+            try {
+                const response = await fetch('/api/start_simulated_call', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ client_id: clientId })
+                });
+                const data = await response.json();
+                document.getElementById('call-result').innerText = data.result || data.error;
+            } catch (e) {
+                document.getElementById('call-result').innerText = `Error: ${e.message}`;
+            }
         }
 
         async function getTestVideos() {
-            const response = await fetch('/api/get_test_videos');
-            const data = await response.json();
-            const videosDiv = document.getElementById('videos');
-            videosDiv.innerHTML = '';
-            data.videos.forEach(video => {
-                const vid = document.createElement('video');
-                vid.src = video;
-                vid.controls = true;
-                videosDiv.appendChild(vid);
-            });
+            try {
+                const response = await fetch('/api/get_test_videos');
+                const data = await response.json();
+                const videosDiv = document.getElementById('videos');
+                videosDiv.innerHTML = '';
+                if (data.videos && Array.isArray(data.videos)) {
+                    data.videos.forEach(video => {
+                        const vid = document.createElement('video');
+                        vid.src = video;
+                        vid.controls = true;
+                        vid.onerror = () => vid.nextSibling.innerText = 'Video failed to load';
+                        const label = document.createElement('p');
+                        label.style.color = '#e0e0e0';
+                        label.innerText = video.split('/').pop();
+                        const container = document.createElement('div');
+                        container.appendChild(vid);
+                        container.appendChild(label);
+                        videosDiv.appendChild(container);
+                    });
+                } else {
+                    videosDiv.innerText = 'No videos available';
+                }
+            } catch (e) {
+                document.getElementById('videos').innerText = `Error: ${e.message}`;
+            }
         }
 
         async function approveAgency() {
-            await fetch('/api/approve_agency', { method: 'POST' });
-            alert('Agency approved for full operation!');
+            try {
+                const response = await fetch('/api/approve_agency', { method: 'POST' });
+                const data = await response.json();
+                if (data.status === 'approved') {
+                    alert('Agency approved for full operation!');
+                } else {
+                    alert(`Approval failed: ${data.error}`);
+                }
+            } catch (e) {
+                alert(`Error: ${e.message}`);
+            }
         }
     </script>
 </body>
-
 </html>

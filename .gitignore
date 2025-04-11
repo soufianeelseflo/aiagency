@@ -11,3 +11,4 @@ screenshots/
 visualizations/
 images/
 *.db
+/app/secrets/

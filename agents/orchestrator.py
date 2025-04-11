@@ -31,6 +31,8 @@ from agents.scoring_agent import ScoringAgent
 from agents.think_tool import ThinkTool
 from agents.voice_sales_agent import VoiceSalesAgent
 from agents.optimization_agent import OptimizationAgent
+from utils.notifications import send_notification
+
 
             
 email_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=300)
@@ -54,9 +56,61 @@ def create_session_maker(engine, schema='public'):
 
 class Orchestrator:
     """Central coordinator of the AI agency, managing agents and operations autonomously."""
-    
+
+    async def initialize_primary_api_key(self):
+        async with self.session_maker() as session:
+            result = await session.execute(
+                "SELECT COUNT(*) FROM accounts WHERE service = 'openrouter.ai'"
+            )
+            count = result.scalar()
+            if count == 0:
+                primary_api_key = os.getenv("OPENROUTER_API_KEY")
+                if primary_api_key:
+                    account = Account(
+                        service="openrouter.ai",
+                        email="primary@example.com",  # Dummy email
+                        password="",
+                        api_key=primary_api_key,
+                        phone="",
+                        cookies="",
+                        is_available=True
+                    )
+                    session.add(account)
+                    await session.commit()
+                    logger.info("Added primary OpenRouter API key to database")
+
+        async def get_available_openrouter_clients(self):
+            async with self.session_maker() as session:
+                result = await session.execute(
+                    "SELECT api_key FROM accounts WHERE service = 'openrouter.ai' AND is_available = TRUE"
+                )
+                api_keys = [row[0] for row in result.fetchall()]
+                if not api_keys:
+                    logger.warning("No available OpenRouter API keys; creating new accounts.")
+                    await self.create_openrouter_accounts(5)  # Create 5 more if none available
+                    result = await session.execute(
+                        "SELECT api_key FROM accounts WHERE service = 'openrouter.ai' AND is_available = TRUE"
+                    )
+                    api_keys = [row[0] for row in result.fetchall()]
+                clients = [AsyncOpenAI(api_key=key, base_url="https://openrouter.ai/api/v1") for key in api_keys]
+                return clients
+
+        async def reset_api_key_availability(self):
+            while True:
+                await asyncio.sleep(86400)  # 24 hours
+                async with self.session_maker() as session:
+                    await session.execute(
+                        "UPDATE accounts SET is_available = TRUE WHERE service = 'openrouter.ai'"
+                    )
+                    await session.commit()
+                logger.info("Reset API key availability for OpenRouter")
+
+        async def create_openrouter_accounts(self, num_accounts):
+            for _ in range(num_accounts):
+                await self.agents['browsing'].task_queue.put({'service_url': 'https://openrouter.ai'})
+            logger.info(f"Queued {num_accounts} OpenRouter account creation tasks.")
+        
     def __init__(self, schema='public'):
-        """Initialize the Orchestrator with configuration and dependencies."""
         self.config = settings
         self.engine = create_async_engine(self.config.DATABASE_URL, echo=True)
         self.session_maker = create_session_maker(self.engine, schema)
@@ -64,17 +118,7 @@ class Orchestrator:
         self.app = Quart(__name__)
         self.setup_routes()
         start_http_server(8000)
-        self.meta_prompt = """
-        You are the conductor of a symphony of genius-level AI agents. Your goal is to maximize profit and achieve rapid growth,
-        starting with UGC content creation and expanding into any profitable venture. Be resourceful, adaptable, and decisive.
-        Think strategically, anticipate challenges, and improve agency performance continuously. Exploit opportunities
-        creatively within legal bounds. Your initial budget is $50, but your ambition is limitless. Learn from every interaction,
-        success, and failure to build a self-evolving, profit-generating machine. Prioritize highest ROI actions, analyze
-        agent performance, reallocate resources, and eliminate bottlenecks. Experiment with purpose and measurable outcomes.
-        Success is profitability and growth ($6000 in 24 hours, $100M in 9 months). Secure the agency from unauthorized access.
-        Manage the UTC 16:30-00:30 15x performance boost to maximize output. Focus on the $6000 goal via UGC before broader
-        experimentation.
-        """
+        self.meta_prompt = settings.META_PROMPT
         self.approved = False
         self.performance_history = deque(maxlen=100)
         self.concurrency_model = LinearRegression()
@@ -121,42 +165,49 @@ class Orchestrator:
             # ThinkTool
             self.agents['think'] = ThinkTool(
                 self.session_maker, self.config, self,
-                clients_models=[(self.openrouter_client, self.config.OPENROUTER_MODELS['think']), (self.deepseek_client, self.config.DEEPSEEK_MODEL)]
+                clients_models=[(client, self.config.OPENROUTER_MODELS['think']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
             )
             # EmailAgent
             self.agents['email'] = EmailAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(self.openrouter_client, self.config.OPENROUTER_MODELS['email']), (self.deepseek_client, self.config.DEEPSEEK_MODEL)]
+                clients_models=[(client, self.config.OPENROUTER_MODELS['email']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
             )
             # LegalComplianceAgent
             self.agents['legal'] = LegalComplianceAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(self.openrouter_client, self.config.OPENROUTER_MODELS['legal']), (self.deepseek_client, self.config.DEEPSEEK_MODEL)]
+                clients_models=[(client, self.config.OPENROUTER_MODELS['legal']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
             )
             # OSINTAgent
             self.agents['osint'] = OSINTAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(self.openrouter_client, self.config.OPENROUTER_MODELS['osint']), (self.deepseek_client, self.config.DEEPSEEK_MODEL)]
+                clients_models=[(client, self.config.OPENROUTER_MODELS['osint']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
             )
             # ScoringAgent
             self.agents['scoring'] = ScoringAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(self.openrouter_client, self.config.OPENROUTER_MODELS['scoring']), (self.deepseek_client, self.config.DEEPSEEK_MODEL)]
+                clients_models=[(client, self.config.OPENROUTER_MODELS['scoring']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
             )
             # VoiceSalesAgent
             self.agents['voice_sales'] = VoiceSalesAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(self.openrouter_client, self.config.OPENROUTER_MODELS['voice_sales']), (self.deepseek_client, self.config.DEEPSEEK_MODEL)]
+                clients_models=[(client, self.config.OPENROUTER_MODELS['voice_sales']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
             )
             # OptimizationAgent
             self.agents['optimization'] = OptimizationAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(self.openrouter_client, self.config.OPENROUTER_MODELS['optimization']), (self.deepseek_client, self.config.DEEPSEEK_MODEL)]
+                clients_models=[(client, self.config.OPENROUTER_MODELS['optimization']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
             )
             # BrowsingAgent (uses DeepSeek primarily)
             self.agents['browsing'] = BrowsingAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(self.deepseek_client, self.config.DEEPSEEK_MODEL)]
+                clients_models=[(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
             )
             logger.info("All agents initialized successfully.")
         except Exception as e:
@@ -250,20 +301,7 @@ class Orchestrator:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=5, max=60))
     @email_breaker
     async def send_notification(self, subject, body):
-        try:
-            msg = EmailMessage()
-            msg.set_content(body)
-            msg['Subject'] = subject
-            msg['From'] = self.config.get("HOSTINGER_EMAIL")
-            msg['To'] = self.config.get("USER_EMAIL")
-            with smtplib.SMTP(self.config.get("HOSTINGER_SMTP"), self.config.get("SMTP_PORT")) as server:
-                server.starttls()
-                server.login(self.config.get("HOSTINGER_EMAIL"), self.config.get("HOSTINGER_SMTP_PASS"))
-                server.send_message(msg)
-            logger.info(f"Notification sent: {subject}")
-        except Exception as e:
-            logger.error(f"Failed to send notification: {e}")
-            raise
+        await send_notification(subject, body, self.config)
 
     async def send_whatsapp_notification(self, message):
         try:
@@ -425,29 +463,32 @@ class Orchestrator:
                 osint_insights = await self.agents['osint'].get_insights()
                 recommended_scale = osint_insights.get('recommended_scale', 1)
                 max_sandboxes = min(3, int(total_profit / 6000) * recommended_scale)
-                
+
                 if is_goal_met and sandbox_count < max_sandboxes:
-                    model_type = osint_insights.get('recommended_model', 'default_expansion')
-                    agent_mods = osint_insights.get('agent_modifications', {})
-                    sandbox_schema = f"sandbox_{model_type}_{int(datetime.utcnow().timestamp())}_{sandbox_count}"
+                    # Clone an agent (e.g., OSINT) and tweak it
+                    sandbox_schema = f"sandbox_osint_{int(datetime.utcnow().timestamp())}_{sandbox_count}"
                     sandbox_session_maker = create_session_maker(self.engine, sandbox_schema)
                     sandbox_orchestrator = Orchestrator(schema=sandbox_schema)
                     sandbox_orchestrator.session_maker = sandbox_session_maker
                     await sandbox_orchestrator.initialize_database()
                     await sandbox_orchestrator.initialize_clients()
                     await sandbox_orchestrator.initialize_agents()
-                    for agent_name, mods in agent_mods.items():
-                        if agent_name in sandbox_orchestrator.agents:
-                            sandbox_orchestrator.agents[agent_name].update_config(mods)
+
+                    # Modify OSINT Agent with a new tool
+                    sandbox_orchestrator.agents['osint'].tool_success_rates['NewTool'] = 1.0
                     sandbox_tasks = [agent.run() for agent in sandbox_orchestrator.agents.values()]
                     asyncio.create_task(asyncio.gather(*sandbox_tasks))
+
+                    # Evaluate performance after 1 hour
+                    await asyncio.sleep(3600)
+                    sandbox_profit = await sandbox_orchestrator.agents['scoring'].calculate_total_profit(sandbox_session_maker())
+                    main_profit = await self.agents['scoring'].calculate_total_profit(self.session_maker())
+                    if sandbox_profit > main_profit:
+                        self.agents['osint'].tool_success_rates['NewTool'] = 1.0
+                        logger.info(f"Promoted sandbox change: Added NewTool to OSINT Agent")
                     sandbox_count += 1
-                    logger.info(f"Sandbox {sandbox_count} initialized for {model_type} with schema {sandbox_schema}")
-                    await self.send_whatsapp_notification(
-                        f"Sandbox {sandbox_count} Initialized",
-                        f"Sandbox for {model_type} started with ${total_profit:.2f} profit. Schema: {sandbox_schema}"
-                    )
-                await asyncio.sleep(3600)  # Hourly
+                    logger.info(f"Sandbox {sandbox_count} initialized and evaluated")
+                await asyncio.sleep(3600)
             except Exception as e:
                 logger.error(f"Sandbox management failed: {e}")
                 await self.report_error("SandboxManagement", str(e))
@@ -463,23 +504,38 @@ class Orchestrator:
             await self.report_error("FundingGoalCheck", str(e))
             return False, 0
 
+
     async def generate_invoice(self, client_id, amount, user_role):
         try:
+            # Restrict invoice generation to admins
             if user_role != 'admin':
                 raise PermissionError("Only admins can generate invoices.")
-            moroccan_bank_account = os.getenv("MOROCCAN_BANK_ACCOUNT")
-            moroccan_swift_code = os.getenv("MOROCCAN_SWIFT_CODE")
-            if not all([moroccan_bank_account, moroccan_swift_code]):
-                raise ValueError("Moroccan bank details missing in environment variables.")
+
+            # Initialize secure storage for retrieving secrets
+            secure_storage = SecureStorage()
+
+            # Retrieve and parse bank details stored as a JSON string
+            bank_details_str = await secure_storage.get_secret("bank_details")
+            if not bank_details_str:
+                raise ValueError("Bank details missing in Vault.")
+            bank_details = json.loads(bank_details_str)
+            required_bank_fields = ["account", "swift", "name", "address"]
+            if not all(key in bank_details for key in required_bank_fields):
+                raise ValueError("Bank details incomplete in Vault.")
+
+            # Access client data and legal compliance
             async with self.session_maker() as session:
                 client = await session.get(Client, client_id)
                 if not client:
                     raise ValueError(f"Client with ID {client_id} not found")
                 if 'legal' not in self.agents:
                     raise ValueError("LegalComplianceAgent not initialized")
+
                 legal_data = await self.agents['legal'].get_invoice_details(client.country)
-                legal_note = legal_data['note'] if legal_data['note'] else "Payment due within 30 days."
-                contract_details = legal_data['contract'] if legal_data['contract'] else "Standard service agreement applies."
+                legal_note = self.config.LEGAL_NOTE
+                contract_details = legal_data['contract'] if legal_data['contract'] else "Standard agreement applies."
+
+                # Validate invoice content
                 is_valid = await self.agents['legal'].validate_invoice_content({
                     'amount': amount,
                     'note': legal_note,
@@ -487,23 +543,71 @@ class Orchestrator:
                 })
                 if not is_valid:
                     raise ValueError("Invoice content failed legal validation")
+
+                # Handle W-8BEN data for U.S. clients
+                w8ben_data = None
+                if client.country == "USA":
+                    w8ben_data_str = await secure_storage.get_secret("w8ben_data")
+                    if not w8ben_data_str:
+                        raise ValueError("W-8BEN data missing for USA client")
+                    w8ben_data = json.loads(w8ben_data_str)
+                    required_w8_fields = ["name", "country", "tin"]
+                    if not all(field in w8ben_data for field in required_w8_fields):
+                        raise ValueError("W-8BEN data incomplete; requires name, country, and TIN.")
+
+                # Generate the invoice PDF
                 filename = f"invoice_{client_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.pdf"
                 filepath = os.path.join("/app/invoices", filename)
                 os.makedirs(os.path.dirname(filepath), exist_ok=True)
                 c = canvas.Canvas(filepath, pagesize=letter)
-                c.drawString(100, 750, f"Invoice for {client.name}")
-                c.drawString(100, 730, f"Amount: ${amount:.2f}")
-                c.drawString(100, 710, "Payment Details (Morocco):")
-                c.drawString(100, 690, f"Bank Account: {moroccan_bank_account}")
-                c.drawString(100, 670, f"SWIFT/BIC: {moroccan_swift_code}")
-                c.drawString(100, 650, "Note:")
-                text = c.beginText(100, 630)
+
+                # Dynamic layout starting from the top
+                y = 750
+                c.drawString(100, y, f"Invoice for {client.name}")
+                y -= 20
+                c.drawString(100, y, f"Amount: ${amount:.2f}")
+                y -= 20
+                c.drawString(100, y, "Payment to Agency Designated Account")  # NEW LINE HERE
+                y -= 20
+                c.drawString(100, y, "Payment Details (Morocco):")
+                y -= 20
+                c.drawString(100, y, f"IBAN: {bank_details['account']}")
+                y -= 20
+                c.drawString(100, y, f"SWIFT/BIC: {bank_details['swift']}")
+                y -= 20
+                c.drawString(100, y, f"Bank: {bank_details['name']}")
+                y -= 20
+                c.drawString(100, y, f"Address: {bank_details['address']}")
+                y -= 20
+
+                # Add W-8BEN data for U.S. clients
+                if w8ben_data:
+                    c.drawString(100, y, "Tax Information (W-8BEN):")
+                    y -= 20
+                    c.drawString(100, y, f"Name: {w8ben_data['name']}")
+                    y -= 20
+                    c.drawString(100, y, f"Country: {w8ben_data['country']}")
+                    y -= 20
+                    c.drawString(100, y, f"TIN: {w8ben_data['tin']}")
+                    y -= 20
+
+                # Add legal note
+                c.drawString(100, y, "Note:")
+                text = c.beginText(100, y - 20)
                 text.textLines(legal_note)
                 c.drawText(text)
-                c.drawString(100, 590, "Contract Details:")
-                text = c.beginText(100, 570)
+
+                # Adjust position for contract details based on legal note length
+                note_lines = len(legal_note.split('\n'))
+                y -= 20 + (note_lines * 20)
+
+                # Add contract details
+                c.drawString(100, y, "Contract Details:")
+                text = c.beginText(100, y - 20)
                 text.textLines(contract_details)
                 c.drawText(text)
+
+                # Finalize and save the PDF
                 c.save()
                 logger.info(f"Invoice generated: {filepath}")
                 await self.send_notification(
@@ -511,6 +615,7 @@ class Orchestrator:
                     f"Invoice for {client.name} (ID: {client_id}) for ${amount:.2f}. File: {filepath}"
                 )
                 return filepath
+
         except Exception as e:
             logger.error(f"Invoice generation failed for client {client_id}: {e}")
             await self.report_error("InvoiceGeneration", str(e))
@@ -537,7 +642,11 @@ class Orchestrator:
         try:
             await self.initialize_clients()
             await self.initialize_database()
+            await self.initialize_primary_api_key()
             await self.initialize_agents()
+            
+            # Create initial OpenRouter accounts immediately
+            await self.create_openrouter_accounts(5)  # Start with 5 accounts
             
             await self.start_testing_phase()
             self.approved = True
@@ -547,9 +656,9 @@ class Orchestrator:
             monitor_task = asyncio.create_task(self.monitor_agents())
             sandbox_task = asyncio.create_task(self.manage_sandbox())
             cleanup_task = asyncio.create_task(self.cleanup_old_logs())
-            reuse_task = asyncio.create_task(self.agents['browsing'].reuse_accounts_periodically())
+            reset_task = asyncio.create_task(self.reset_api_key_availability())
             agent_tasks = [asyncio.create_task(agent.run()) for agent in self.agents.values()]
-            await asyncio.gather(*agent_tasks, boost_task, monitor_task, sandbox_task, cleanup_task, reuse_task)
+            await asyncio.gather(*agent_tasks, boost_task, monitor_task, sandbox_task, cleanup_task, reset_task)
         except Exception as e:
             logger.error(f"Agency run failed: {e}")
             await self.report_error("Orchestrator", str(e))

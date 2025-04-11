@@ -117,35 +117,67 @@ class OptimizationAgent:
             self.rl_model.policy.update()
         logger.info(f"Trained model with {self.batch_size} experiences.")
 
+    # FILE: agents/optimization_agent.py
+# Modify the run() method
+
     async def run(self):
-        """Run optimization loop."""
+        """Run optimization loop with integrated training."""
         last_train_time = asyncio.get_event_loop().time()
+        logger.info("OptimizationAgent run loop started.") # Added start log
+
         while True:
             if self.orchestrator.approved:
                 try:
+                    # --- State Observation ---
                     state = await self.get_system_state()
-                    action, _ = self.rl_model.predict(state, deterministic=False)
+                    if state is None: # Add check if state fetching fails
+                        logger.warning("OptimizationAgent: Failed to get system state, skipping cycle.")
+                        await asyncio.sleep(60) # Wait before retrying
+                        continue
+
+                    # --- Action Prediction ---
+                    # Use context manager for potential numpy issues? (Optional)
+                    action, _ = self.rl_model.predict(state, deterministic=False) # Use non-deterministic for exploration
+
+                    # --- Action Application ---
                     await self.apply_action(action)
-                    await asyncio.sleep(60)  # Stabilize system
+
+                    # --- Environment Step & Reward ---
+                    await asyncio.sleep(60)  # Allow time for action effects
                     next_state = await self.get_system_state()
+                    if next_state is None:
+                         logger.warning("OptimizationAgent: Failed to get next system state after action. Using previous state for buffer.")
+                         next_state = state # Use previous state if next fails, less ideal but prevents crash
+
                     reward = await self.calculate_reward()
-                    
+
+                    # --- Store Experience ---
                     self.experience_buffer.append((state, action, reward, next_state))
                     if len(self.experience_buffer) > self.buffer_size:
-                        self.experience_buffer.pop(0)
-                    
-                    logger.info(f"Action: {action}, Reward: {reward}")
-                    
+                        self.experience_buffer.pop(0) # Maintain buffer size
+
+                    logger.info(f"Optimization Step: Reward={reward:.2f}, Action={np.round(action, 2)}")
+
+                    # --- Training ---
                     current_time = asyncio.get_event_loop().time()
-                    if current_time - last_train_time >= self.train_interval:
-                        await self.train_model()
+                    # Check if enough time passed AND buffer has sufficient samples
+                    if (current_time - last_train_time >= self.train_interval) and (len(self.experience_buffer) >= self.batch_size):
+                        logger.info(f"OptimizationAgent: Triggering model training. Buffer size: {len(self.experience_buffer)}")
+                        await self.train_model() # *** CALL THE TRAINING METHOD ***
                         last_train_time = current_time
+                        # Optional: Clear buffer after training or use more sophisticated replay
+                        # self.experience_buffer = []
+
                 except Exception as e:
-                    logger.error(f"Optimization error: {e}")
+                    logger.error(f"OptimizationAgent: Error in optimization cycle: {e}", exc_info=True)
                     await self.orchestrator.report_error("OptimizationAgent", str(e))
+                    await asyncio.sleep(60) # Wait after error
             else:
-                logger.info("Awaiting approval.")
-            await asyncio.sleep(3600)  # Hourly cycle
+                logger.info("OptimizationAgent: Awaiting orchestrator approval.")
+                await asyncio.sleep(300) # Check less frequently if not approved
+
+            # Main loop sleep - adjust interval as needed
+            await asyncio.sleep(300) # Run optimization cycle every 5 minutes (adjust as needed)
 
     async def get_insights(self):
         """Provide concurrency insights for BudgetAgent and UI."""

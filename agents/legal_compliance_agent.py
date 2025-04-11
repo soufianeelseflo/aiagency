@@ -31,14 +31,42 @@ class LegalComplianceAgent:
         You are a genius-level legal strategist for an AI agency aiming for $100M in 9 months. Monitor US and Moroccan laws weekly, interpret them in real-time, and identify gray areas for profit maximization. Ensure compliance while pushing ethical boundaries for disruption. Return precise, actionable JSON outputs.
         """
         self.legal_sources = {
-            "USA": "https://www.federalregister.gov/documents/search?conditions[term]=&conditions[publication_date][is]=today",
-            "Morocco": "http://www.sgg.gov.ma/PortailArabe.aspx"
+            "USA": [
+                "https://www.federalregister.gov",
+                "https://uscode.house.gov",
+                "https://www.consumerfinance.gov"
+            ],
+            "Morocco": [
+                "https://www.sgg.gov.ma",
+                "https://www.bkam.ma",
+                "https://www.justice.gov.ma"
+            ]
         }
         self.cache_db = sqlite3.connect("legal_cache.db", check_same_thread=False)
         self.create_cache_tables()
         self.tfidf_vectorizer = TfidfVectorizer()
         self.update_interval = 604800  # 1 week in seconds
         self.token_threshold = 500  # Genius-level token limit per call
+        self.gray_area_strategies = {}
+
+    def update_contract_date(self, contract_template):
+        today = datetime.now().strftime("%Y-%m-%d")  # Makes date like "2025-04-07"
+        updated_contract = contract_template.replace("[CONTRACT_DATE]", today)
+        return updated_contract
+
+    async def get_w8_data(self):
+        w8_data_str = await self.secure_storage.get_secret("w8ben_data")
+        w8_data = json.loads(w8_data_str)
+        return w8_data
+
+    async def validate_w8_data(self):
+        w8_data_str = await self.secure_storage.get_secret("w8ben_data")
+        w8_data = json.loads(w8_data_str)
+        required_fields = ["name", "country", "address", "tin"]
+        if not all(field in w8_data for field in required_fields):
+            logger.error("W-8BEN data incomplete")
+            return False
+        return True
 
     def create_cache_tables(self):
         """Initialize SQLite tables for genius-level caching."""
@@ -79,7 +107,7 @@ class LegalComplianceAgent:
             return updates
 
     async def interpret_updates(self, updates):
-        """Genius-level interpretation with caching and batching."""
+        """Interpret legal updates and generate dynamic gray area strategies."""
         interpretations = {}
         batch_texts = []
         batch_mapping = {}
@@ -89,12 +117,12 @@ class LegalComplianceAgent:
                 cached = self.get_cached_interpretation(text)
                 if cached:
                     interpretations[text] = cached
+                    self.gray_area_strategies[country] = cached.get('gray_areas', [])
                     continue
                 batch_texts.append(text)
                 batch_mapping[text] = country
 
         if batch_texts:
-            # Genius-level batching to minimize token usage
             prompt = f"""
             {self.meta_prompt}
             Analyze these legal updates:
@@ -105,47 +133,33 @@ class LegalComplianceAgent:
             - 'gray_areas': List of exploitable ambiguities
             - 'compliance_note': Exact note for invoices/documents
             """
-            estimated_tokens = len(prompt) // 4  # Rough heuristic: 1 token ~ 4 chars
-            if estimated_tokens > self.token_threshold:
-                logger.warning("Token estimate exceeds threshold; splitting batch.")
-                mid = len(batch_texts) // 2
-                interpretations.update(await self.interpret_updates({"split": batch_texts[:mid]}))
-                interpretations.update(await self.interpret_updates({"split": batch_texts[mid:]}))
+            clients = await self.orchestrator.get_available_openrouter_clients()
+            for client in clients:
+                try:
+                    response = await client.chat.completions.create(
+                        model="google/gemini-2.5-pro-exp-03-25:free",
+                        messages=[{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"}
+                    )
+                    results = json.loads(response.choices[0].message.content)
+                    for text, result in zip(batch_texts, results):
+                        interpretations[text] = result
+                        self.gray_area_strategies[batch_mapping[text]] = result.get('gray_areas', [])
+                        self.cache_interpretation(text, result, batch_mapping[text])
+                    break
+                except Exception as e:
+                    if "rate limit" in str(e).lower():
+                        async with self.session_maker() as session:
+                            await session.execute(
+                                "UPDATE accounts SET is_available = FALSE WHERE api_key = :api_key",
+                                {"api_key": client.api_key}
+                            )
+                            await session.commit()
+                        continue
+                    logger.warning(f"Failed to use client {client.api_key}: {e}")
             else:
-                for client, model in self.clients_models:
-                    try:
-                        response = await client.chat.completions.create(
-                            model=model,
-                            messages=[{"role": "user", "content": prompt}],
-                            response_format={"type": "json_object"}
-                        )
-                        results = json.loads(response.choices[0].message.content)
-                        for text, result in zip(batch_texts, results):
-                            interpretations[text] = result
-                            self.cache_interpretation(text, result, batch_mapping[text])
-                        break  # Success, exit loop
-                    except Exception as e:
-                        logger.warning(f"Failed to use {client.base_url} with model {model}: {e}")
-                else:
-                    logger.error("All clients failed for interpret_updates")
-                    # Fallback to DeepSeek-R1
-                    try:
-                        deepseek_client = AsyncDeepSeekClient(
-                            api_key=self.config.get("DEEPSEEK_API_KEY"),
-                            base_url="https://api.deepseek.com"
-                        )
-                        response = await deepseek_client.chat.completions.create(
-                            model="deepseek-r1",
-                            messages=[{"role": "user", "content": prompt}],
-                            response_format={"type": "json_object"}
-                        )
-                        results = json.loads(response.choices[0].message.content)
-                        for text, result in zip(batch_texts, results):
-                            interpretations[text] = result
-                            self.cache_interpretation(text, result, batch_mapping[text])
-                    except Exception as e:
-                        logger.critical(f"DeepSeek-R1 fallback failed: {e}")
-                        raise
+                logger.error("All clients failed for interpret_updates")
+                return {"error": "All API clients exhausted"}
         return interpretations
 
     def get_cached_interpretation(self, text):
@@ -180,64 +194,99 @@ class LegalComplianceAgent:
         except sqlite3.IntegrityError:
             pass  # Duplicate hash; skip caching
 
-    async def validate_operation(self, operation_description):
-        """Validate operations with precomputed legal data."""
+    # FILE: agents/legal_compliance_agent.py
+# Modify the validate_operation() method
+
+    async def validate_operation(self, operation_description: str) -> dict:
+        """Validate operations, providing quantified risk assessment."""
         cursor = self.cache_db.cursor()
-        cursor.execute("SELECT interpretation, gray_areas FROM interpretations ORDER BY update_id DESC LIMIT 10")
-        recent = [(row[0], json.loads(row[1])) for row in cursor.fetchall()]
+        # Fetch more interpretations for better context
+        cursor.execute("SELECT interpretation, gray_areas, compliance_note FROM interpretations ORDER BY update_id DESC LIMIT 20")
+        recent_interpretations = [
+            {"interp": row[0], "gray_areas": json.loads(row[1] or '[]'), "note": row[2]}
+            for row in cursor.fetchall()
+        ]
 
         prompt = f"""
         {self.meta_prompt}
-        Validate this operation: {operation_description}
-        Against recent interpretations: {json.dumps(recent, indent=2)}
-        Return JSON:
-        - 'is_compliant': Boolean
-        - 'issues': List of issues
-        - 'recommendations': Actions to take
-        """
-        for client, model in self.clients_models:
-            try:
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"}
-                )
-                result = json.loads(response.choices[0].message.content)
-                if not result['is_compliant']:
-                    await self.orchestrator.report_error("LegalComplianceAgent", f"Operation blocked: {result['issues']}")
-                elif result.get('recommendations'):
-                    await self.orchestrator.send_notification("LegalOptimization", f"Recommendations: {result['recommendations']}")
-                return result
-            except Exception as e:
-                logger.warning(f"Failed to use {client.base_url} with model {model}: {e}")
-        logger.error("All clients failed for validate_operation")
-        # Fallback to DeepSeek-R1
-        try:
-            deepseek_client = AsyncDeepSeekClient(
-                api_key=self.config.get("DEEPSEEK_API_KEY"),
-                base_url="https://api.deepseek.com"
-            )
-            response = await deepseek_client.chat.completions.create(
-                model="deepseek-r1",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
-            )
-            result = json.loads(response.choices[0].message.content)
-            if not result['is_compliant']:
-                await self.orchestrator.report_error("LegalComplianceAgent", f"Operation blocked: {result['issues']}")
-            elif result.get('recommendations'):
-                await self.orchestrator.send_notification("LegalOptimization", f"Recommendations: {result['recommendations']}")
-            return result
-        except Exception as e:
-            logger.critical(f"DeepSeek-R1 fallback failed: {e}")
-            return {"is_compliant": False, "issues": ["All API clients failed"], "recommendations": []}
+        **Operation to Validate:** {operation_description}
 
-    async def get_invoice_legal_note(self):
+        **Recent Legal Interpretations & Grey Areas:**
+        {json.dumps(recent_interpretations, indent=2)}
+
+        **Task:** Analyze the operation against the interpretations. Focus on USA/Moroccan law implications and agency risk tolerance (assume high tolerance for calculated risks aiming for profit, but zero tolerance for actions with high probability of severe legal/financial penalties).
+
+        **Output (JSON):**
+        - 'is_compliant' (bool): Strict compliance assessment (True/False).
+        - 'risk_score' (float): Estimated risk score (0.0 = No Risk, 1.0 = Critical Risk). Factor in probability and severity of potential negative outcomes (legal action, fines, account bans, reputational damage).
+        - 'compliance_issues' (list): Specific laws/regulations potentially violated.
+        - 'gray_area_exploitation' (bool): Does this operation leverage an identified grey area?
+        - 'potential_consequences' (list): Brief description of potential negative outcomes if non-compliant or grey area is challenged.
+        - 'recommendations' (list): Concrete actions to mitigate risk or ensure compliance *while still attempting to achieve the operation's goal if possible*.
+        - 'proceed_recommendation' (str): Explicit recommendation ('Proceed', 'Proceed with Caution', 'Halt - High Risk', 'Halt - Non-Compliant').
+        """
+        # Use the ThinkTool's robust _call_llm method
+        validation_json = await self.orchestrator.agents['think']._call_llm(
+            prompt, model_key='legal_validate', temperature=0.2, max_tokens=800, is_json_output=True
+        )
+
+        if validation_json:
+            try:
+                result = json.loads(validation_json)
+                # Add default values for robustness
+                result.setdefault('is_compliant', False)
+                result.setdefault('risk_score', 1.0) # Default high risk on failure
+                result.setdefault('compliance_issues', ['Analysis Failed'])
+                result.setdefault('gray_area_exploitation', False)
+                result.setdefault('potential_consequences', [])
+                result.setdefault('recommendations', [])
+                result.setdefault('proceed_recommendation', 'Halt - Analysis Failed')
+
+                logger.info(f"Legal Validation for '{operation_description[:50]}...': Compliant={result['is_compliant']}, Risk Score={result['risk_score']:.2f}, Recommendation={result['proceed_recommendation']}")
+
+                # Trigger notifications/errors based on severity
+                if not result['is_compliant'] or result['risk_score'] > 0.8:
+                    await self.orchestrator.report_error(
+                        "LegalComplianceAgent",
+                        f"Operation blocked/high-risk: {operation_description[:100]}... Issues: {result['compliance_issues']}, Risk: {result['risk_score']:.2f}"
+                    )
+                elif result['risk_score'] > 0.5 or result.get('recommendations'):
+                     await self.orchestrator.send_notification(
+                         "LegalCompliance Advisory",
+                         f"Operation: {operation_description[:100]}... Risk: {result['risk_score']:.2f}. Recommendations: {result['recommendations']}"
+                     )
+                return result
+            except json.JSONDecodeError:
+                 logger.error(f"LegalAgent: Failed to decode JSON validation: {validation_json}")
+        # Fallback
+        return {
+            'is_compliant': False, 'risk_score': 1.0, 'compliance_issues': ['LLM Error/Invalid JSON'],
+            'gray_area_exploitation': False, 'potential_consequences': [], 'recommendations': [],
+            'proceed_recommendation': 'Halt - Analysis Failed'
+        }
+
+    async def get_invoice_legal_note(self, client_country):
         cursor = self.cache_db.cursor()
-        cursor.execute("SELECT compliance_note FROM interpretations WHERE category IN ('financial', 'tax') ORDER BY update_id DESC LIMIT 1")
+        cursor.execute("""
+            SELECT compliance_note FROM interpretations
+            WHERE category IN ('financial', 'tax')
+            AND country = ?
+            ORDER BY update_id DESC LIMIT 1
+        """, (client_country,))
         row = cursor.fetchone()
-        base_note = row[0] if row else "Compliant with latest US/Moroccan financial regulations"
-        return f"{base_note} | ISO 20022 compliant transfer to [Your Name], Morocco."
+        base_note = row[0] if row else "Compliant with latest financial regulations"
+
+        bulletproof_terms = (
+            "This agreement is irrevocable and binding upon acceptance. "
+            "UGC Genius shall not be liable for any indirect, incidental, or consequential damages, including but not limited to loss of profits or data. "
+            "All disputes shall be resolved exclusively under Moroccan law in the courts of [Your City], Morocco. "
+            f"Payment to {self.orchestrator.user_name}'s account in Morocco is non-refundable and non-cancellable once services commence. "
+            "Client acknowledges that UGC Genius adheres to ISO 20022 standards for secure international transactions."
+        )
+        return f"{base_note} | {bulletproof_terms}"
+
+
+        
 
     async def run(self):
         """Continuous legal monitoring and strategy generation."""

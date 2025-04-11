@@ -1,0 +1,22 @@
+# Roo-Code Task: Implement Knowledge Base & Supporting Models
+
+This file tracks the progress of implementing and enhancing SQLAlchemy models in `models.py`.
+
+**Sub-Tasks:**
+
+*   [x] 1. Add/Verify Imports: `sqlalchemy` (Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, Index, func, UniqueConstraint), `declarative_base`, `datetime`, `pytz`, `json`.
+*   [x] 2. Enhance `Client`: Add `is_deliverable` (Boolean, default=True, nullable=False). Ensure `last_interaction` is `DateTime(timezone=True)`. Add `index=True` to `email`.
+*   [x] 3. Enhance `CallLog`: Add `call_sid` (String, unique=True, index=True, nullable=True). Ensure `timestamp` is `DateTime(timezone=True)`. Add `index=True` to `client_id`.
+*   [x] 4. Enhance `ConversationState`: Add `client_id` (Integer, ForeignKey, index=True, nullable=True). Add `last_updated` (DateTime(timezone=True), default/onupdate `datetime.now(pytz.UTC)`). *(Note: Fields already existed, verified types/defaults)*
+*   [x] 5. Enhance `Invoice`: Add `invoice_path` (String, nullable=True). Ensure `timestamp` is `DateTime(timezone=True)`. Add `index=True` to `client_id`, `status`. *(Note: Renamed `invoice_pdf_path` to `invoice_path`)*
+*   [x] 6. Enhance `EmailLog`: Add `client_id` (Integer, ForeignKey, index=True, nullable=True). Add `recipient` (String, index=True). Add `opened_at` (DateTime(timezone=True), nullable=True). Add `responded_at` (DateTime(timezone=True), nullable=True). Add `spam_flagged` (Boolean, default=False). Add `agent_version` (String). Ensure `timestamp` is `DateTime(timezone=True)` and indexed. Add `index=True` to `status`. *(Note: Added `responded_at` and index to `timestamp`)*
+*   [x] 7. Enhance `Account`: Add `last_used` (DateTime(timezone=True), nullable=True). Add `is_recurring` (Boolean, default=False). Add `vault_path` (String, unique=True, nullable=True). Ensure `created_at` is `DateTime(timezone=True)`. Add `index=True` to `service`, `email`, `api_key`, `is_available`. *(Note: Added index to `api_key`, made `vault_path` nullable)*
+*   [x] 8. Define `KnowledgeFragment`: Schema: `id`(PK), `agent_source`(String, index), `timestamp`(DateTime tz, index), `data_type`(String, index), `content`(Text), `relevance_score`(Float), `tags`(Text), `related_client_id`(FK->clients.id, nullable, index), `source_reference`(String, nullable). *(Note: Added index to `tags` and `source_reference`)*
+*   [x] 9. Define `StrategicDirective`: Schema: `id`(PK), `source`(String), `timestamp`(DateTime tz), `target_agent`(String, index), `directive_type`(String, index), `content`(Text), `priority`(Integer, index, default=5), `status`(String, index, default='pending'), `expiry_timestamp`(DateTime tz, nullable), `result_summary`(Text, nullable).
+*   [x] 10. Define `LearnedPattern`: Schema: `id`(PK), `timestamp`(DateTime tz), `pattern_description`(Text), `supporting_fragment_ids`(Text), `confidence_score`(Float), `implications`(Text), `tags`(Text). *(Note: Made `implications` nullable, added index to `confidence_score` and `tags`)*
+*   [x] 11. Define `PromptTemplate`: Schema: `id`(PK), `agent_name`(String, index), `prompt_key`(String, index), `version`(Integer), `content`(Text), `is_active`(Boolean, index, default=True), `last_updated`(DateTime tz, default/onupdate). Add `__table_args__` for unique index `(agent_name, prompt_key)` where `is_active`. *(Note: Added indexes, adjusted `__table_args__` for partial unique index)*
+*   [x] 12. Define `OSINTData`: Schema: `id`(PK), `target`(String, index), `tools_used`(Text), `raw_data`(Text), `analysis_results`(Text, nullable), `relevance`(String, nullable), `timestamp`(DateTime tz). *(Note: Added index to `timestamp`)*
+*   [x] 13. Define `ExpenseLog`: Schema: `id`(PK), `amount`(Float), `category`(String, index), `description`(Text), `timestamp`(DateTime tz, index), `agent_source`(String, nullable).
+*   [x] 14. Define `GeminiResult`: Schema: `id`(PK), `type`(String), `data`(Text), `timestamp`(DateTime tz).
+*   [x] 15. Define `ServiceCredit`: Schema: `id`(PK), `service`(String, index), `credits`(String), `timestamp`(DateTime tz, index).
+*   [x] 16. Final Review: Perform a final check against this prompt and your task file. *(Note: Review complete)*
