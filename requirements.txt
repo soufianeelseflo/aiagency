@@ -23,3 +23,12 @@ aiokafka==0.8.0
 beautifulsoup4==4.12.3
 requests==2.32.3
 hcp-vault-secrets
+pytz # Added for timezone support in models.py
+cryptography # For database.py encryption
+gymnasium # Or gym, required by stable-baselines3 spaces
+fake-useragent # For OSINTAgent stealth requests
+# OSINT Tool Specific (Add if features are intended to be used)
+# maltego-trx # Requires Maltego client installation/setup
+python-exiftool # Wrapper for exiftool executable
+shodan # For Shodan API access
+# Note: theHarvester, photon, sherlock, recon-ng, spiderfoot might require separate installation/setup beyond pip.

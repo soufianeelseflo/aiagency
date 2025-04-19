@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime, timedelta
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from quart import Quart, request, jsonify
+from quart import Quart, request, jsonify, websocket, send_file, url_for # Architect-Zero: Added websocket, send_file, url_for
 import psutil
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -18,6 +18,12 @@ from collections import deque
 import spacy
 import json
 import pybreaker
+import websockets # Architect-Zero: Added import
+import base64    # Architect-Zero: Added import
+import uuid      # Architect-Zero: Added import
+from typing import Dict, Optional # Architect-Zero: Added import
+from quart.wrappers.request import Websocket # Architect-Zero: Added import
+
 from config.settings import settings
 from utils.secure_storage import SecureStorage
 from utils.database import encrypt_data, decrypt_data
@@ -131,6 +137,9 @@ class Orchestrator:
         self.deepseek_client = None    # Initialize as None; set in initialize_clients
         self.max_retries = 3
         self.secure_storage = SecureStorage()
+        self.deepgram_connections: Dict[str, websockets.client.WebSocketClientProtocol] = {} # Architect-Zero: Added registry for Deepgram WS
+        self.temp_audio_dir = "/tmp/hosted_audio" # Architect-Zero: Added temp dir for audio hosting
+        os.makedirs(self.temp_audio_dir, exist_ok=True) # Architect-Zero: Ensure temp dir exists
         required_env_vars = [
             "HOSTINGER_EMAIL", "HOSTINGER_SMTP_PASS", "USER_EMAIL",
             "MOROCCAN_BANK_ACCOUNT", "MOROCCAN_SWIFT_CODE",
@@ -397,6 +406,41 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Suggestion processing failed: {e}")
                 return jsonify({"error": str(e)}), 500
+
+    # --- Architect-Zero: Added Voice Agent Support Methods ---
+
+    async def register_deepgram_connection(self, call_sid: str, ws_connection: websockets.client.WebSocketClientProtocol):
+        """Stores the active Deepgram WebSocket connection for a given call SID."""
+        logger.info(f"Registering Deepgram WS connection for call_sid: {call_sid}")
+        self.deepgram_connections[call_sid] = ws_connection
+
+    async def unregister_deepgram_connection(self, call_sid: str):
+        """Removes the Deepgram WebSocket connection for a given call SID."""
+        logger.info(f"Unregistering Deepgram WS connection for call_sid: {call_sid}")
+        self.deepgram_connections.pop(call_sid, None) # Remove safely
+
+    async def get_deepgram_connection(self, call_sid: str) -> Optional[websockets.client.WebSocketClientProtocol]:
+        """Retrieves the active Deepgram WebSocket connection for a given call SID."""
+        return self.deepgram_connections.get(call_sid)
+
+    async def host_temporary_audio(self, audio_data: bytes, filename: str) -> Optional[str]:
+        """Saves audio data locally and returns a URL accessible by Twilio (requires proper web server setup)."""
+        try:
+            # Ensure filename is safe
+            safe_filename = re.sub(r'[^\w\.-]', '_', filename)
+            filepath = os.path.join(self.temp_audio_dir, safe_filename)
+            with open(filepath, 'wb') as f:
+                f.write(audio_data)
+            # Generate a URL that the Quart app can serve
+            # This assumes the '/hosted_audio/<filename>' route is set up below
+            audio_url = url_for('serve_hosted_audio', filename=safe_filename, _external=True)
+            logger.info(f"Hosted temporary audio at: {audio_url}")
+            return audio_url
+        except Exception as e:
+            logger.error(f"Failed to host temporary audio {filename}: {e}", exc_info=True)
+            return None
+
+    # --- End Voice Agent Support Methods ---
 
     async def adjust_concurrency(self):
         while True:

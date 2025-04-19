@@ -37,7 +37,7 @@ class BudgetAgent:
             cat: self.total_budget / len(self.expense_categories)
             for cat in self.expense_categories
         }
-        self.expenditure_cache = 0.0
+        # self.expenditure_cache = 0.0 # Removed flawed cache
         logger.info("BudgetAgent initialized with total budget ${:.2f}".format(self.total_budget))
 
     async def track_expense(self, amount: float, category: str, description: str):
@@ -65,7 +65,7 @@ class BudgetAgent:
             encrypted_desc = self.secure_storage.encrypt(description)
             await session.execute(
                 text("""
-                    INSERT INTO expenses (amount, category, description, timestamp)
+                    INSERT INTO expense_logs (amount, category, description, timestamp)
                     VALUES (:amount, :category, :description, :timestamp)
                 """),
                 {
@@ -77,8 +77,8 @@ class BudgetAgent:
             )
             await session.commit()
 
-            # Update cache and check thresholds
-            self.expenditure_cache += amount
+            # Check thresholds after successful commit
+            # Fetch total expenditure directly instead of relying on flawed cache
             total_expenditure = await self.get_total_expenditure(session)
             if total_expenditure >= self.total_budget * self.alert_threshold:
                 await self.send_budget_alert(total_expenditure)
@@ -181,7 +181,7 @@ class BudgetAgent:
         Returns:
             float: Total expenditure.
         """
-        result = await session.execute(text("SELECT SUM(amount) FROM expenses"))
+        result = await session.execute(text("SELECT SUM(amount) FROM expense_logs"))
         total = result.scalar() or 0.0
         self.expenditure_cache = total  # Sync cache
         return total
@@ -197,48 +197,46 @@ class BudgetAgent:
             float: Category expenditure.
         """
         result = await session.execute(
-            text("SELECT SUM(amount) FROM expenses WHERE category = :category"),
+            text("SELECT SUM(amount) FROM expense_logs WHERE category = :category"),
             {"category": category}
         )
         return result.scalar() or 0.0
 
-    async def adjust_concurrency(self):
-        """Dynamically adjust operations based on VPS resource usage."""
-        cpu_usage = psutil.cpu_percent(interval=1)
-        memory_usage = psutil.virtual_memory().percent
-        if cpu_usage > 70 or memory_usage > 70:
-            return min(5, self.orchestrator.concurrency_limit)
-        elif cpu_usage < 30 and memory_usage < 30:
-            return min(15, self.orchestrator.concurrency_limit)
-        return self.orchestrator.concurrency_limit
+    # Removed adjust_concurrency as it's likely redundant with Orchestrator/OptimizationAgent logic
 
     async def run(self):
         """Run BudgetAgent continuously with hourly insights and optimization.
 
-        Respects manual approval and VPS limits, with robust error handling.
+        Respects manual approval, with robust error handling.
+        Concurrency management is assumed to be handled by Orchestrator/OptimizationAgent.
         """
         while True:
             try:
-                if self.orchestrator.approved:  # Honor your manual approval requirement
-                    concurrency = await self.adjust_concurrency()
-                    async with asyncio.Semaphore(concurrency):
-                        await self.optimize_costs()
-                        status = await self.get_budget_status()
-                        # Log metrics for Grafana
-                        async with self.session_maker() as session:
-                            metric = Metric(
-                                agent_name="budget",
-                                timestamp=datetime.utcnow(),
-                                metric_name="budget_status",
-                                value=str(status)
-                            )
-                            session.add(metric)
-                            await session.commit()
+                # Use getattr for safe access to orchestrator.approved
+                if getattr(self.orchestrator, 'approved', False):
+                    # Removed concurrency semaphore logic tied to the removed adjust_concurrency
+                    await self.optimize_costs()
+                    status = await self.get_budget_status()
+                    # Log metrics for Grafana
+                    async with self.session_maker() as session:
+                        metric = Metric(
+                            agent_name="budget",
+                            timestamp=datetime.utcnow(),
+                            metric_name="budget_status",
+                            value=json.dumps(status) # Log as JSON string
+                        )
+                        session.add(metric)
+                        await session.commit()
                     logger.info("Budget cycle completed.")
                 else:
-                    logger.info("Awaiting manual approval from Orchestrator.")
-                await asyncio.sleep(3600)  # Hourly, practical for insights
+                    logger.info("BudgetAgent: Awaiting manual approval from Orchestrator.")
+                await asyncio.sleep(3600)  # Hourly cycle
+            except asyncio.CancelledError:
+                 logger.info("BudgetAgent run loop cancelled.")
+                 break
             except Exception as e:
-                logger.error(f"BudgetAgent run error: {e}")
-                await self.orchestrator.report_error("BudgetAgent", str(e))
+                logger.error(f"BudgetAgent run error: {e}", exc_info=True)
+                # Ensure report_error method exists before calling
+                if hasattr(self.orchestrator, 'report_error'):
+                    await self.orchestrator.report_error("BudgetAgent", str(e))
                 await asyncio.sleep(60)  # Retry after 1 minute

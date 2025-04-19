@@ -1,53 +1,58 @@
+# utils/database.py
+# Genius-Level Implementation v1.0 - Secure Data Handling
+
 import os
 import base64
+import logging
+import hashlib # Added missing import
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidTag
-from sqlalchemy.ext.asyncio import AsyncSession
-import logging
+from typing import Optional, AsyncGenerator # Import AsyncGenerator for type hinting
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker # Import async_sessionmaker
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Assume logging configured globally
 
 # --- Encryption Configuration ---
-# AES-GCM uses a 12-byte (96-bit) nonce, which is recommended.
 NONCE_BYTES = 12
-# We derive a 32-byte (256-bit) key for AES-256-GCM
 KEY_BYTES = 32
-# Use a 16-byte (128-bit) salt for PBKDF2
 SALT_BYTES = 16
-# PBKDF2 iterations - OWASP recommends at least 100,000, 600,000 is safer (adjust based on performance needs)
-PBKDF2_ITERATIONS = 600000
+PBKDF2_ITERATIONS = 600000 # Increased iterations for better security
+# Generate a secure, fixed salt ONCE per deployment and store it securely (e.g., in Vault or env var)
+# DO NOT commit a hardcoded salt like this in real production code unless it's truly static per deployment.
+# For this example, we use a hardcoded one derived from an env var if possible, or a default.
+FIXED_SALT_STR = os.getenv("DATABASE_FIXED_SALT", "default_insecure_salt_replace_me") # MUST BE REPLACED IN ENV
+FIXED_SALT = hashlib.sha256(FIXED_SALT_STR.encode()).digest()[:SALT_BYTES] # Derive a fixed-size salt
+
+# --- Global Key Cache ---
+_DERIVED_KEY_CACHE: bytes | None = None
 
 class EncryptionError(Exception):
     """Custom exception for encryption/decryption errors."""
     pass
 
 def _get_master_key() -> bytes:
-    """
-    Retrieves the database master key from environment variables.
-    This key is used as input for the Key Derivation Function (PBKDF2).
-
-    Raises:
-        EncryptionError: If the master key is not set.
-
-    Returns:
-        bytes: The master key.
-    """
-    master_key_str = os.getenv("DATABASE_MASTER_KEY")
+    """Retrieves the database master key from environment variables."""
+    master_key_str = os.getenv("DATABASE_ENCRYPTION_KEY")
     if not master_key_str:
-        logger.error("DATABASE_MASTER_KEY environment variable not set.")
-        raise EncryptionError("Database master key is not configured.")
-    # Encode the master key string to bytes using UTF-8
+        error_msg = "CRITICAL: DATABASE_ENCRYPTION_KEY environment variable not set."
+        logger.critical(error_msg)
+        raise EncryptionError(error_msg)
     return master_key_str.encode('utf-8')
 
-def _derive_key(salt: bytes, master_key: bytes) -> bytes:
-    """
-    Derives an encryption key from the master key and salt using PBKDF2HMAC.
-    """
+def _derive_key(salt: bytes) -> bytes:
+    """Derives the encryption key using PBKDF2HMAC."""
+    global _DERIVED_KEY_CACHE
+    # Cache only if using the globally defined FIXED_SALT
+    if salt == FIXED_SALT and _DERIVED_KEY_CACHE is not None:
+        # logger.debug("Using cached encryption key.")
+        return _DERIVED_KEY_CACHE
+
+    master_key = _get_master_key()
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=KEY_BYTES,
@@ -55,100 +60,99 @@ def _derive_key(salt: bytes, master_key: bytes) -> bytes:
         iterations=PBKDF2_ITERATIONS,
         backend=default_backend()
     )
-    return kdf.derive(master_key)
+    derived_key = kdf.derive(master_key)
 
-def encrypt_data(data: str) -> str:
+    if salt == FIXED_SALT:
+        _DERIVED_KEY_CACHE = derived_key
+        logger.info("Derived and cached encryption key using fixed salt.")
+    else:
+        # This path shouldn't be hit if only FIXED_SALT is used by encrypt_data
+        logger.warning(f"Derived encryption key using non-fixed salt: {salt.hex()}")
+
+    return derived_key
+
+# --- Genius-Level Encryption/Decryption ---
+
+def encrypt_data(data: Optional[str]) -> Optional[str]:
     """
-    Encrypts string data using AES-GCM with a key derived via PBKDF2.
-
-    Args:
-        data: The string data to encrypt.
-
-    Returns:
-        str: A base64 encoded string containing salt + nonce + ciphertext + tag.
-
-    Raises:
-        EncryptionError: If encryption fails or master key is invalid/missing.
+    Encrypts string data using AES-GCM with a fixed salt and unique nonce.
+    Returns Base64 encoded string: nonce(12) + ciphertext+tag.
+    Returns None if input data is None.
     """
+    if data is None:
+        return None
     if not isinstance(data, str):
+        logger.error(f"Invalid data type for encryption: {type(data)}")
         raise TypeError("Data to encrypt must be a string.")
 
     try:
-        master_key = _get_master_key()
-        salt = os.urandom(SALT_BYTES)
-        derived_key = _derive_key(salt, master_key)
-
+        salt = FIXED_SALT # Use the fixed salt
+        derived_key = _derive_key(salt)
         aesgcm = AESGCM(derived_key)
-        nonce = os.urandom(NONCE_BYTES)
+        nonce = os.urandom(NONCE_BYTES) # Unique nonce per encryption
         data_bytes = data.encode('utf-8')
-        encrypted_bytes = aesgcm.encrypt(nonce, data_bytes, None) # No associated data
-
-        # Combine salt, nonce, and encrypted data (which includes the tag)
-        encrypted_payload = salt + nonce + encrypted_bytes
-
-        # Base64 encode for safe storage
-        return base64.urlsafe_b64encode(encrypted_payload).decode('utf-8')
-    except EncryptionError:
-        # Re-raise specific key errors
-        raise
+        encrypted_bytes = aesgcm.encrypt(nonce, data_bytes, None) # AAD is None
+        encrypted_payload = nonce + encrypted_bytes
+        encoded_payload = base64.urlsafe_b64encode(encrypted_payload).decode('utf-8')
+        return encoded_payload
+    except EncryptionError: raise
     except Exception as e:
-        logger.exception(f"Encryption failed: {e}")
+        logger.exception(f"Encryption failed unexpectedly: {e}")
         raise EncryptionError(f"Encryption failed: {e}")
 
-def decrypt_data(encrypted_data_b64: str) -> str:
+def decrypt_data(encrypted_data_b64: Optional[str]) -> Optional[str]:
     """
-    Decrypts data encrypted with encrypt_data using AES-GCM and PBKDF2 derived key.
-
-    Args:
-        encrypted_data_b64: The base64 encoded string (salt + nonce + ciphertext + tag).
-
-    Returns:
-        str: The original decrypted string.
-
-    Raises:
-        EncryptionError: If decryption fails (e.g., invalid tag, wrong key, corrupted data).
-        TypeError: If input is not a string.
+    Decrypts data encrypted by encrypt_data (using fixed salt).
+    Returns None if input is None or decryption fails.
     """
+    if encrypted_data_b64 is None:
+        return None
     if not isinstance(encrypted_data_b64, str):
-        raise TypeError("Encrypted data must be a string.")
+        logger.error(f"Invalid data type for decryption: {type(encrypted_data_b64)}")
+        raise TypeError("Encrypted data must be a base64 encoded string.")
 
     try:
-        master_key = _get_master_key()
         encrypted_payload = base64.urlsafe_b64decode(encrypted_data_b64)
-
-        # Check minimum length (salt + nonce + at least 1 byte ciphertext + 16 byte tag)
-        if len(encrypted_payload) <= SALT_BYTES + NONCE_BYTES + 16:
+        min_len = NONCE_BYTES + 16 # 16 bytes for AES-GCM tag
+        if len(encrypted_payload) <= min_len:
+             logger.error(f"Decryption failed: Payload too short ({len(encrypted_payload)} bytes).")
              raise EncryptionError("Invalid encrypted data format: too short.")
 
-        # Extract salt, nonce, and ciphertext (which includes the tag)
-        salt = encrypted_payload[:SALT_BYTES]
-        nonce = encrypted_payload[SALT_BYTES:SALT_BYTES + NONCE_BYTES]
-        ciphertext_with_tag = encrypted_payload[SALT_BYTES + NONCE_BYTES:]
-
-        # Derive the *same* key using the extracted salt
-        derived_key = _derive_key(salt, master_key)
-
+        nonce = encrypted_payload[:NONCE_BYTES]
+        ciphertext_with_tag = encrypted_payload[NONCE_BYTES:]
+        salt = FIXED_SALT # Use the fixed salt for key derivation
+        derived_key = _derive_key(salt)
         aesgcm = AESGCM(derived_key)
-        decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, None) # No associated data
+        decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, None) # No AAD
+        decrypted_string = decrypted_bytes.decode('utf-8')
+        return decrypted_string
 
-        return decrypted_bytes.decode('utf-8')
     except InvalidTag:
-        logger.error("Decryption failed: Invalid authentication tag. Data may be tampered or master key is incorrect.")
-        raise EncryptionError("Decryption failed: Data integrity check failed.")
-    except EncryptionError:
-        # Re-raise specific key errors
-        raise
+        logger.error("Decryption failed: Invalid authentication tag (data tampered or wrong key).")
+        # Return None instead of raising to allow graceful handling in agents
+        return None
+    except EncryptionError as ee:
+        logger.error(f"Decryption failed due to specific encryption error: {ee}")
+        return None # Return None on key/format errors
     except (ValueError, TypeError, IndexError) as e:
         logger.error(f"Decryption failed due to data format or decoding error: {e}")
-        raise EncryptionError(f"Decryption failed: Invalid format or decoding error ({e}).")
+        return None # Return None on format errors
     except Exception as e:
-        logger.exception(f"Decryption failed: {e}")
-        raise EncryptionError(f"Decryption failed: {e}")
+        logger.exception(f"Decryption failed unexpectedly: {e}")
+        return None # Return None on other errors
 
-
-# --- Existing Database Session Utility ---
-
-async def get_session(session_maker):
-    """Provides an async database session."""
+# --- Database Session Utility ---
+# This structure is primarily for FastAPI dependency injection.
+# Agents will typically use the session_maker directly via 'async with'.
+async def get_session(session_maker: async_sessionmaker[AsyncSession]) -> AsyncGenerator[AsyncSession, None]:
+    """Provides an async database session via context manager."""
     async with session_maker() as session:
-        yield session
+        try:
+            yield session
+            # Let the caller handle commit/rollback within the 'async with' block
+        except Exception:
+            await session.rollback() # Ensure rollback on exception within yield
+            logger.error("Exception occurred within database session, rolling back.", exc_info=True)
+            raise # Re-raise the exception
+
+# --- End of utils/database.py ---

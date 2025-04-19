@@ -12,3 +12,4 @@ visualizations/
 images/
 *.db
 /app/secrets/
+.git/
