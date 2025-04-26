@@ -23,12 +23,30 @@ import base64    # Architect-Zero: Added import
 import uuid      # Architect-Zero: Added import
 from typing import Dict, Optional # Architect-Zero: Added import
 from quart.wrappers.request import Websocket # Architect-Zero: Added import
+from utils.think import think_step, think_controller
+# --- Database & Migration Imports ---
+from sqlalchemy import select, update, text
+from datetime import datetime, timezone
+from utils.database import encrypt_data, decrypt_data_fixed_salt_migration # Import both encryption methods
+from models import Base, Client, Metric, ExpenseLog, MigrationStatus # Import necessary models
+
+# Register basic checklists
+think_controller.register("initialize_clients_pre", lambda args, kwargs: True)
+think_controller.register("initialize_clients_post", lambda result: True)
+think_controller.register("initialize_database_pre", lambda args, kwargs: True)
+think_controller.register("initialize_database_post", lambda result: True)
+think_controller.register("run_encryption_migration_pre", lambda args, kwargs: True) # New checklist for migration
+think_controller.register("run_encryption_migration_post", lambda result: True)
+think_controller.register("initialize_agents_pre", lambda args, kwargs: True)
+think_controller.register("initialize_agents_post", lambda result: True)
+think_controller.register("run_pre", lambda args, kwargs: True)
+think_controller.register("run_post", lambda result: True)
 
 from config.settings import settings
 from utils.secure_storage import SecureStorage
-from utils.database import encrypt_data, decrypt_data
+# encrypt_data, decrypt_data_fixed_salt_migration imported above
 from twilio.rest import Client as TwilioClient
-from models import Base, Client, Metric
+# Base, Client, Metric, ExpenseLog, MigrationStatus imported above
 from agents.browsing_agent import BrowsingAgent
 from agents.email_agent import EmailAgent
 from agents.legal_compliance_agent import LegalComplianceAgent
@@ -224,6 +242,7 @@ class Orchestrator:
             await self.send_notification("Agent Initialization Failed", str(e))
             raise
 
+    @think_step("initialize_clients")
     async def initialize_clients(self):
         """Initialize OpenRouter as the primary client and DeepSeek for website tasks."""
         try:
@@ -258,6 +277,7 @@ class Orchestrator:
             await self.send_notification("API Client Initialization Failed", error_msg)
             raise
 
+    @think_step("initialize_database")
     async def initialize_database(self):
         """Initialize or update the PostgreSQL database schema."""
         try:
@@ -266,6 +286,216 @@ class Orchestrator:
             logger.info("Database schema initialized.")
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
+            raise
+
+    @think_step("run_encryption_migration")
+    async def _run_encryption_migration_v2(self):
+        """Checks and performs data migration for encryption v2 (per-value salt)."""
+        migration_name = 'encryption_v2'
+        logger.info(f"Checking status for migration: {migration_name}")
+        async with self.session_maker() as session:
+            try:
+                # Check if migration is already marked as complete
+                stmt_check = select(MigrationStatus).where(MigrationStatus.migration_name == migration_name)
+                result_check = await session.execute(stmt_check)
+                status_record = result_check.scalar_one_or_none()
+
+                if status_record and status_record.completed_at:
+                    logger.info(f"Migration '{migration_name}' already completed at {status_record.completed_at}. Skipping.")
+                    return True # Indicate success/completion
+
+                logger.info(f"Migration '{migration_name}' not found or not completed. Starting migration process...")
+
+                # --- Migration Logic ---
+                total_processed = 0
+                total_updated = 0
+                total_failed_decryption = 0
+                batch_size = 100
+                offset = 0
+
+                while True:
+                    logger.info(f"Processing migration batch starting from offset {offset}...")
+                    stmt_select = select(ExpenseLog.id, ExpenseLog.description).order_by(ExpenseLog.id).offset(offset).limit(batch_size)
+                    result_select = await session.execute(stmt_select)
+                    records = result_select.fetchall()
+
+                    if not records:
+                        logger.info("No more records found for migration.")
+                        break
+
+                    updates_to_commit = []
+                    for record_id, old_encrypted_desc in records:
+                        total_processed += 1
+                        if not old_encrypted_desc: continue # Skip null descriptions
+
+                        # Decrypt using OLD fixed-salt logic
+                        decrypted_desc = decrypt_data_fixed_salt_migration(old_encrypted_desc)
+
+                        if decrypted_desc is None:
+                            logger.error(f"[Migration] Failed to decrypt description for ExpenseLog ID {record_id}. Skipping update.")
+                            total_failed_decryption += 1
+                            continue
+
+                        # Re-encrypt using NEW per-value salt logic
+                        try:
+                            new_encrypted_desc = encrypt_data(decrypted_desc)
+                            if new_encrypted_desc is None: raise ValueError("New encryption returned None")
+                        except Exception as enc_err:
+                            logger.error(f"[Migration] Failed during NEW encryption for ExpenseLog ID {record_id}: {enc_err}. Skipping update.")
+                            continue
+
+                        if new_encrypted_desc != old_encrypted_desc:
+                            updates_to_commit.append({'id': record_id, 'description': new_encrypted_desc})
+                            total_updated += 1
+
+                    # Perform batch update
+                    if updates_to_commit:
+                        try:
+                            update_stmt = update(ExpenseLog).where(ExpenseLog.id == text(':id')).values(description=text(':description'))
+                            await session.execute(update_stmt, updates_to_commit)
+                            logger.info(f"Migration batch update successful for {len(updates_to_commit)} records (offset {offset}).")
+                        except Exception as batch_err:
+                            logger.error(f"[Migration] Failed to commit batch update (offset {offset}): {batch_err}")
+                            await session.rollback()
+                            logger.critical(f"CRITICAL: Migration '{migration_name}' failed during batch update. Halting application startup.")
+                            raise Exception(f"Migration '{migration_name}' failed: {batch_err}") from batch_err
+
+                    offset += len(records)
+
+                # --- Mark Migration as Complete ---
+                completion_time = datetime.now(timezone.utc)
+                if status_record: # Update existing record
+                    status_record.completed_at = completion_time
+                else: # Insert new record
+                    new_status = MigrationStatus(migration_name=migration_name, completed_at=completion_time)
+                    session.add(new_status)
+
+                await session.commit() # Commit updates and the status flag
+                logger.info(f"--- Migration '{migration_name}' Summary ---")
+                logger.info(f"Total records processed: {total_processed}")
+                logger.info(f"Total records successfully updated: {total_updated}")
+                logger.info(f"Total records failed decryption (skipped): {total_failed_decryption}")
+                logger.info(f"Migration marked as complete at {completion_time}.")
+                logger.info("-------------------------------------")
+                if total_failed_decryption > 0:
+                     logger.warning("Some records failed decryption and were not migrated. Review logs.")
+                return True # Indicate success
+
+            except Exception as e:
+                logger.error(f"CRITICAL: Error during migration '{migration_name}' check or execution: {e}", exc_info=True)
+                await session.rollback() # Ensure rollback on any error
+                raise Exception(f"Migration '{migration_name}' failed: {e}") from e # Halt startup
+
+    async def initialize_primary_api_key(self):
+        async with self.session_maker() as session:
+            # Need to import Account model if not already available globally
+            from models import Account
+            result = await session.execute(
+                select(func.count(Account.id)).where(Account.service == 'openrouter.ai') # Use ORM style
+            )
+            count = result.scalar()
+            if count == 0:
+                primary_api_key = os.getenv("OPENROUTER_API_KEY")
+                if primary_api_key:
+                    account = Account(
+                        service="openrouter.ai",
+                        email="primary@example.com",  # Dummy email
+                        password="",
+                        api_key=primary_api_key,
+                        phone="",
+                        cookies="",
+                        is_available=True
+                    )
+                    session.add(account)
+                    await session.commit()
+                    logger.info("Added primary OpenRouter API key to database")
+
+        async def get_available_openrouter_clients(self):
+            async with self.session_maker() as session:
+                result = await session.execute(
+                    "SELECT api_key FROM accounts WHERE service = 'openrouter.ai' AND is_available = TRUE"
+                )
+                api_keys = [row[0] for row in result.fetchall()]
+                if not api_keys:
+                    logger.warning("No available OpenRouter API keys; creating new accounts.")
+                    await self.create_openrouter_accounts(5)  # Create 5 more if none available
+                    result = await session.execute(
+                        "SELECT api_key FROM accounts WHERE service = 'openrouter.ai' AND is_available = TRUE"
+                    )
+                    api_keys = [row[0] for row in result.fetchall()]
+                clients = [AsyncOpenAI(api_key=key, base_url="https://openrouter.ai/api/v1") for key in api_keys]
+                return clients
+
+        async def reset_api_key_availability(self):
+            while True:
+                await asyncio.sleep(86400)  # 24 hours
+                async with self.session_maker() as session:
+                    await session.execute(
+                        "UPDATE accounts SET is_available = TRUE WHERE service = 'openrouter.ai'"
+                    )
+                    await session.commit()
+                logger.info("Reset API key availability for OpenRouter")
+
+        async def create_openrouter_accounts(self, num_accounts):
+            for _ in range(num_accounts):
+                await self.agents['browsing'].task_queue.put({'service_url': 'https://openrouter.ai'})
+            logger.info(f"Queued {num_accounts} OpenRouter account creation tasks.")
+        
+    @think_step("initialize_agents")
+    async def initialize_agents(self):
+        """Initialize all agents with their respective API clients and models."""
+        try:
+            # ThinkTool
+            self.agents['think'] = ThinkTool(
+                self.session_maker, self.config, self,
+                clients_models=[(client, self.config.OPENROUTER_MODELS['think']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+            )
+            # EmailAgent
+            self.agents['email'] = EmailAgent(
+                self.session_maker, self.config, self,
+                clients_models=[(client, self.config.OPENROUTER_MODELS['email']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+            )
+            # LegalComplianceAgent
+            self.agents['legal'] = LegalComplianceAgent(
+                self.session_maker, self.config, self,
+                clients_models=[(client, self.config.OPENROUTER_MODELS['legal']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+            )
+            # OSINTAgent
+            self.agents['osint'] = OSINTAgent(
+                self.session_maker, self.config, self,
+                clients_models=[(client, self.config.OPENROUTER_MODELS['osint']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+            )
+            # ScoringAgent
+            self.agents['scoring'] = ScoringAgent(
+                self.session_maker, self.config, self,
+                clients_models=[(client, self.config.OPENROUTER_MODELS['scoring']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+            )
+            # VoiceSalesAgent
+            self.agents['voice_sales'] = VoiceSalesAgent(
+                self.session_maker, self.config, self,
+                clients_models=[(client, self.config.OPENROUTER_MODELS['voice_sales']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+            )
+            # OptimizationAgent
+            self.agents['optimization'] = OptimizationAgent(
+                self.session_maker, self.config, self,
+                clients_models=[(client, self.config.OPENROUTER_MODELS['optimization']) for client in self.openrouter_clients] + 
+                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+            )
+            # BrowsingAgent (uses DeepSeek primarily)
+            self.agents['browsing'] = BrowsingAgent(
+                self.session_maker, self.config, self,
+                clients_models=[(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+            )
+            logger.info("All agents initialized successfully.")
+        except Exception as e:
+            logger.error(f"Agent initialization failed: {e}")
+            await self.send_notification("Agent Initialization Failed", str(e))
             raise
 
     async def collect_agent_feedback(self):
@@ -359,7 +589,216 @@ class Orchestrator:
             await self.report_error("TestingPhase", str(e))
             raise
 
+
+    # --- UGC Workflow Management ---
+
+    async def start_ugc_workflow(self, client_industry: str, num_videos: int = 1, script: str = None, target_services: list = None):
+        """Initiates the UGC content generation workflow."""
+        await self.send_notification("UGC Workflow Started", f"Starting UGC workflow for {client_industry} ({num_videos} videos).")
+        logger.info(f"Initiating UGC workflow for {client_industry} ({num_videos} videos).")
+
+        if not target_services:
+            target_services = ['heygen.com', 'descript.com'] # Default services
+
+        # Generate a unique ID for this workflow instance
+        workflow_id = str(uuid.uuid4())
+        logger.info(f"UGC Workflow ID: {workflow_id}")
+
+        # Initial state for the workflow
+        workflow_state = {
+            'workflow_id': workflow_id,
+            'client_industry': client_industry,
+            'num_videos': num_videos,
+            'target_services': target_services,
+            'current_step': 'account_acquisition',
+            'required_accounts': {service: False for service in target_services}, # Track if we have accounts
+            'script': script or f"Default UGC script for {client_industry}.", # Generate/fetch script later
+            'generated_video_path': None,
+            'edited_video_path': None,
+        }
+
+        # TODO: Persist workflow_state somewhere (DB?) if needed for long-running workflows or recovery
+
+        # Queue the first step: Check/Acquire accounts for all target services
+        # We can queue multiple account creation tasks if needed.
+        # For simplicity, let's assume BrowsingAgent checks internally or we queue one by one via report_ugc_step_complete.
+        # Let's start by trying to get credentials for the first service. If unavailable, BrowsingAgent should ideally queue creation.
+        # A better approach might be a dedicated 'acquire_resources' task.
+        # For now, let's queue a task that implies checking/getting accounts.
+
+        first_service = target_services[0]
+        task = {
+            'action': 'acquire_or_verify_account', # New action type for BrowsingAgent
+            'service_name': first_service,
+            'workflow_id': workflow_id,
+            'workflow_state': workflow_state # Pass state for context
+        }
+        if 'browsing' in self.agents:
+            await self.agents['browsing'].task_queue.put(task)
+            logger.info(f"Queued initial UGC task for workflow {workflow_id}: {task['action']} for {first_service}")
+        else:
+            logger.error(f"Browsing agent not found. Cannot start UGC workflow {workflow_id}.")
+            await self.send_notification("UGC Workflow Error", f"Browsing agent not found for workflow {workflow_id}.")
+
+
+    async def report_ugc_step_complete(self, workflow_id: str, completed_step: str, result: dict, current_state: dict):
+        """Handles completion of a UGC step and queues the next one."""
+        logger.info(f"Received completion report for UGC workflow {workflow_id}, step: {completed_step}. Result: {result}")
+
+        # TODO: Load/Update persistent workflow_state if used
+
+        next_task = None
+        updated_state = current_state.copy() # Work with a copy
+
+        try:
+            if completed_step == 'acquire_or_verify_account':
+                service_name = result.get('service_name')
+                success = result.get('success', False)
+                if success:
+                    updated_state['required_accounts'][service_name] = True
+                    logger.info(f"Account verified/acquired for {service_name} in workflow {workflow_id}.")
+                else:
+                    logger.error(f"Failed to acquire/verify account for {service_name} in workflow {workflow_id}. Workflow stalled.")
+                    await self.send_notification("UGC Workflow Error", f"Account acquisition failed for {service_name} in workflow {workflow_id}.")
+                    # TODO: Implement retry logic or failure handling
+                    return # Stop processing this workflow for now
+
+                # Check if all required accounts are ready
+                all_accounts_ready = all(updated_state['required_accounts'].values())
+                if all_accounts_ready:
+                    logger.info(f"All required accounts ready for workflow {workflow_id}. Proceeding to video generation.")
+                    updated_state['current_step'] = 'video_generation'
+                    # Queue video generation task (e.g., using Heygen)
+                    video_gen_service = next((s for s in updated_state['target_services'] if s in ['heygen.com', 'argil.ai']), None)
+                    if video_gen_service:
+                        next_task = {
+                            'action': 'generate_ugc_video', # Use the action BrowsingAgent expects
+                            'target_service': video_gen_service,
+                            'script': updated_state['script'],
+                            'avatar_prefs': {}, # Add preferences later
+                            'workflow_id': workflow_id,
+                            'workflow_state': updated_state
+                        }
+                    else:
+                         logger.error(f"No suitable video generation service found in target_services for workflow {workflow_id}.")
+                         # Handle error - maybe try editing first?
+                else:
+                    # Find the next service that needs an account
+                    next_service_to_acquire = next((s for s, ready in updated_state['required_accounts'].items() if not ready), None)
+                    if next_service_to_acquire:
+                        logger.info(f"Queueing next account acquisition for {next_service_to_acquire} in workflow {workflow_id}.")
+                        next_task = {
+                            'action': 'acquire_or_verify_account',
+                            'service_name': next_service_to_acquire,
+                            'workflow_id': workflow_id,
+                            'workflow_state': updated_state
+                        }
+                    else:
+                        # Should not happen if all_accounts_ready was false, but log just in case
+                        logger.error(f"Inconsistent state: Not all accounts ready, but no next service found for workflow {workflow_id}.")
+
+
+            elif completed_step == 'generate_ugc_video':
+                # Result should contain path/URL to the generated video
+                generated_video = result.get('generated_video_path_or_url')
+                if generated_video:
+                    updated_state['generated_video_path'] = generated_video
+                    logger.info(f"Video generated for workflow {workflow_id} at {generated_video}. Proceeding to editing.")
+                    updated_state['current_step'] = 'video_editing'
+                    # Queue video editing task (e.g., using Descript)
+                    editing_service = next((s for s in updated_state['target_services'] if s == 'descript.com'), None)
+                    if editing_service:
+                        next_task = {
+                            'action': 'edit_ugc_video', # New action type for BrowsingAgent
+                            'target_service': editing_service,
+                            'source_video_path': generated_video, # Pass the generated video path
+                            'assets': {}, # Add B-roll etc. later
+                            'workflow_id': workflow_id,
+                            'workflow_state': updated_state
+                        }
+                    else:
+                        logger.warning(f"No editing service (Descript) found in target_services for workflow {workflow_id}. Skipping editing.")
+                        # If no editing, consider the workflow complete or move to final step
+                        updated_state['current_step'] = 'completed'
+                        logger.info(f"UGC Workflow {workflow_id} completed (no editing step). Final video: {generated_video}")
+                        await self.send_notification("UGC Workflow Complete", f"Workflow {workflow_id} for {updated_state['client_industry']} finished. Video: {generated_video}")
+
+                else:
+                    logger.error(f"Video generation step failed for workflow {workflow_id}. Result: {result}")
+                    await self.send_notification("UGC Workflow Error", f"Video generation failed for workflow {workflow_id}.")
+                    # Handle error
+
+            elif completed_step == 'edit_ugc_video':
+                 # Result should contain path/URL to the edited video
+                edited_video = result.get('edited_video_path_or_url')
+                if edited_video:
+                    updated_state['edited_video_path'] = edited_video
+                    logger.info(f"Video editing completed for workflow {workflow_id} at {edited_video}.")
+                    updated_state['current_step'] = 'completed'
+                    # TODO: Add final storage/organization step if needed
+                    logger.info(f"UGC Workflow {workflow_id} completed. Final video: {edited_video}")
+                    await self.send_notification("UGC Workflow Complete", f"Workflow {workflow_id} for {updated_state['client_industry']} finished. Video: {edited_video}")
+                else:
+                    logger.error(f"Video editing step failed for workflow {workflow_id}. Result: {result}")
+                    await self.send_notification("UGC Workflow Error", f"Video editing failed for workflow {workflow_id}.")
+                    # Handle error
+
+            else:
+                logger.warning(f"Received completion report for unknown UGC step '{completed_step}' in workflow {workflow_id}.")
+
+            # Queue the next task if one was determined
+            if next_task:
+                if 'browsing' in self.agents:
+                    # Update the state in the task being queued
+                    next_task['workflow_state'] = updated_state
+                    await self.agents['browsing'].task_queue.put(next_task)
+                    logger.info(f"Queued next UGC task for workflow {workflow_id}: {next_task.get('action')} for {next_task.get('target_service') or next_task.get('service_name')}")
+                else:
+                    logger.error(f"Browsing agent not found. Cannot queue next UGC task for workflow {workflow_id}.")
+                    await self.send_notification("UGC Workflow Error", f"Browsing agent not found for workflow {workflow_id} step {updated_state['current_step']}.")
+
+        except Exception as e:
+            logger.error(f"Error processing UGC step completion for workflow {workflow_id}: {e}", exc_info=True)
+            await self.send_notification("UGC Workflow Error", f"Internal error processing step {completed_step} for workflow {workflow_id}: {e}")
+
+
+    # --- End UGC Workflow Management ---
+
+
+    # --- End Voice Agent Support Methods ---
+
+    # --- Route Setup ---
     def setup_routes(self):
+        """Stores the active Deepgram WebSocket connection for a given call SID."""
+        logger.info(f"Registering Deepgram WS connection for call_sid: {call_sid}")
+        self.deepgram_connections[call_sid] = ws_connection
+
+    async def unregister_deepgram_connection(self, call_sid: str):
+        """Removes the Deepgram WebSocket connection for a given call SID."""
+        logger.info(f"Unregistering Deepgram WS connection for call_sid: {call_sid}")
+        self.deepgram_connections.pop(call_sid, None) # Remove safely
+
+    async def get_deepgram_connection(self, call_sid: str) -> Optional[websockets.client.WebSocketClientProtocol]:
+        """Retrieves the active Deepgram WebSocket connection for a given call SID."""
+        return self.deepgram_connections.get(call_sid)
+
+    async def host_temporary_audio(self, audio_data: bytes, filename: str) -> Optional[str]:
+        """Saves audio data locally and returns a URL accessible by Twilio (requires proper web server setup)."""
+        try:
+            # Ensure filename is safe
+            safe_filename = re.sub(r'[^\w\.-]', '_', filename)
+            filepath = os.path.join(self.temp_audio_dir, safe_filename)
+            with open(filepath, 'wb') as f:
+                f.write(audio_data)
+            # Generate a URL that the Quart app can serve
+            # This assumes the '/hosted_audio/<filename>' route is set up below
+            audio_url = url_for('serve_hosted_audio', filename=safe_filename, _external=True)
+            logger.info(f"Hosted temporary audio at: {audio_url}")
+            return audio_url
+        except Exception as e:
+            logger.error(f"Failed to host temporary audio {filename}: {e}", exc_info=True)
+            return None
+
         """Configure Quart routes for UI interaction."""
         @self.app.route('/start_testing', methods=['POST'])
         async def start_testing():
@@ -407,293 +846,65 @@ class Orchestrator:
                 logger.error(f"Suggestion processing failed: {e}")
                 return jsonify({"error": str(e)}), 500
 
-    # --- Architect-Zero: Added Voice Agent Support Methods ---
-
-    async def register_deepgram_connection(self, call_sid: str, ws_connection: websockets.client.WebSocketClientProtocol):
-        """Stores the active Deepgram WebSocket connection for a given call SID."""
-        logger.info(f"Registering Deepgram WS connection for call_sid: {call_sid}")
-        self.deepgram_connections[call_sid] = ws_connection
-
-    async def unregister_deepgram_connection(self, call_sid: str):
-        """Removes the Deepgram WebSocket connection for a given call SID."""
-        logger.info(f"Unregistering Deepgram WS connection for call_sid: {call_sid}")
-        self.deepgram_connections.pop(call_sid, None) # Remove safely
-
-    async def get_deepgram_connection(self, call_sid: str) -> Optional[websockets.client.WebSocketClientProtocol]:
-        """Retrieves the active Deepgram WebSocket connection for a given call SID."""
-        return self.deepgram_connections.get(call_sid)
-
-    async def host_temporary_audio(self, audio_data: bytes, filename: str) -> Optional[str]:
-        """Saves audio data locally and returns a URL accessible by Twilio (requires proper web server setup)."""
-        try:
-            # Ensure filename is safe
-            safe_filename = re.sub(r'[^\w\.-]', '_', filename)
-            filepath = os.path.join(self.temp_audio_dir, safe_filename)
-            with open(filepath, 'wb') as f:
-                f.write(audio_data)
-            # Generate a URL that the Quart app can serve
-            # This assumes the '/hosted_audio/<filename>' route is set up below
-            audio_url = url_for('serve_hosted_audio', filename=safe_filename, _external=True)
-            logger.info(f"Hosted temporary audio at: {audio_url}")
-            return audio_url
-        except Exception as e:
-            logger.error(f"Failed to host temporary audio {filename}: {e}", exc_info=True)
-            return None
-
-    # --- End Voice Agent Support Methods ---
-
-    async def adjust_concurrency(self):
-        while True:
+        # New route for starting UGC workflow
+        @self.app.route('/start_ugc', methods=['POST'])
+        async def handle_start_ugc():
             try:
-                cpu_usage = psutil.cpu_percent(interval=1)
-                memory_usage = psutil.virtual_memory().percent
-                current_profit = (await self.check_funding_goal())[1]
-                self.performance_history.append([cpu_usage, memory_usage, current_profit, self.concurrency_limit])
-                
-                if len(self.performance_history) >= 10 and not self.model_trained:
-                    X = np.array([[h[0], h[1], h[2]] for h in self.performance_history])
-                    y = np.array([h[3] for h in self.performance_history])
-                    self.concurrency_model.fit(X, y)
-                    self.model_trained = True
-                    logger.info("Concurrency prediction model trained.")
-                
-                previous_limit = self.concurrency_limit
-                if self.model_trained:
-                    predicted_limit = self.concurrency_model.predict([[cpu_usage, memory_usage, current_profit]])[0]
-                    self.concurrency_limit = max(5, min(15 * self.base_concurrency, int(predicted_limit)))
+                data = await request.get_json()
+                client_industry = data.get('client_industry')
+                num_videos = data.get('num_videos', 1)
+                script = data.get('script') # Optional script override
+                target_services = data.get('target_services') # Optional list like ['heygen.com', 'descript.com']
+
+                if not client_industry:
+                    return jsonify({"error": "Missing 'client_industry' parameter"}), 400
+
+                # Use asyncio.create_task to run the workflow in the background
+                # so the API request returns quickly.
+                asyncio.create_task(self.start_ugc_workflow(
+                    client_industry=client_industry,
+                    num_videos=num_videos,
+                    script=script,
+                    target_services=target_services
+                ))
+
+                return jsonify({"status": "UGC workflow initiated", "client_industry": client_industry}), 202 # Accepted
+
+            except Exception as e:
+                logger.error(f"Failed to initiate UGC workflow via API: {e}", exc_info=True)
+                return jsonify({"status": "error", "message": str(e)}), 500
+
+        # Route for serving temporary hosted audio (if needed by Voice Agent)
+        @self.app.route('/hosted_audio/<filename>')
+        async def serve_hosted_audio(filename):
+            try:
+                # Security: Ensure filename is safe and doesn't allow directory traversal
+                safe_filename = re.sub(r'[^\w\.-]', '_', filename)
+                filepath = os.path.join(self.temp_audio_dir, safe_filename)
+                if os.path.exists(filepath):
+                    return await send_file(filepath, mimetype='audio/mpeg') # Adjust mimetype if needed
                 else:
-                    if cpu_usage < 50 and memory_usage < 50:
-                        self.concurrency_limit = min(15 * self.base_concurrency, self.concurrency_limit + 5)
-                    elif cpu_usage > 70 or memory_usage > 70:
-                        self.concurrency_limit = max(5, self.concurrency_limit - 5)
-                
-                logger.info(f"Concurrency limit adjusted to {self.concurrency_limit}")
-                if previous_limit != self.concurrency_limit:
-                    await self.send_notification(
-                        "Concurrency Limit Adjusted",
-                        f"Concurrency limit changed from {previous_limit} to {self.concurrency_limit} (CPU: {cpu_usage}%, Memory: {memory_usage}%, Profit: ${current_profit:.2f})"
-                    )
-                await asyncio.sleep(300)  # Adjust every 5 minutes
+                    return jsonify({"error": "File not found"}), 404
             except Exception as e:
-                logger.error(f"Concurrency adjustment failed: {e}")
-                await asyncio.sleep(60)
-
-    async def monitor_agents(self):
-        while True:
-            try:
-                for name, agent in self.agents.items():
-                    async with self.session_maker() as session:
-                        metric = Metric(
-                            agent_name=name,
-                            timestamp=datetime.utcnow(),
-                            metric_name="status",
-                            value="running"
-                        )
-                        session.add(metric)
-                        await session.commit()
-                        agent_status.labels(agent_name=name).set(1)  # Prometheus metric
-                logger.info("Agent status updated in PostgreSQL and Prometheus.")
-                await asyncio.sleep(300)  # Every 5 minutes
-            except Exception as e:
-                logger.error(f"Agent monitoring failed: {e}")
-                error_count.labels(agent_name=name).inc()
-                await asyncio.sleep(60)
-
-    async def manage_sandbox(self):
-        sandbox_count = 0
-        while True:
-            try:
-                is_goal_met, total_profit = await self.check_funding_goal()
-                osint_insights = await self.agents['osint'].get_insights()
-                recommended_scale = osint_insights.get('recommended_scale', 1)
-                max_sandboxes = min(3, int(total_profit / 6000) * recommended_scale)
-
-                if is_goal_met and sandbox_count < max_sandboxes:
-                    # Clone an agent (e.g., OSINT) and tweak it
-                    sandbox_schema = f"sandbox_osint_{int(datetime.utcnow().timestamp())}_{sandbox_count}"
-                    sandbox_session_maker = create_session_maker(self.engine, sandbox_schema)
-                    sandbox_orchestrator = Orchestrator(schema=sandbox_schema)
-                    sandbox_orchestrator.session_maker = sandbox_session_maker
-                    await sandbox_orchestrator.initialize_database()
-                    await sandbox_orchestrator.initialize_clients()
-                    await sandbox_orchestrator.initialize_agents()
-
-                    # Modify OSINT Agent with a new tool
-                    sandbox_orchestrator.agents['osint'].tool_success_rates['NewTool'] = 1.0
-                    sandbox_tasks = [agent.run() for agent in sandbox_orchestrator.agents.values()]
-                    asyncio.create_task(asyncio.gather(*sandbox_tasks))
-
-                    # Evaluate performance after 1 hour
-                    await asyncio.sleep(3600)
-                    sandbox_profit = await sandbox_orchestrator.agents['scoring'].calculate_total_profit(sandbox_session_maker())
-                    main_profit = await self.agents['scoring'].calculate_total_profit(self.session_maker())
-                    if sandbox_profit > main_profit:
-                        self.agents['osint'].tool_success_rates['NewTool'] = 1.0
-                        logger.info(f"Promoted sandbox change: Added NewTool to OSINT Agent")
-                    sandbox_count += 1
-                    logger.info(f"Sandbox {sandbox_count} initialized and evaluated")
-                await asyncio.sleep(3600)
-            except Exception as e:
-                logger.error(f"Sandbox management failed: {e}")
-                await self.report_error("SandboxManagement", str(e))
-                await asyncio.sleep(3600)
-
-    async def check_funding_goal(self):
-        try:
-            async with self.session_maker() as session:
-                total_profit = await self.agents['scoring'].calculate_total_profit(session)
-                return total_profit >= 6000, total_profit
-        except Exception as e:
-            logger.error(f"Funding goal check failed: {e}")
-            await self.report_error("FundingGoalCheck", str(e))
-            return False, 0
+                logger.error(f"Error serving hosted audio {filename}: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+    # --- End Route Setup ---
 
 
-    async def generate_invoice(self, client_id, amount, user_role):
-        try:
-            # Restrict invoice generation to admins
-            if user_role != 'admin':
-                raise PermissionError("Only admins can generate invoices.")
-
-            # Initialize secure storage for retrieving secrets
-            secure_storage = SecureStorage()
-
-            # Retrieve and parse bank details stored as a JSON string
-            bank_details_str = await secure_storage.get_secret("bank_details")
-            if not bank_details_str:
-                raise ValueError("Bank details missing in Vault.")
-            bank_details = json.loads(bank_details_str)
-            required_bank_fields = ["account", "swift", "name", "address"]
-            if not all(key in bank_details for key in required_bank_fields):
-                raise ValueError("Bank details incomplete in Vault.")
-
-            # Access client data and legal compliance
-            async with self.session_maker() as session:
-                client = await session.get(Client, client_id)
-                if not client:
-                    raise ValueError(f"Client with ID {client_id} not found")
-                if 'legal' not in self.agents:
-                    raise ValueError("LegalComplianceAgent not initialized")
-
-                legal_data = await self.agents['legal'].get_invoice_details(client.country)
-                legal_note = self.config.LEGAL_NOTE
-                contract_details = legal_data['contract'] if legal_data['contract'] else "Standard agreement applies."
-
-                # Validate invoice content
-                is_valid = await self.agents['legal'].validate_invoice_content({
-                    'amount': amount,
-                    'note': legal_note,
-                    'contract': contract_details
-                })
-                if not is_valid:
-                    raise ValueError("Invoice content failed legal validation")
-
-                # Handle W-8BEN data for U.S. clients
-                w8ben_data = None
-                if client.country == "USA":
-                    w8ben_data_str = await secure_storage.get_secret("w8ben_data")
-                    if not w8ben_data_str:
-                        raise ValueError("W-8BEN data missing for USA client")
-                    w8ben_data = json.loads(w8ben_data_str)
-                    required_w8_fields = ["name", "country", "tin"]
-                    if not all(field in w8ben_data for field in required_w8_fields):
-                        raise ValueError("W-8BEN data incomplete; requires name, country, and TIN.")
-
-                # Generate the invoice PDF
-                filename = f"invoice_{client_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.pdf"
-                filepath = os.path.join("/app/invoices", filename)
-                os.makedirs(os.path.dirname(filepath), exist_ok=True)
-                c = canvas.Canvas(filepath, pagesize=letter)
-
-                # Dynamic layout starting from the top
-                y = 750
-                c.drawString(100, y, f"Invoice for {client.name}")
-                y -= 20
-                c.drawString(100, y, f"Amount: ${amount:.2f}")
-                y -= 20
-                c.drawString(100, y, "Payment to Agency Designated Account")  # NEW LINE HERE
-                y -= 20
-                c.drawString(100, y, "Payment Details (Morocco):")
-                y -= 20
-                c.drawString(100, y, f"IBAN: {bank_details['account']}")
-                y -= 20
-                c.drawString(100, y, f"SWIFT/BIC: {bank_details['swift']}")
-                y -= 20
-                c.drawString(100, y, f"Bank: {bank_details['name']}")
-                y -= 20
-                c.drawString(100, y, f"Address: {bank_details['address']}")
-                y -= 20
-
-                # Add W-8BEN data for U.S. clients
-                if w8ben_data:
-                    c.drawString(100, y, "Tax Information (W-8BEN):")
-                    y -= 20
-                    c.drawString(100, y, f"Name: {w8ben_data['name']}")
-                    y -= 20
-                    c.drawString(100, y, f"Country: {w8ben_data['country']}")
-                    y -= 20
-                    c.drawString(100, y, f"TIN: {w8ben_data['tin']}")
-                    y -= 20
-
-                # Add legal note
-                c.drawString(100, y, "Note:")
-                text = c.beginText(100, y - 20)
-                text.textLines(legal_note)
-                c.drawText(text)
-
-                # Adjust position for contract details based on legal note length
-                note_lines = len(legal_note.split('\n'))
-                y -= 20 + (note_lines * 20)
-
-                # Add contract details
-                c.drawString(100, y, "Contract Details:")
-                text = c.beginText(100, y - 20)
-                text.textLines(contract_details)
-                c.drawText(text)
-
-                # Finalize and save the PDF
-                c.save()
-                logger.info(f"Invoice generated: {filepath}")
-                await self.send_notification(
-                    "InvoiceGenerated",
-                    f"Invoice for {client.name} (ID: {client_id}) for ${amount:.2f}. File: {filepath}"
-                )
-                return filepath
-
-        except Exception as e:
-            logger.error(f"Invoice generation failed for client {client_id}: {e}")
-            await self.report_error("InvoiceGeneration", str(e))
-            raise
-
-    async def cleanup_old_logs(self):
-        while True:
-            try:
-                async with self.session_maker() as session:
-                    threshold = datetime.utcnow() - timedelta(days=30)
-                    await session.execute("DELETE FROM metrics WHERE timestamp < :threshold", {"threshold": threshold})
-                    await session.commit()
-                    logger.info("Old logs cleaned up.")
-                    await self.send_notification(
-                        "Log Cleanup Completed",
-                        "Old logs older than 30 days have been successfully cleaned up."
-                    )
-                await asyncio.sleep(86400)  # Daily cleanup
-            except Exception as e:
-                logger.error(f"Log cleanup failed: {e}")
-                await asyncio.sleep(3600)
-
+    @think_step("run")
     async def run(self):
         try:
             await self.initialize_clients()
-            await self.initialize_database()
+            await self.initialize_database() # Ensures tables exist, including MigrationStatus
+            await self._run_encryption_migration_v2() # Run migration after DB init, before agents
             await self.initialize_primary_api_key()
-            await self.initialize_agents()
+            await self.initialize_agents() # Agents initialized after migration is confirmed complete
             
             # Create initial OpenRouter accounts immediately
             await self.create_openrouter_accounts(5)  # Start with 5 accounts
             
             await self.start_testing_phase()
-            self.approved = True
+            self.approved = True # Assuming testing phase implies approval for now
             logger.info("Testing phase completed successfully. Agency approved for full operation.")
             
             boost_task = asyncio.create_task(self.adjust_concurrency())
@@ -701,34 +912,72 @@ class Orchestrator:
             sandbox_task = asyncio.create_task(self.manage_sandbox())
             cleanup_task = asyncio.create_task(self.cleanup_old_logs())
             reset_task = asyncio.create_task(self.reset_api_key_availability())
+            feedback_task = asyncio.create_task(self.run_feedback_loop()) # Create feedback loop task
             agent_tasks = [asyncio.create_task(agent.run()) for agent in self.agents.values()]
-            await asyncio.gather(*agent_tasks, boost_task, monitor_task, sandbox_task, cleanup_task, reset_task)
+            # Add feedback_task to gather
+            await asyncio.gather(*agent_tasks, boost_task, monitor_task, sandbox_task, cleanup_task, reset_task, feedback_task)
         except Exception as e:
             logger.error(f"Agency run failed: {e}")
             await self.report_error("Orchestrator", str(e))
             raise
 
+    async def run_feedback_loop(self):
+        """Runs the periodic feedback collection and application loop."""
+        logger.info("Starting periodic feedback loop (daily).")
         while True:
             try:
-                feedback_data = {}
-                for agent_name, agent in self.agents.items():
-                    if hasattr(agent, 'collect_insights'):
-                        feedback_data[agent_name] = await agent.collect_insights()
-                if feedback_data:
-                    validated_feedback = await self.agents['think'].process_feedback(feedback_data)
-                    for agent_name, feedback in validated_feedback.items():
-                        if agent_name in self.agents and feedback:
-                            await self.agents[agent_name].apply_insights(feedback)
-                    logger.info("Feedback distributed to agents")
-                    await self.send_notification(
-                        "Feedback Cycle Complete",
-                        f"Distributed feedback to {len(validated_feedback)} agents"
-                    )
+                # Wait initially before the first check
                 await asyncio.sleep(86400)  # Daily cycle
+
+                feedback_data = {}
+                # Use self.agents directly if accessible
+                for agent_name, agent in self.agents.items():
+                    # Check if agent exists and has the method
+                    if agent and hasattr(agent, 'collect_insights') and callable(agent.collect_insights):
+                        try:
+                            feedback_data[agent_name] = await agent.collect_insights()
+                        except Exception as insight_err:
+                            logger.error(f"Error collecting insights from {agent_name}: {insight_err}")
+                    # else: logger.debug(f"Agent {agent_name} missing or lacks collect_insights method.") # Optional debug
+
+                if feedback_data:
+                    # Ensure think agent exists and has the method
+                    think_agent = self.agents.get('think')
+                    if think_agent and hasattr(think_agent, 'process_feedback') and callable(think_agent.process_feedback):
+                        try:
+                            validated_feedback = await think_agent.process_feedback(feedback_data)
+                            applied_count = 0
+                            for agent_name, feedback in validated_feedback.items():
+                                target_agent = self.agents.get(agent_name)
+                                # Check if target agent exists and has the method
+                                if target_agent and feedback and hasattr(target_agent, 'apply_insights') and callable(target_agent.apply_insights):
+                                    try:
+                                        await target_agent.apply_insights(feedback)
+                                        applied_count += 1
+                                    except Exception as apply_err:
+                                        logger.error(f"Error applying insights to {agent_name}: {apply_err}")
+                            logger.info(f"Feedback distributed to {applied_count} agents.")
+                            if hasattr(self, 'send_notification'): # Check if send_notification exists
+                                await self.send_notification(
+                                    "Feedback Cycle Complete",
+                                    f"Distributed feedback to {applied_count} agents."
+                                )
+                        except Exception as process_err:
+                            logger.error(f"Error processing feedback with ThinkTool: {process_err}")
+                    else:
+                        logger.warning("ThinkTool agent or process_feedback method not available for feedback loop.")
+                else:
+                    logger.info("No feedback data collected in this cycle.")
+
+            except asyncio.CancelledError:
+                 logger.info("Feedback loop cancelled.")
+                 break # Exit loop if cancelled
             except Exception as e:
                 logger.error(f"Feedback loop failed: {e}")
-                await self.report_error("FeedbackLoop", str(e))
-                await asyncio.sleep(3600)
+                if hasattr(self, 'report_error'): # Check if report_error exists
+                    await self.report_error("FeedbackLoop", str(e))
+                # Avoid rapid retries on persistent errors
+                await asyncio.sleep(3600) # Wait an hour before retrying after a failure
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()

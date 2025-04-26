@@ -1,0 +1,19 @@
+"stop bullshitting" & "grow up"
+
+If you want to scrape someones best-performing tweets in order to feed them to AI & copy their brand voice...
+
+open up their profile on an incognito browser - only the best-performing tweets will appear
+
+then whip up a quick scraping script in grok
+
+
+-------------
+
+
+hear me out...
+
+an AI tool that uses AI to analyze your competitors content the second they upload it...
+
+& then texts you ways you can apply the same strategies to market your product
+
+new marketing ideas hitting your inbox all day everyday

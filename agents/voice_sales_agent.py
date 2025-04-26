@@ -22,63 +22,76 @@ from typing import Optional, Dict, Any, List, Tuple # Architect-Zero: Added typi
 import sqlalchemy # Architect-Zero: Added for SQLAlchemyError
 import time # Architect-Zero: Added for TTS hosting filename
 
+# Import the base class and KBInterface placeholder
+from .base_agent import GeniusAgentBase, KBInterface # Use relative import
+from prompts.agent_meta_prompts import VOICE_AGENT_META_PROMPT # Import meta prompt
+
 # Genius-level logging for production diagnostics
 logger = logging.getLogger(__name__)
-# Architect-Zero: Recommend configuring logging globally in main.py or orchestrator
-# Avoid basicConfig here if configured elsewhere. Ensure handlers are appropriate (e.g., RotatingFileHandler)
-# logging.basicConfig(...)
+# Logging should be configured globally
 
-class VoiceSalesAgent:
+class VoiceAgent(GeniusAgentBase): # Renamed and inherited
     """
-    VoiceSalesAgent v2.1 (Architect-Zero Refinement): Manages real-time voice sales calls
-    using Twilio, Deepgram (STT/TTS), and LLMs. Requires an external WebSocket endpoint
-    to forward Twilio audio streams to Deepgram. Includes refined error handling,
-    state management, and call lifecycle logic.
+    Voice Agent (Genius Level): Manages real-time voice sales calls using Twilio,
+    Deepgram (STT/TTS), and internal LLM reasoning. Focuses on adaptive conversation,
+    deep learning from interactions, and maximizing profitable outcomes.
     """
-    AGENT_NAME = "VoiceSalesAgent"
+    AGENT_NAME = "VoiceAgent" # Use class attribute for consistency
 
-    def __init__(self, session_maker: AsyncSession, config: Dict[str, Any], orchestrator: Any, clients_models: List[Tuple[Any, str]]):
-        self.session_maker = session_maker
-        self.config = config
-        self.orchestrator = orchestrator
-        # self.clients_models = clients_models # Architect-Zero: Unused in provided snippet, remove if not needed elsewhere
-        # self.think_tool = orchestrator.agents.get('think') # Architect-Zero: Unused, remove if not needed
+    # Ensure KBInterface is imported correctly at the top
+    # from .base_agent import GeniusAgentBase, KBInterface
 
-        # --- Configuration ---
+    def __init__(self, session_maker: AsyncSession, orchestrator: Any, kb_interface: KBInterface): # Accepts kb_interface
+        # Pass kb_interface to the base class constructor
+        super().__init__(agent_name=self.AGENT_NAME, kb_interface=kb_interface)
+        # self.config is inherited from GeniusAgentBase
+        # self.kb_interface is inherited from GeniusAgentBase
+        self.session_maker = session_maker # Keep DB session maker
+        self.orchestrator = orchestrator # Keep orchestrator reference
+        self.think_tool = orchestrator.agents.get('think') # Keep for non-core tasks initially
+
+        # --- Internal State Initialization ---
+        self.internal_state['target_country'] = self.config.get("VOICE_TARGET_COUNTRY", "USA")
+        self.internal_state['aura_voice'] = self.config.get("DEEPGRAM_AURA_VOICE", "aura-asteria-en")
+        self.internal_state['deepgram_stt_model'] = self.config.get("DEEPGRAM_STT_MODEL", "nova-2-general")
+        self.internal_state['payment_terms'] = self.config.get("PAYMENT_TERMS", "Standard payment terms apply.")
+        self.internal_state['intent_confidence_threshold'] = float(self.config.get("VOICE_INTENT_CONFIDENCE_THRESHOLD", 0.6))
+        self.internal_state['openrouter_intent_model'] = self.config.get("OPENROUTER_INTENT_MODEL", "google/gemini-flash-1.5")
+        self.internal_state['openrouter_response_model'] = self.config.get("OPENROUTER_RESPONSE_MODEL", "google/gemini-flash-1.5")
+        self.internal_state['deepgram_receive_timeout'] = float(self.config.get("DEEPGRAM_RECEIVE_TIMEOUT_S", 60.0))
+        self.internal_state['openrouter_intent_timeout'] = float(self.config.get("OPENROUTER_INTENT_TIMEOUT_S", 10.0))
+        self.internal_state['openrouter_response_timeout'] = float(self.config.get("OPENROUTER_RESPONSE_TIMEOUT_S", 15.0))
+        self.internal_state['active_calls'] = {} # Track state per call_sid: {'state': '...', 'log': []}
+
+        # --- Essential Clients (Direct Attributes) ---
         self.twilio_account_sid = self.config.get("TWILIO_ACCOUNT_SID")
         self.twilio_auth_token = self.config.get("TWILIO_AUTH_TOKEN")
         self.deepgram_api_key = self.config.get("DEEPGRAM_API_KEY")
-        self.target_country = self.config.get("VOICE_TARGET_COUNTRY", "USA")
-        self.aura_voice = self.config.get("DEEPGRAM_AURA_VOICE", "aura-asteria-en")
-        self.deepgram_model = self.config.get("DEEPGRAM_STT_MODEL", "nova-2-general") # Use Nova-2
-        self.payment_terms = self.config.get("PAYMENT_TERMS", "Standard payment terms apply.") # Example default
 
         if not all([self.twilio_account_sid, self.twilio_auth_token, self.deepgram_api_key]):
-             logger.critical(f"{self.AGENT_NAME}: Missing critical API credentials (Twilio SID/Token, Deepgram Key). Agent will likely fail.")
-             # Consider raising an error to prevent startup if critical config is missing
-             # raise ValueError("Missing critical VoiceSalesAgent configuration")
+             self.logger.critical(f"{self.AGENT_NAME}: Missing critical API credentials (Twilio SID/Token, Deepgram Key). Agent will likely fail.")
+             # Consider raising an error during Orchestrator init if critical config is missing
+             # raise ValueError("Missing critical VoiceAgent configuration")
 
-        # --- Clients ---
         try:
             self.twilio_client = TwilioClient(self.twilio_account_sid, self.twilio_auth_token)
         except TwilioException as e:
-             logger.critical(f"{self.AGENT_NAME}: Failed to initialize Twilio client: {e}. Check credentials.")
-             # Raise error or handle gracefully depending on desired startup behavior
+             self.logger.critical(f"{self.AGENT_NAME}: Failed to initialize Twilio client: {e}. Check credentials.")
              raise ValueError(f"Twilio client initialization failed: {e}") from e
 
-        self.deepgram_client = Deepgram(self.deepgram_api_key)
+        try:
+            # Ensure Deepgram client is initialized correctly
+            self.deepgram_client = Deepgram(self.deepgram_api_key)
+            self.logger.info(f"{self.AGENT_NAME}: Deepgram client initialized.")
+        except Exception as e:
+            self.logger.critical(f"{self.AGENT_NAME}: Failed to initialize Deepgram client: {e}", exc_info=True)
+            raise ValueError(f"Deepgram client initialization failed: {e}") from e
 
-        # --- Meta Prompt ---
-        # Architect-Zero: Consider loading from config or a dedicated prompt file
-        self.meta_prompt = self.config.get("VOICE_META_PROMPT", """
-        You are a voice sales agent for UGC Genius... [rest of prompt]
-        """)
 
-        # Architect-Zero: max_concurrency is defined in OptimizationAgent's target check,
-        # but actual enforcement usually happens *before* handle_call is invoked (e.g., in Orchestrator).
-        # self.max_concurrency = int(self.config.get("VOICE_MAX_CONCURRENCY", 5)) # Example if needed locally
+        # --- Meta Prompt (Loaded from prompts module) ---
+        self.meta_prompt = VOICE_AGENT_META_PROMPT
 
-        logger.info(f"{self.AGENT_NAME} v2.1 initialized. Target: {self.target_country}, Voice: {self.aura_voice}")
+        self.logger.info(f"{self.AGENT_NAME} (Genius Level) initialized. Target: {self.internal_state['target_country']}, Voice: {self.internal_state['aura_voice']}")
 
     # Architect-Zero: Removed get_allowed_concurrency. Concurrency limiting should typically
     # happen *before* a task (like handle_call) is assigned to an agent instance,
@@ -488,57 +501,65 @@ class VoiceSalesAgent:
     # --- Core Logic Methods ---
 
     async def interpret_intent(self, response: str) -> Tuple[str, float, List[str], str]:
-        """Analyze client intent using the best available OpenRouter client."""
-        prompt = f"""
-        {self.meta_prompt}
-        Analyze the intent of the following client response in our ongoing sales call.
-        Client Response: '{response}'
-        Return JSON: {{ "intent": "...", "confidence": 0.0-1.0, "sub_intents": ["..."], "emotional_tone": "..." }}
-        Possible intents: interested, hesitant, objection, closing, clarification, irrelevant, hangup_signal.
-        """
-        # Architect-Zero: Ensure get_available_openrouter_clients is robust
-        clients = await self.orchestrator.get_available_openrouter_clients()
-        if not clients:
-             logger.error(f"{self.AGENT_NAME}: No OpenRouter clients available for intent interpretation.")
-             return "unknown", 0.0, [], "neutral"
+        """Analyze client intent using internal logic and a single LLM call."""
+        self.logger.debug(f"Interpreting intent for response: '{response[:100]}...'")
+        intent = "unknown"
+        confidence = 0.0
+        sub_intents = []
+        emotional_tone = "neutral"
 
-        last_exception = None
-        content = None # Initialize content
-        for client_obj in clients: # Rename variable
+        try:
+            # 1. Prepare Context for Dynamic Prompt
+            task_context = {
+                "task": "Interpret client intent",
+                "client_response": response,
+                "current_call_state": self.internal_state.get('active_calls', {}).get(task_context.get('call_sid', 'unknown'), {}).get('state', 'unknown'), # Get current state if available
+                "possible_intents": ["interested", "hesitant", "objection", "closing", "clarification", "irrelevant", "hangup_signal"],
+                "desired_output_format": "JSON: { \"intent\": \"...\", \"confidence\": 0.0-1.0, \"sub_intents\": [\"...\"], \"emotional_tone\": \"...\" }"
+            }
+
+            # 2. Generate the Dynamic Prompt
+            intent_prompt = await self.generate_dynamic_prompt(task_context)
+
+            # 3. Make Single LLM Call
+            # Using think_tool's method as proxy for internal LLM access for now
+            llm_response_str = await self.think_tool._call_llm_with_retry(
+                intent_prompt,
+                model=self.internal_state.get('openrouter_intent_model'), # Use configured model
+                temperature=0.1, # Very low temp for classification
+                max_tokens=150,
+                response_format={"type": "json_object"}, # Request JSON output
+                timeout=self.internal_state.get('openrouter_intent_timeout')
+            )
+
+            if not llm_response_str:
+                raise Exception("LLM call for intent interpretation returned empty response.")
+
+            # 4. Parse Response
             try:
-                # Use the actual client object obtained from the orchestrator
-                llm_response = await client_obj.chat.completions.create(
-                    model=self.config.get("OPENROUTER_INTENT_MODEL", "google/gemini-flash-1.5"), # Use fast model
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2, # Low temp for classification
-                    max_tokens=150,
-                    response_format={"type": "json_object"},
-                    timeout=float(self.config.get("OPENROUTER_INTENT_TIMEOUT_S", 10.0)) # Short timeout
-                )
-                content = llm_response.choices[0].message.content
-                intent_data = json.loads(content)
+                # Attempt to find JSON block if LLM adds extra text
+                json_start = llm_response_str.find('{')
+                json_end = llm_response_str.rfind('}') + 1
+                if json_start != -1 and json_end != -1:
+                    llm_response_json_str = llm_response_str[json_start:json_end]
+                    intent_data = json.loads(llm_response_json_str)
+                    intent = intent_data.get('intent', 'unknown')
+                    confidence = float(min(max(intent_data.get('confidence', 0.0), 0.0), 1.0))
+                    sub_intents = intent_data.get('sub_intents', [])
+                    emotional_tone = intent_data.get('emotional_tone', 'neutral')
+                    self.logger.info(f"Interpreted intent: {intent} (conf: {confidence:.2f}, tone: {emotional_tone})")
+                else:
+                    self.logger.warning(f"Could not find JSON object in LLM intent response: {llm_response_str}")
 
-                intent = intent_data.get('intent', 'unknown')
-                confidence = float(min(max(intent_data.get('confidence', 0.0), 0.0), 1.0))
-                sub_intents = intent_data.get('sub_intents', [])
-                emotional_tone = intent_data.get('emotional_tone', 'neutral')
-
-                logger.debug(f"{self.AGENT_NAME}: Interpreted intent: {intent} (conf: {confidence:.2f}, tone: {emotional_tone}) using client {client_obj.api_key[:5]}...")
-                return intent, confidence, sub_intents, emotional_tone
             except (json.JSONDecodeError, KeyError, ValueError) as parse_err:
-                 logger.warning(f"{self.AGENT_NAME}: Failed to parse LLM intent response ({parse_err}): {content}")
-                 last_exception = parse_err # Continue to next client
-            except Exception as e: # Catch other potential errors (API errors, timeouts)
-                logger.warning(f"{self.AGENT_NAME}: LLM client {client_obj.api_key[:5]}... failed for intent: {e}")
-                last_exception = e
-                # Architect-Zero: Implement logic to mark client as unavailable if specific errors occur (e.g., rate limit, auth)
-                if "rate limit" in str(e).lower() or "authentication" in str(e).lower():
-                     if hasattr(self.orchestrator, 'mark_client_unavailable'):
-                          await self.orchestrator.mark_client_unavailable(client_obj.api_key) # Pass identifier
-                # Continue to the next client
+                 self.logger.warning(f"Failed to parse LLM intent response ({parse_err}): {llm_response_str}")
+                 # Keep defaults: unknown, 0.0, [], neutral
 
-        logger.error(f"{self.AGENT_NAME}: All LLM clients failed for interpret_intent. Last error: {last_exception}")
-        return "unknown", 0.0, [], "neutral" # Fallback after all clients fail
+        except Exception as e:
+            self.logger.error(f"{self.AGENT_NAME}: Error during interpret_intent LLM call: {e}", exc_info=True)
+            # Keep defaults on error
+
+        return intent, confidence, sub_intents, emotional_tone
 
     async def update_conversation_state(self, current_state: str, intent: str, confidence: float, emotional_tone: str) -> str:
         """Advance the conversation state based on intent, confidence, and tone."""
@@ -577,73 +598,63 @@ class VoiceSalesAgent:
 
 
     async def generate_agent_response(self, state: str, client: Client, conversation_log: List[Dict]) -> str:
-        """Craft a tailored response using the best available OpenRouter client."""
-        # Architect-Zero: Structure prompt for clarity and injection resistance
-        prompt_context = f"""
-        You are a helpful, empathetic, and professional voice sales agent for UGC Genius.
-        Your goal is to guide the conversation towards a sale ($5,000+ target) while building trust.
-        Client: {client.name} (from {client.country}, Timezone: {client.timezone})
-        Current Conversation State: {state}
-        Recent Conversation History (last 5 turns):
-        {json.dumps(conversation_log[-5:], indent=2)}
+        """Craft a tailored response using internal logic and a single LLM call."""
+        self.logger.debug(f"Generating agent response for state: {state}, client: {client.id}")
+        agent_response = ""
 
-        Your Task: Generate the next agent response based ONLY on the current state and recent history.
-        - If state is 'greeting': Introduce yourself and the company briefly, ask an open-ended question.
-        - If state is 'needs_assessment': Ask probing questions to understand the client's pain points and goals related to content/marketing.
-        - If state is 'value_proposition': Explain how UGC Genius specifically addresses the client's needs identified earlier. Highlight benefits.
-        - If state is 'objection_handling': Acknowledge the objection empathetically, address it concisely, and pivot back to value or needs. Do NOT be defensive.
-        - If state is 'closing': Summarize value, confirm interest, suggest next steps (e.g., proposal, follow-up call), and mention payment terms if appropriate: '{self.payment_terms}'.
-        - If state is 'end_call': Provide a brief, polite closing remark (this state usually means the call is ending).
+        try:
+            # 1. Prepare Context for Dynamic Prompt
+            task_context = {
+                "task": "Generate agent response",
+                "current_call_state": state,
+                "client_info": { # Pass relevant client info
+                    "name": client.name,
+                    "country": client.country,
+                    "timezone": client.timezone,
+                },
+                "conversation_history": conversation_log[-5:], # Pass recent history
+                "payment_terms_snippet": self.internal_state.get('payment_terms'), # Pass relevant internal state
+                "desired_output_format": "Plain text response suitable for Text-to-Speech."
+            }
 
-        Keep responses concise and natural-sounding for voice. Avoid sounding robotic.
-        Do NOT invent information not present in the history.
-        Mention fund routing to Morocco ONLY if directly relevant to a client question or during final closing/payment discussion if required by policy.
-        Adhere to USA sales regulations (no misleading claims, respect opt-outs).
-        """
+            # 2. Generate the Dynamic Prompt
+            response_prompt = await self.generate_dynamic_prompt(task_context)
 
-        clients = await self.orchestrator.get_available_openrouter_clients()
-        if not clients:
-             logger.error(f"{self.AGENT_NAME}: No OpenRouter clients available for response generation.")
-             return "I apologize, I'm having trouble formulating a response right now. Could you please repeat that?" # Generic fallback
+            # 3. Make Single LLM Call
+            # Using think_tool's method as proxy for internal LLM access for now
+            llm_response_str = await self.think_tool._call_llm_with_retry(
+                response_prompt,
+                model=self.internal_state.get('openrouter_response_model'), # Use configured model
+                temperature=0.65, # Adjust temperature for conversational response
+                max_tokens=250, # Allow reasonable length
+                timeout=self.internal_state.get('openrouter_response_timeout')
+            )
 
-        last_exception = None
-        content = None # Initialize content
-        for client_obj in clients: # Rename variable to avoid conflict
-            try:
-                llm_response = await client_obj.chat.completions.create(
-                    model=self.config.get("OPENROUTER_RESPONSE_MODEL", "google/gemini-flash-1.5"), # Fast model
-                    messages=[{"role": "user", "content": prompt_context}],
-                    temperature=0.6, # Slightly creative but professional
-                    max_tokens=200, # Allow slightly longer responses
-                    timeout=float(self.config.get("OPENROUTER_RESPONSE_TIMEOUT_S", 15.0))
-                )
-                agent_response = llm_response.choices[0].message.content.strip()
-                # Architect-Zero: Add basic response validation (e.g., check if empty)
-                if not agent_response:
-                     logger.warning(f"{self.AGENT_NAME}: LLM client {client_obj.api_key[:5]}... returned empty response.")
-                     continue # Try next client
+            if not llm_response_str:
+                raise Exception("LLM call for agent response returned empty.")
 
-                logger.debug(f"{self.AGENT_NAME}: Generated response for state '{state}': '{agent_response[:100]}...' using client {client_obj.api_key[:5]}...")
-                return agent_response
-            except Exception as e:
-                logger.warning(f"{self.AGENT_NAME}: LLM client {client_obj.api_key[:5]}... failed for response generation: {e}")
-                last_exception = e
-                if "rate limit" in str(e).lower() or "authentication" in str(e).lower():
-                     if hasattr(self.orchestrator, 'mark_client_unavailable'):
-                          await self.orchestrator.mark_client_unavailable(client_obj.api_key)
-                # Continue to the next client
+            agent_response = llm_response_str.strip()
+            # Basic validation/cleanup
+            if not agent_response:
+                self.logger.warning(f"{self.AGENT_NAME}: LLM returned empty response string for state '{state}'.")
+                raise ValueError("Empty response generated")
 
-        logger.error(f"{self.AGENT_NAME}: All LLM clients failed for generate_agent_response. Last error: {last_exception}")
-        # Architect-Zero: Provide state-specific fallbacks if possible
-        fallback_responses = {
-            "greeting": "Hello, this is [Your Name] from UGC Genius. How can I help you today?",
-            "needs_assessment": "Could you tell me a bit more about your current challenges?",
-            "value_proposition": "Our service can definitely help with that.",
-            "objection_handling": "I understand your concern. Let me clarify.",
-            "closing": "Shall we discuss the next steps then?",
-            "end_call": "Thank you for your time. Goodbye."
-        }
-        return fallback_responses.get(state, "I seem to be having technical difficulties. Please call back later.")
+            self.logger.debug(f"{self.AGENT_NAME}: Generated response for state '{state}': '{agent_response[:100]}...'")
+
+        except Exception as e:
+            self.logger.error(f"{self.AGENT_NAME}: Error during generate_agent_response LLM call or processing: {e}", exc_info=True)
+            # Provide state-specific fallbacks
+            fallback_responses = {
+                "greeting": f"Hello {client.name.split()[0]}, this is {self.config.get('SENDER_NAME', 'Alex')} from UGC Genius. How are you today?",
+                "needs_assessment": "Could you tell me a bit more about your current content needs?",
+                "value_proposition": "Based on what you've said, I think our UGC service could really help.",
+                "objection_handling": "I understand. Let me see if I can address that.",
+                "closing": "It sounds like we could be a good fit. Would you be open to discussing next steps?",
+                "end_call": "Thank you for your time today. Goodbye."
+            }
+            agent_response = fallback_responses.get(state, "I apologize, I'm experiencing a technical issue. Could we reconnect shortly?")
+
+        return agent_response
 
 
     async def speak_response(self, text: str, call_sid: str):
@@ -940,3 +951,105 @@ class VoiceSalesAgent:
         #         await asyncio.sleep(60)
         while True: # Keep agent alive conceptually
              await asyncio.sleep(3600) # Placeholder sleep if not event-driven
+
+    # --- Abstract Method Implementations (Placeholders) ---
+
+    async def execute_task(self, task_details: Dict[str, Any]) -> Any:
+        """Core method to execute the agent's primary function for a given task."""
+        self.logger.info(f"execute_task received task: {task_details}")
+        # Example: Trigger handle_call if task is 'handle_incoming_call'
+        # task_type = task_details.get('type')
+        # if task_type == 'handle_call':
+        #     call_sid = task_details.get('call_sid')
+        #     client_id = task_details.get('client_id')
+        #     # Fetch client object
+        #     # await self.handle_call(call_sid, client) ...
+        # else:
+        #     self.logger.warning(f"Unsupported task type for VoiceAgent: {task_type}")
+        pass # Placeholder
+
+    async def learning_loop(self):
+        """
+        Prototype Learning Loop (v1 - Simulated Data).
+        Periodically simulates retrieving call performance data, analyzing it,
+        and updating internal strategy state (e.g., effective phrases).
+        """
+        # Ensure Counter is imported if not already
+        from collections import Counter
+
+        self.logger.info("Executing VoiceAgent learning loop prototype...")
+
+        try:
+            # --- 1. Simulate Data Retrieval (Placeholder) ---
+            # In reality, query CallLog, ConversationState, potentially KBInterface
+            # Example: Find successful closing phrases from recent calls
+            simulated_call_data = [
+                {'call_sid': 'CA1', 'outcome': 'success', 'final_state': 'end_call', 'log': [{'role': 'agent', 'text': 'Great, I will send that proposal right over.'}]},
+                {'call_sid': 'CA2', 'outcome': 'failed_compliance', 'final_state': 'end_call', 'log': [{'role': 'agent', 'text': 'Okay, thanks for your time.'}]},
+                {'call_sid': 'CA3', 'outcome': 'success', 'final_state': 'end_call', 'log': [{'role': 'agent', 'text': 'Excellent, I\'ll get the invoice generated.'}]},
+                {'call_sid': 'CA4', 'outcome': 'success', 'final_state': 'end_call', 'log': [{'role': 'agent', 'text': 'Perfect, I will send that proposal now.'}]},
+                {'call_sid': 'CA5', 'outcome': 'success', 'final_state': 'end_call', 'log': [{'role': 'agent', 'text': 'Great, I will send that proposal right over.'}]}, # Repeat successful phrase
+                # Add more simulated call logs
+            ]
+            self.logger.debug(f"Simulated call data retrieved: {len(simulated_call_data)} calls.")
+
+            # --- 2. Simulate Analysis (Placeholder) ---
+            # Find the most common successful closing phrase
+            successful_closing_phrases = Counter()
+            for call in simulated_call_data:
+                if call.get('outcome') == 'success' and call.get('final_state') == 'end_call':
+                    # Get the last agent utterance from the log
+                    agent_log = [turn['text'] for turn in call.get('log', []) if turn.get('role') == 'agent']
+                    if agent_log:
+                        last_phrase = agent_log[-1]
+                        # Simple counting, could be more sophisticated (e.g., embedding similarity)
+                        successful_closing_phrases[last_phrase] += 1
+
+            best_closing_phrase = self.internal_state.get('preferred_closing_phrase', "Suggest next steps.") # Default
+            if successful_closing_phrases:
+                most_common = successful_closing_phrases.most_common(1)
+                if most_common:
+                    # Check if the most common phrase occurred more than once for significance
+                    if most_common[0][1] > 1:
+                        best_closing_phrase = most_common[0][0]
+                        self.logger.info(f"Simulated Analysis: Most common successful closing phrase identified: '{best_closing_phrase}' (Count: {most_common[0][1]})")
+                    else:
+                        self.logger.info("Simulated Analysis: No closing phrase was significantly more successful.")
+                else:
+                    self.logger.info("Simulated Analysis: No successful closing phrases found in data.")
+
+
+            # --- 3. Simulate Strategy Update (Update Internal State) ---
+            if self.internal_state.get('preferred_closing_phrase') != best_closing_phrase:
+                self.internal_state['preferred_closing_phrase'] = best_closing_phrase
+                self.internal_state['last_learning_update_ts'] = datetime.now(timezone.utc)
+                self.logger.info(f"Internal state updated with new preferred closing phrase: '{best_closing_phrase}'")
+            else:
+                self.logger.info("No change in preferred closing phrase based on simulated analysis.")
+
+        except Exception as e:
+            self.logger.error(f"Error during VoiceAgent learning loop prototype: {e}", exc_info=True)
+
+        # --- Loop Delay ---
+        try:
+            await asyncio.sleep(3600 * 2) # Run every 2 hours (adjust interval as needed)
+        except asyncio.CancelledError:
+            self.logger.info("VoiceAgent learning loop cancelled.")
+            raise # Propagate cancellation
+
+    async def self_critique(self) -> Dict[str, Any]:
+        """Method for the agent to evaluate its own performance and strategy."""
+        self.logger.info("self_critique: Placeholder - Not yet implemented.")
+        # TODO: Implement logic to analyze call success rates, common failure points, compare against goals.
+        # Potentially use LLM call with specific critique prompt based on aggregated data.
+        return {"status": "ok", "feedback": "Self-critique not implemented."}
+
+    async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
+        """Constructs context-rich prompts for LLM calls (e.g., intent analysis, response generation)."""
+        self.logger.info("generate_dynamic_prompt: Placeholder - Not yet implemented.")
+        # TODO: Implement logic to fetch relevant data from KB (via self.kb_interface),
+        # combine with task_context (e.g., current call state, client info, conversation history)
+        # and VOICE_AGENT_META_PROMPT to create tailored prompts for internal LLM calls.
+        base_prompt = self.meta_prompt # Start with meta prompt
+        # Add context, KB insights, specific task instructions...
+        return f"{base_prompt}\n\nTask Context: {task_context}\n\n# Generate Output:\n"

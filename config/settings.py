@@ -6,6 +6,7 @@ import json
 from dotenv import load_dotenv
 import logging
 from typing import Optional, List, Dict, Any # For Settings class type hints
+import hashlib
 
 # Configure logging early (basic config, can be overridden by main app)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
@@ -120,6 +121,18 @@ PAYMENT_TERMS = os.getenv("PAYMENT_TERMS", "Standard terms: 50% upfront, 50% upo
 BASE_UGC_PRICE = float(os.getenv("BASE_UGC_PRICE", 5000.0))
 LEGAL_NOTE = os.getenv("LEGAL_NOTE", "Payment terms as agreed. All sales final upon service commencement. No refunds. Data managed securely. Agency not liable for indirect damages. Governed by laws of Morocco.")
 
+# --- External Service Credentials ---
+FIXED_SALT_STR = "your_secret_salt_string_here"
+FIXED_SALT = hashlib.sha256(FIXED_SALT_STR.encode()).digest()[:32]
+
+# --- VPN Settings ---
+NORDVPN_DOUBLE_VPN = os.getenv("NORDVPN_DOUBLE_VPN", "true").lower() == "true"
+
+# --- Payout Settings ---
+MOROCCAN_BANK_ACCOUNT = os.getenv("MOROCCAN_BANK_ACCOUNT")
+LEMON_SQUEEZY_API_KEY = os.getenv("LEMON_SQUEEZY_API_KEY")
+LEMON_SQUEEZY_PAYMENT_URL = os.getenv("LEMON_SQUEEZY_PAYMENT_URL")
+
 # --- Operational Parameters ---
 BASE_CONCURRENCY = int(os.getenv("BASE_CONCURRENCY", 5))
 # Agent-specific MAX concurrency (can be tuned down by OptimizationAgent)
@@ -226,6 +239,10 @@ class Settings:
     DEEPSEEK_MODEL: Optional[str] = DEEPSEEK_MODEL
     META_PROMPT: Optional[str] = META_PROMPT
     USER_NAME: Optional[str] = USER_NAME
+    NORDVPN_DOUBLE_VPN: Optional[bool] = NORDVPN_DOUBLE_VPN
+    MOROCCAN_BANK_ACCOUNT: Optional[str] = MOROCCAN_BANK_ACCOUNT
+    LEMON_SQUEEZY_API_KEY: Optional[str] = LEMON_SQUEEZY_API_KEY
+    LEMON_SQUEEZY_PAYMENT_URL: Optional[str] = LEMON_SQUEEZY_PAYMENT_URL
 
     def _convert_type(self, value: str) -> Any:
         """Attempts basic type conversion for env vars."""

@@ -35,81 +35,75 @@ import tenacity
 from typing import Optional, Dict, Any, List, Tuple
 import sqlalchemy # Architect-Zero: Added for SQLAlchemyError handling
 
-# --- Missing Custom Modules (Architect-Zero: Removed dependencies) ---
-# from web_ui import launch_browser, close_browser, navigate, find_element, click, get_text, wait_for_element
-# from proxy_manager import ProxyManager
-# from fingerprint_generator import FingerprintGenerator
-# from ai_element_detector import AIElementDetector
+# Import base class and prompt
+from .base_agent import GeniusAgentBase, KBInterface
+from prompts.agent_meta_prompts import OSINT_AGENT_META_PROMPT
+import re # Import re for filename sanitization
 
 # Configure advanced logging
 logger = logging.getLogger(__name__)
-# Architect-Zero: Recommend global logging config
-# logging.basicConfig(...)
+# Logging should be configured globally
 
 # Configure dedicated operational logger (assuming setup in main/orchestrator)
-op_logger = logging.getLogger('OperationalLog')
+# Ensure op_logger is accessible or passed if needed, or use standard logger
+# op_logger = logging.getLogger('OperationalLog')
 
 
-class OSINTAgent:
+class OSINTAgent(GeniusAgentBase): # Renamed and inherited
     """
-    OSINTAgent v2.1 (Architect-Zero Refinement): Collects, analyzes, and potentially
-    visualizes OSINT data. Dependencies on custom browser/proxy modules removed for stability.
-    Aggressive tools are disabled by default. Requires proper installation of libraries
-    and CLI tools (theHarvester, exiftool, recon-ng, etc.) and configuration.
+    OSINT Agent (Genius Level): Collects, analyzes, and exploits public data using
+    advanced techniques and tools, integrating findings into the central Knowledge Base.
     """
     AGENT_NAME = "OSINTAgent"
 
-    def __init__(self, session_maker: AsyncSession, config: Dict[str, Any], orchestrator: Any, clients_models: List[Tuple[AsyncLLMClient, str]]):
-        self.session_maker = session_maker
-        self.config = config
-        self.orchestrator = orchestrator
-        self.clients_models = clients_models # List of available LLM clients
-        # self.think_tool = orchestrator.agents.get('think') # Architect-Zero: Unused, remove if not needed
-        self.task_queue = asyncio.Queue()
-        self.max_concurrency = int(config.get("OSINT_MAX_CONCURRENT_TOOLS", 5)) # Limit concurrent tools
-        self.tool_semaphore = asyncio.Semaphore(self.max_concurrency)
-        self.memory_cache = {} # Simple cache for insights
+    def __init__(self, session_maker: AsyncSession, orchestrator: Any, kb_interface: KBInterface):
+        super().__init__(agent_name=self.AGENT_NAME, kb_interface=kb_interface)
+        # self.config is inherited
+        # self.kb_interface is inherited
+        self.session_maker = session_maker # Keep for saving OSINTData records
+        self.orchestrator = orchestrator # Keep for reporting/notifications/LLM access proxy
+        self.think_tool = orchestrator.agents.get('think') # Keep for analysis LLM calls initially
 
-        # --- Tool Configuration ---
-        # Architect-Zero: Load ALL keys/URLs from config/env
-        self.shodan_api_key = self.config.get("SHODAN_API_KEY")
-        # self.maltego_config = ... # Load if using Maltego transforms directly
-        self.spiderfoot_api_key = self.config.get("SPIDERFOOT_API_KEY")
-        self.spiderfoot_url = self.config.get("SPIDERFOOT_URL", "http://localhost:5001") # Default, should be configured
+        # --- Internal State Initialization ---
+        self.internal_state['task_queue'] = asyncio.Queue()
+        self.internal_state['max_concurrency'] = int(self.config.get("OSINT_MAX_CONCURRENT_TOOLS", 5))
+        self.internal_state['tool_semaphore'] = asyncio.Semaphore(self.internal_state['max_concurrency'])
+        self.internal_state['memory_cache'] = {} # Simple cache for insights (consider moving to KB)
+        self.internal_state['meta_prompt'] = OSINT_AGENT_META_PROMPT
 
-        # --- Feature Flags for Aggressive Tools ---
-        self.enable_google_dorking = bool(self.config.get("OSINT_ENABLE_GOOGLE_DORKING", False))
-        self.enable_social_scraping = bool(self.config.get("OSINT_ENABLE_SOCIAL_SCRAPING", False))
-        self.enable_dark_pool = bool(self.config.get("OSINT_ENABLE_DARK_POOL", False)) # Strongly recommend False
-        self.enable_webcam_search = bool(self.config.get("OSINT_ENABLE_WEBCAM_SEARCH", False)) # Strongly recommend False
+        # Tool Configuration (API Keys loaded from config/settings)
+        self.internal_state['shodan_api_key'] = self.config.get("SHODAN_API_KEY")
+        self.internal_state['spiderfoot_api_key'] = self.config.get("SPIDERFOOT_API_KEY")
+        self.internal_state['spiderfoot_url'] = self.config.get("SPIDERFOOT_URL", "http://localhost:5001")
 
-        # --- User Agent for Basic Scraping ---
-        try:
-            self.user_agent = UserAgent()
-        except Exception: # Handle potential errors fetching UA list
-             logger.warning(f"{self.AGENT_NAME}: Failed to initialize fake_useragent. Using default.")
-             self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        # Feature Flags for Aggressive Tools
+        self.internal_state['enable_google_dorking'] = bool(self.config.get("OSINT_ENABLE_GOOGLE_DORKING", False))
+        self.internal_state['enable_social_scraping'] = bool(self.config.get("OSINT_ENABLE_SOCIAL_SCRAPING", False))
+        self.internal_state['enable_dark_pool'] = bool(self.config.get("OSINT_ENABLE_DARK_POOL", False))
+        self.internal_state['enable_webcam_search'] = bool(self.config.get("OSINT_ENABLE_WEBCAM_SEARCH", False))
 
-
-        # --- Tool Success Rates (Simplified) ---
-        # Architect-Zero: More sophisticated learning could be added later if needed
-        self.tool_success_rates = {
+        # Tool Success Rates (Simplified - move to KB later for persistence/shared learning)
+        self.internal_state['tool_success_rates'] = {
             'theHarvester': 0.8, 'ExifTool': 0.7, 'Photon': 0.6, 'Sherlock': 0.8,
-            'Maltego': 0.7, 'Shodan': 0.9, 'Reconng': 0.7, 'SpiderFoot': 0.8, # Renamed Recon-ng key
+            'Maltego': 0.7, 'Shodan': 0.9, 'Reconng': 0.7, 'SpiderFoot': 0.8,
             'GoogleDorking': 0.5, 'SocialMediaScraping': 0.5,
-            # Disabled tools have 0 rate
             'DarkPoolSearch': 0.0, 'WebcamSearch': 0.0
         }
 
-        # --- Removed Dependencies ---
-        # self.proxy_manager = ProxyManager(...) # Removed
-        # self.fingerprint_generator = FingerprintGenerator() # Removed
-        # self.ai_element_detector = AIElementDetector(...) # Removed
-        logger.info(f"{self.AGENT_NAME} v2.1 initialized. Max concurrent tools: {self.max_concurrency}. "
-                    f"Aggressive tools enabled: Dorking={self.enable_google_dorking}, Social={self.enable_social_scraping}, "
-                    f"DarkPool={self.enable_dark_pool}, Webcam={self.enable_webcam_search}")
-        if self.enable_dark_pool or self.enable_webcam_search:
-             logger.critical(f"{self.AGENT_NAME}: SECURITY/LEGAL WARNING: Dark Pool or Webcam Search enabled. Ensure full compliance and risk assessment.")
+        # --- User Agent ---
+        try:
+            # UserAgent might cause issues in some environments, handle failure
+            from fake_useragent import UserAgent
+            self.user_agent_generator = UserAgent()
+        except Exception as ua_err:
+             self.logger.warning(f"{self.AGENT_NAME}: Failed to initialize fake_useragent ({ua_err}). Using default UA string.")
+             self.user_agent_generator = None # Flag that generator is unavailable
+
+        self.logger.info(f"{self.AGENT_NAME} (Genius Level) initialized. Max concurrent tools: {self.internal_state['max_concurrency']}. "
+                    f"Aggressive tools enabled: Dorking={self.internal_state['enable_google_dorking']}, Social={self.internal_state['enable_social_scraping']}, "
+                    f"DarkPool={self.internal_state['enable_dark_pool']}, Webcam={self.internal_state['enable_webcam_search']}")
+        if self.internal_state['enable_dark_pool'] or self.internal_state['enable_webcam_search']:
+             self.logger.critical(f"{self.AGENT_NAME}: SECURITY/LEGAL WARNING: Dark Pool or Webcam Search enabled. Ensure full compliance and risk assessment.")
 
     async def log_operation(self, level, message):
          """Helper to log to the operational log file."""
@@ -348,6 +342,66 @@ class OSINTAgent:
         # Exceptions will trigger retries.
         logger.debug(f"Executing {tool_func.__name__} with args: {args}, kwargs: {kwargs}")
         return await tool_func(*args, **kwargs)
+
+    # --- Helper Methods ---
+
+    async def _scrape_simple_html(self, url: str) -> Optional[BeautifulSoup]:
+        """
+        Fetches and parses HTML from a URL using aiohttp and BeautifulSoup.
+        Includes placeholder logic for proxy usage via Orchestrator.
+        """
+        self.logger.debug(f"Attempting simple scrape of URL: {url}")
+        ua = self.user_agent_generator.random if self.user_agent_generator else 'Mozilla/5.0'
+        headers = {'User-Agent': ua, 'Accept-Language': 'en-US,en;q=0.9', 'Accept': 'text/html'}
+        proxy_url: Optional[str] = None
+
+        # --- Proxy Integration Placeholder ---
+        if hasattr(self.orchestrator, 'get_proxy'):
+            try:
+                # Assume get_proxy returns a valid proxy URL string or None
+                proxy_url = await self.orchestrator.get_proxy(purpose="scraping", target_url=url)
+                if proxy_url:
+                    self.logger.debug(f"Using proxy for scraping {url}: {proxy_url.split('@')[-1]}") # Log proxy host, not creds
+                else:
+                    self.logger.debug(f"No proxy available or needed for {url}. Proceeding directly.")
+            except Exception as proxy_err:
+                self.logger.error(f"Failed to get proxy for scraping {url}: {proxy_err}")
+                # Decide whether to proceed without proxy or fail
+                # proxy_url = None # Ensure it's None if error occurs
+        else:
+            self.logger.warning("Orchestrator does not have 'get_proxy' method. Scraping without proxy.")
+        # --- End Proxy Integration Placeholder ---
+
+        try:
+            # Create session inside try block after potentially getting proxy
+            async with aiohttp.ClientSession(headers=headers) as session:
+                request_kwargs = {"timeout": 30, "allow_redirects": True}
+                if proxy_url:
+                    request_kwargs["proxy"] = proxy_url
+
+                async with session.get(url, **request_kwargs) as response:
+                    self.logger.debug(f"Scrape request to {url} (via proxy: {bool(proxy_url)}) completed with status: {response.status}")
+                    if response.status == 200:
+                        # Check content type before reading potentially large non-HTML response
+                        if 'text/html' in response.headers.get('Content-Type', '').lower():
+                            soup = BeautifulSoup(html, 'html.parser')
+                            self.logger.debug(f"Successfully scraped and parsed HTML from {url}")
+                            return soup
+                        else:
+                            self.logger.warning(f"Content type for {url} is not text/html ({response.headers.get('Content-Type')}). Skipping parse.")
+                            return None
+                    else:
+                        self.logger.warning(f"Failed to fetch {url} for scraping. Status: {response.status}")
+                        return None
+        except asyncio.TimeoutError:
+            self.logger.error(f"Timeout scraping URL: {url}")
+            return None
+        except aiohttp.ClientError as e:
+             self.logger.error(f"Client error scraping {url}: {e}")
+             return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error scraping {url}: {e}", exc_info=True)
+            return None
 
     # --- Tool Implementations ---
     # Architect-Zero: Add/Refine implementations below. Ensure they return dict.
@@ -856,61 +910,85 @@ class OSINTAgent:
     # --- Aggressive / Grey Area Tools (Use with Extreme Caution) ---
 
     async def run_GoogleDorking(self, target: str) -> Dict:
-        """Perform Google Dorking. WARNING: High risk of IP block/CAPTCHA. Respect ToS."""
-        if not self.enable_google_dorking:
+        """Perform Google Dorking using basic scraping. WARNING: High risk of IP block/CAPTCHA. Respect ToS."""
+        # Import necessary library here or at top level
+        import urllib.parse
+
+        if not self.internal_state.get('enable_google_dorking'):
+            self.logger.info("Google Dorking disabled by configuration.")
             return {"status": "disabled"}
-        logger.warning(f"Executing Google Dorking for {target}. RISKY - may violate ToS / get blocked.")
-        # Basic dorks - make configurable
+
+        self.logger.warning(f"Executing Google Dorking for {target}. RISKY - may violate ToS / get blocked.")
+        # Basic dorks - TODO: Make these configurable or dynamically generated
         dorks = [
             f"site:{target}",
             f'site:{target} intitle:"index of"',
             f'site:{target} filetype:pdf',
             f'site:{target} inurl:login',
+            f'site:{target} "contact"',
+            f'site:{target} "about us"',
         ]
         results = {}
-        headers = {'User-Agent': self.user_agent.random if hasattr(self, 'user_agent') else 'Mozilla/5.0', 'Accept-Language': 'en-US,en;q=0.9'}
+        # Use the generated UA if available, otherwise default
+        ua = self.user_agent_generator.random if self.user_agent_generator else 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        headers = {'User-Agent': ua, 'Accept-Language': 'en-US,en;q=0.9'}
         base_url = "https://www.google.com/search"
-        # Architect-Zero: Use a proper search library (e.g., googlesearch-python) if possible,
-        # as direct scraping is fragile and easily blocked. This is a basic scraping example.
+
         try:
+            # Use a single session for all dorks for potential cookie persistence (though Google might not rely on it)
             async with aiohttp.ClientSession(headers=headers) as session:
                 for dork in dorks:
                     params = {'q': dork, 'num': 20} # Request more results
-                    logger.debug(f"Executing Google Dork: {dork}")
-                    async with session.get(base_url, params=params) as response:
-                        await asyncio.sleep(random.uniform(2, 5)) # Rate limit
-                        if response.status == 200:
-                            html = await response.text()
-                            soup = BeautifulSoup(html, 'html.parser')
-                            # Parsing Google results is notoriously unstable. This is a basic attempt.
-                            links = []
-                            # Google often wraps links in /url?q=...
-                            for link_tag in soup.select('a[href^="/url?q="]'): # More specific selector
-                                href = link_tag['href']
-                                try:
-                                     actual_link = href.split('/url?q=')[1].split('&sa=')[0]
-                                     import urllib.parse
-                                     links.append(urllib.parse.unquote(actual_link))
-                                except Exception: pass # Ignore parsing/decoding errors
-                            # Also try finding direct links if structure changes
-                            for link_tag in soup.select('a h3'): # Links within result titles
-                                 parent_a = link_tag.find_parent('a')
-                                 if parent_a and parent_a.get('href'):
-                                      links.append(parent_a['href'])
+                    self.logger.debug(f"Executing Google Dork: {dork}")
+                    try:
+                        async with session.get(base_url, params=params, timeout=20) as response: # Add timeout
+                            # Implement stricter rate limiting
+                            await asyncio.sleep(random.uniform(5, 10)) # Longer, more random delay
 
-                            results[dork] = list(set(links)) # Unique links
-                            logger.debug(f"Google Dork '{dork}' found {len(results[dork])} potential links.")
-                        elif response.status == 429:
-                             logger.error(f"Google Dorking blocked (429 Too Many Requests) for {target}. Aborting dorks.")
-                             results[dork] = {"error": "Blocked (429)"}
-                             break # Stop dorking if blocked
-                        else:
-                            logger.warning(f"Google Dork '{dork}' failed with status {response.status}")
-                            results[dork] = {"error": f"HTTP Status {response.status}"}
+                            if response.status == 200:
+                                html = await response.text()
+                                # Check for CAPTCHA page before parsing
+                                if "CAPTCHA" in html or "unusual traffic" in html:
+                                     self.logger.error(f"Google Dorking CAPTCHA encountered for {target} on dork '{dork}'. Aborting dorks.")
+                                     results[dork] = {"error": "CAPTCHA / Blocked"}
+                                     break # Stop dorking if blocked
+
+                                soup = BeautifulSoup(html, 'html.parser')
+                                links = []
+                                # Refined selector for main result links
+                                for link_tag in soup.select('div.g a'): # Select links within general result blocks
+                                    href = link_tag.get('href')
+                                    if href:
+                                        if href.startswith('/url?q='): # Google redirect URL
+                                            try:
+                                                actual_link = href.split('/url?q=')[1].split('&sa=')[0]
+                                                links.append(urllib.parse.unquote(actual_link))
+                                            except Exception: pass # Ignore parsing errors
+                                        elif href.startswith('http') and not href.startswith('https://webcache.googleusercontent.com') and not href.startswith('https://policies.google.com'):
+                                            # Direct link, ignore cache/policy links
+                                            links.append(href)
+
+                                results[dork] = list(set(links)) # Unique links
+                                self.logger.debug(f"Google Dork '{dork}' found {len(results[dork])} potential links.")
+                            elif response.status == 429:
+                                 self.logger.error(f"Google Dorking blocked (429 Too Many Requests) for {target} on dork '{dork}'. Aborting dorks.")
+                                 results[dork] = {"error": "Blocked (429)"}
+                                 break # Stop dorking if blocked
+                            else:
+                                logger.warning(f"Google Dork '{dork}' failed with status {response.status}")
+                                results[dork] = {"error": f"HTTP Status {response.status}"}
+                    except asyncio.TimeoutError:
+                         logger.error(f"Google Dork '{dork}' timed out.")
+                         results[dork] = {"error": "Timeout"}
+                    except Exception as req_err:
+                         logger.error(f"Error during Google Dork request '{dork}': {req_err}")
+                         results[dork] = {"error": str(req_err)}
+                         # Decide whether to break or continue on individual dork errors
+
             return {"google_dorks": results}
         except Exception as e:
-            logger.error(f"Google Dorking failed for {target}: {e}", exc_info=True)
-            return {"error": str(e)}
+            self.logger.error(f"Google Dorking failed for {target}: {e}", exc_info=True)
+            return {"error": f"Google Dorking failed: {str(e)}"}
 
 
     async def run_SocialMediaScraping(self, target: str) -> Dict:
@@ -1358,14 +1436,114 @@ class OSINTAgent:
         return {
             "agent_name": self.AGENT_NAME,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "tasks_in_queue": self.task_queue.qsize(),
+            "tasks_in_queue": self.internal_state['task_queue'].qsize(), # Access via internal_state
             "recent_tasks_24h": recent_tasks_count,
             "recent_high_relevance_24h": recent_high_relevance_count,
-            "tool_success_rates": {k: round(v, 2) for k, v in self.tool_success_rates.items()},
+            "tool_success_rates": {k: round(v, 2) for k, v in self.internal_state['tool_success_rates'].items()}, # Access via internal_state
             "aggressive_tools_status": {
-                 "GoogleDorking": self.enable_google_dorking,
-                 "SocialMediaScraping": self.enable_social_scraping,
-                 "DarkPoolSearch": self.enable_dark_pool,
-                 "WebcamSearch": self.enable_webcam_search
+                 "GoogleDorking": self.internal_state['enable_google_dorking'], # Access via internal_state
+                 "SocialMediaScraping": self.internal_state['enable_social_scraping'], # Access via internal_state
+                 "DarkPoolSearch": self.internal_state['enable_dark_pool'], # Access via internal_state
+                 "WebcamSearch": self.internal_state['enable_webcam_search'] # Access via internal_state
             }
-        }
+        } # Correctly close the dictionary
+
+    # --- Abstract Method Implementations (Placeholders) ---
+
+    async def execute_task(self, task_details: Dict[str, Any]) -> Any:
+        """Core method to execute the agent's primary function for a given task."""
+        self.logger.info(f"execute_task received task: {task_details}")
+        # Map task details to existing methods or queue them internally
+        task_type = task_details.get('type')
+        target = task_details.get('target')
+        tools = task_details.get('tools')
+        data_id = task_details.get('data_id')
+
+        if task_type == "run_workflow" and target:
+            # Directly run the workflow for simplicity in this example
+            # Consider running as background task if long-running
+            asyncio.create_task(self.run_osint_workflow(target, tools))
+            return {"status": "workflow initiated"} # Workflow runs async
+        elif task_type == "collect_data" and target:
+            # Run collection as background task
+            asyncio.create_task(self.collect_data(target, tools))
+            return {"status": "collection initiated"}
+        elif task_type == "analyze_data" and data_id:
+            # Run analysis as background task
+            asyncio.create_task(self.analyze_data(data_id))
+            return {"status": "analysis initiated"} # Analysis runs async
+        elif task_type == "visualize_data" and data_id:
+             # Run visualization as background task
+            asyncio.create_task(self.visualize_data(data_id))
+            return {"status": "visualization initiated"} # Visualization runs async
+        else:
+            # Alternatively, queue tasks internally if agent manages its own queue
+            # await self.request_osint_task(task_type, **task_details)
+            # return {"status": "queued"}
+            self.logger.warning(f"Unsupported task type or missing args for OSINTAgent execute_task: {task_details}")
+            return {"status": "failed", "reason": f"Unsupported task or missing args: {task_type}"}
+
+
+    async def learning_loop(self):
+        """Periodic loop to update tool effectiveness or analyze patterns."""
+        self.logger.info("learning_loop: Placeholder - Not yet implemented.")
+        # TODO: Implement logic to:
+        # 1. Analyze success/failure rates of tools based on collected data quality/relevance from KB.
+        # 2. Update self.internal_state['tool_success_rates'] more intelligently.
+        # 3. Potentially query KB for broad patterns across OSINT data using self.kb_interface.
+        await asyncio.sleep(3600 * 4) # Example: Run every 4 hours
+
+    async def self_critique(self) -> Dict[str, Any]:
+        """Method for the agent to evaluate its own performance and strategy."""
+        self.logger.info("self_critique: Placeholder - Not yet implemented.")
+        # TODO: Implement logic to analyze:
+        # - Overall data yield vs. cost/time (query ExpenseLog via KB/DB).
+        # - Relevance scores of collected data (query OSINTData via KB/DB).
+        # - Effectiveness of tool selection strategy (compare success rates vs outcomes).
+        # - Success rate of aggressive techniques vs. blocks encountered.
+        # Use self.kb_interface to fetch necessary data.
+        return {"status": "ok", "feedback": "Self-critique not implemented."}
+
+    async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
+        """Constructs context-rich prompts for LLM calls (e.g., data analysis)."""
+        self.logger.debug(f"Generating dynamic prompt for OSINT task: {task_context.get('task')}")
+        # Start with the base meta-prompt
+        prompt_parts = [self.internal_state.get('meta_prompt', "Analyze OSINT data.")]
+
+        # Add relevant context from the task
+        prompt_parts.append("\n--- Current Task Context ---")
+        for key, value in task_context.items():
+             if key == 'raw_data_str_for_prompt': # Handle potentially large data
+                  prompt_parts.append(f"\n**Collected Data (JSON, potentially truncated):**")
+                  prompt_parts.append("```json")
+                  prompt_parts.append(value) # Already truncated if needed
+                  prompt_parts.append("```")
+             elif isinstance(value, (str, int, float, bool)):
+                  prompt_parts.append(f"{key.replace('_', ' ').title()}: {value}")
+             # Add more specific handling for other expected context types if needed
+
+        # Add relevant context from KB (Simulated)
+        # prompt_parts.append("\n--- Relevant Knowledge (Simulated KB Retrieval) ---")
+        # Example: Fetch known info about the target before analysis
+        # if self.kb_interface and task_context.get('target'):
+        #     known_data = await self.kb_interface.get_knowledge(query=f"Info on {task_context['target']}", limit=5)
+        #     if known_data:
+        #         prompt_parts.append("Previously known info:")
+        #         for item in known_data: prompt_parts.append(f"- {item['content'][:100]}...")
+
+        # Add Specific Instructions based on task
+        prompt_parts.append("\n--- Instructions ---")
+        if task_context.get('task') == 'Analyze OSINT Data':
+             prompt_parts.append("1. Summarize the key findings from the 'Collected Data'.")
+             prompt_parts.append("2. Identify potential leads or actionable insights relevant to a UGC agency (contacts, roles, company info, tech stack).")
+             prompt_parts.append("3. Assess the overall data quality and reliability (Low, Medium, High).")
+             prompt_parts.append("4. Provide a concise overall summary.")
+             prompt_parts.append(f"5. **Output Format:** {task_context.get('desired_output_format', 'JSON object as specified previously.')}")
+        else:
+             prompt_parts.append("Analyze the provided context and generate the required output based on the task description.")
+
+        prompt_parts.append("```json") # Hint for the LLM if JSON is expected
+
+        final_prompt = "\n".join(prompt_parts)
+        self.logger.debug(f"Generated dynamic prompt for OSINTAgent (length: {len(final_prompt)} chars)")
+        return final_prompt

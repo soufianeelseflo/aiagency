@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from dotenv import load_dotenv
+from utils.think import think_step, think_controller
 
 # --- Environment Loading ---
 # Load .env file first to ensure settings are available
@@ -50,7 +51,11 @@ except Exception as e:
      logger.critical(f"Fatal Error: Unexpected error during initial setup: {e}", exc_info=True)
      sys.exit(1)
 
+# Think-tool registrations
+think_controller.register("start_agency_pre", lambda args, kwargs: True)
+think_controller.register("start_agency_post", lambda result: True)
 
+@think_step("start_agency")
 async def start_agency():
     """Initializes and runs the AI Agency Orchestrator."""
     logger.info("Initializing AI Agency Orchestrator...")

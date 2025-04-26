@@ -375,110 +375,7 @@ class BrowsingAgent:
             raise Exception(f"LLM client failed to infer signup steps: {e}")
 
 
-    async def _store_account(self, service, email, password, api_key, phone, cookies=None):
-        """Store account details securely in Vault and database."""
-        await self.log_operation('info', f"Storing account: Service={service}, Email={email}, API Key Present={bool(api_key)}")
-        vault_path = f"secret/data/accounts/{service}/{email}" # Using email as part of the path for uniqueness
-        try:
-            # Ensure secure_storage exists and has the method
-            if hasattr(self.orchestrator, 'secure_storage') and hasattr(self.orchestrator.secure_storage, 'set_secret'):
-                self.orchestrator.secure_storage.set_secret(
-                    path=vault_path,
-                    data={
-                        "api_key": api_key or "", # Store empty string if None
-                        "password": password,
-                        "phone": phone or "",
-                        "cookies": json.dumps(cookies) if cookies else ""
-                    }
-                )
-                await self.log_operation('debug', f"Stored secrets in Vault at {vault_path}")
-            else:
-                await self.log_operation('error', "SecureStorage not available on orchestrator. Cannot store secrets.")
-                logger.error("SecureStorage not available on orchestrator.")
-                # Decide if this is critical - should we proceed without vault storage?
-                # For now, we proceed but log the error.
-
-            # Store metadata in database
-            async with self.session_maker() as session:
-                # Use proper SQL syntax for ON CONFLICT based on the target DB (e.g., PostgreSQL)
-                await session.execute(
-                    sqlalchemy.text("""
-                        INSERT INTO accounts (service, email, vault_path, created_at, api_key, is_available)
-                        VALUES (:service, :email, :vault_path, :created_at, :api_key, :is_available)
-                        ON CONFLICT (service, email) DO UPDATE SET
-                            vault_path = EXCLUDED.vault_path,
-                            api_key = EXCLUDED.api_key, -- Update API key if re-storing
-                            is_available = EXCLUDED.is_available, -- Reset availability on update
-                            created_at = EXCLUDED.created_at -- Update timestamp
-                    """), {
-                        "service": service,
-                        "email": email,
-                        "vault_path": vault_path,
-                        "created_at": datetime.utcnow(),
-                        "api_key": api_key or "", # Store empty string if None
-                        "is_available": True # Mark as available initially
-                    }
-                )
-                await session.commit()
-            await self.log_operation('info', f"Stored/Updated account metadata in DB for {service} / {email}")
-            logger.info(f"Stored account for {service} with email {email}")
-
-        except Exception as e:
-            await self.log_operation('error', f"Failed to store account for {service} / {email}: {e}")
-            logger.exception(f"Failed to store account for {service} / {email}")
-
-
-    async def get_api_key(self, service, email):
-        """Fetch an API key from Vault using the stored path."""
-        # This method might be less relevant if API keys are stored directly in DB now
-        # Kept for potential compatibility or if direct Vault access is needed elsewhere
-        await self.log_operation('debug', f"Attempting to fetch API key from Vault for {service}/{email}")
-        async with self.session_maker() as session:
-            try:
-                result = await session.execute(
-                    sqlalchemy.text("SELECT vault_path FROM accounts WHERE service = :service AND email = :email"),
-                    {"service": service, "email": email}
-                )
-                row = result.fetchone()
-                if row and row[0]:
-                    vault_path = row[0]
-                    if hasattr(self.orchestrator, 'secure_storage') and hasattr(self.orchestrator.secure_storage, 'get_secret'):
-                        secrets = self.orchestrator.secure_storage.get_secret(vault_path)
-                        api_key = secrets.get("api_key") if secrets else None
-                        if api_key:
-                             await self.log_operation('debug', f"Found API key in Vault for {service}/{email}")
-                             return api_key
-                        else:
-                             await self.log_operation('warning', f"Vault path found for {service}/{email}, but no API key within.")
-                    else:
-                        await self.log_operation('warning', "SecureStorage not available. Cannot fetch from Vault.")
-                else:
-                     await self.log_operation('warning', f"No Vault path found in DB for {service}/{email}")
-
-            except Exception as e:
-                 await self.log_operation('error', f"Error fetching API key vault path for {service}/{email}: {e}")
-                 logger.error(f"Error fetching API key vault path for {service}/{email}: {e}")
-
-        # Fallback or primary method: Check DB directly if key stored there
-        try:
-             async with self.session_maker() as session:
-                 result = await session.execute(
-                     sqlalchemy.text("SELECT api_key FROM accounts WHERE service = :service AND email = :email"),
-                     {"service": service, "email": email}
-                 )
-                 row = result.fetchone()
-                 if row and row[0]:
-                      await self.log_operation('debug', f"Found API key directly in DB for {service}/{email}")
-                      return row[0] # Return key from DB
-        except Exception as e:
-             await self.log_operation('error', f"Error fetching API key directly from DB for {service}/{email}: {e}")
-             logger.error(f"Error fetching API key directly from DB for {service}/{email}: {e}")
-
-
-        await self.log_operation('warning', f"No API key found for {service}/{email} in Vault or DB.")
-        logger.warning(f"No API key found for {service}/{email}")
-        return None
-
+    # Removed _store_account and get_api_key methods. Use utils.account_manager instead.
 
     async def create_account(self, service_url, retry_count=0, max_retries=3):
         """Create an account with intelligent scaling, analysis, proxy retry, and IMAP verification."""
@@ -574,7 +471,7 @@ class BrowsingAgent:
 
                         password = fake.password(length=12, special_chars=True)
                         name = fake.name()
-                        # phone = await self._get_temporary_phone_number(page) # Uncomment if phone needed
+                        phone = None # Phone acquisition logic commented out below
 
                         steps = await self.infer_signup_steps(service_url)
                         strategy_id = await self.save_strategy(service, steps, 1.0) # Save strategy attempt
@@ -616,21 +513,44 @@ class BrowsingAgent:
                                     raise ValueError("Failed to retrieve email verification code via IMAP")
                             # --- End Email Verification ---
 
-                            # Add potential phone verification steps here if inferred and implemented
+                            # Phone verification logic using public SMS is commented out below.
+                            # Needs replacement with strategy from api_key_management_plan.md
 
-                            await asyncio.sleep(random.uniform(1.5, 3.5)) # Slightly reduced sleep
+                            await asyncio.sleep(random.uniform(1.5, 4.0)) # Slightly more varied sleep
 
                         await self.log_operation('info', f"Signup steps completed for {service_url}. Attempting API key extraction.")
                         logger.info(f"Signup steps completed for {service_url}. Attempting API key extraction.")
                         api_key = await self._extract_api_key(page, service)
                         cookies = await context.cookies()
 
-                        await self.log_operation('info', f"Storing account details for {service} (Alias: {email_alias}). API Key Found: {'Yes' if api_key else 'No'}")
-                        logger.info(f"Storing account details for {service} with email {email_alias}.")
-                        # Store the alias used
-                        await self._store_account(service, email_alias, password, api_key, phone, cookies)
+                        # --- Store Account using Account Manager ---
+                        await self.log_operation('info', f"Storing account details via AccountManager for {service} (Alias: {email_alias}). API Key Found: {'Yes' if api_key else 'No'}")
+                        logger.info(f"Storing account details via AccountManager for {service} with email {email_alias}.")
+                        secrets_to_store = {
+                            "password": password,
+                            "api_key": api_key or "", # Store empty string if None
+                            "phone": phone or "", # Store phone if acquired (currently None)
+                            "cookies": json.dumps(cookies) if cookies else ""
+                        }
+                        # Import account_manager at the top or ensure it's accessible
+                        from utils.account_manager import store_account_credentials
+                        # Get the current session to pass to the account manager
+                        async with self.session_maker() as session:
+                            stored_account = await store_account_credentials(
+                                service=service,
+                                secrets=secrets_to_store,
+                                email=email_alias,
+                                # username=None, # Add if applicable
+                                # notes="Created by BrowsingAgent",
+                                db=session # Pass session
+                            )
+                        if not stored_account:
+                             await self.log_operation('error', f"Failed to store account using AccountManager for {service} / {email_alias}")
+                             # Decide how to handle this failure - maybe raise exception?
+                             raise Exception("Failed to store account via AccountManager")
+
                         if strategy_id: await self.update_strategy_success(strategy_id, True) # Mark strategy as successful
-                        await self.log_operation('info', f"SUCCESS: Account created for {service} using alias {email_alias}.")
+                        await self.log_operation('info', f"SUCCESS: Account created for {service} using alias {email_alias}. Stored via AccountManager (ID: {stored_account.id}).")
                         logger.info(f"Successfully created account for {service} with email {email_alias}. API Key: {'Present' if api_key else 'Not Found'}")
 
                         # Track proxy cost on success
@@ -975,81 +895,23 @@ class BrowsingAgent:
 
     # --- End IMAP Verification ---
 
-    async def _get_temporary_phone_number(self, page):
-        # This function remains largely the same, using SMS providers
-        # Add logging
-        provider = max(self.provider_success_rates['sms'], key=self.provider_success_rates['sms'].get)
-        await self.log_operation('debug', f"Attempting to get temporary phone number using provider: {provider}")
-        api_key = self.sms_api_keys.get(provider)
-        if api_key and provider == 'https://www.twilio.com/': # Example API provider
-            try:
-                # Replace with actual API call logic for the provider
-                async with aiohttp.ClientSession() as session:
-                     # Example: Fictional API endpoint
-                     # async with session.get(f"https://api.sms-activate.org/...?api_key={api_key}&action=getNumber&service=...") as response:
-                     # Fictional Twilio example (needs proper Twilio library usage)
-                     # client = TwilioClient(account_sid, auth_token) # Get SID/Token from config
-                     # numbers = client.incoming_phone_numbers.list(limit=1)
-                     # if numbers: phone = numbers[0].phone_number; return phone.strip()
-                     pass # Placeholder for actual API logic
-                await self.log_operation('info', f"Successfully obtained phone via API from {provider}")
-                # return phone
-            except Exception as e:
-                await self.log_operation('error', f"{provider} API error: {e}")
-                logger.error(f"{provider} API error: {e}")
-                self.provider_success_rates['sms'][provider] -= 0.1 # Penalize on failure
+    # --- Phone Verification Overhaul Needed ---
+    # The following methods (_get_temporary_phone_number, _get_sms_code) rely on
+    # unreliable and potentially insecure public SMS providers.
+    # They need to be replaced with the strategy outlined in api_key_management_plan.md,
+    # involving research and controlled experimentation with temporary/virtual number services.
+    # Commenting out the current implementation.
 
-        # Fallback to web-based providers
-        for alt_provider in sorted(self.sms_providers, key=lambda x: self.provider_success_rates['sms'].get(x, 1.0), reverse=True):
-            try:
-                await self.log_operation('debug', f"Trying web fallback SMS provider: {alt_provider}")
-                await page.goto(alt_provider, wait_until='networkidle', timeout=30000)
-                # Adjust selectors based on actual site structure
-                phone_element = await page.wait_for_selector('div.phone-number a, span.phone, li.number', timeout=15000)
-                phone = await phone_element.inner_text()
-                phone = re.sub(r'\D', '', phone) # Clean non-digits
-                if phone:
-                    self.provider_success_rates['sms'][alt_provider] = min(1.0, self.provider_success_rates['sms'].get(alt_provider, 1.0) + 0.05) # Reward success
-                    await self.log_operation('info', f"Obtained phone {phone} from {alt_provider}")
-                    return phone.strip()
-            except Exception as e:
-                await self.log_operation('warning', f"Failed to get phone from {alt_provider}: {e}")
-                logger.warning(f"Failed to get phone from {alt_provider}: {e}")
-                self.provider_success_rates['sms'][alt_provider] = max(0.0, self.provider_success_rates['sms'].get(alt_provider, 1.0) - 0.1) # Penalize failure
-        await self.log_operation('error', "All SMS providers failed.")
-        raise Exception("All SMS providers failed.")
+    # async def _get_temporary_phone_number(self, page):
+    #     # ... (previous implementation using public SMS providers) ...
+    #     await self.log_operation('warning', "Phone number acquisition using public SMS providers is disabled. Needs replacement.")
+    #     return None # Return None until replacement strategy is implemented
 
-
-    async def _get_sms_code(self, page, phone):
-        """Extract SMS verification code with retries."""
-        # Assumes page is already navigated to the SMS provider's inbox page for 'phone'
-        await self.log_operation('info', f"Attempting to retrieve SMS code for phone {phone}")
-        for attempt in range(10): # 10 retries
-            try:
-                await page.reload(wait_until='networkidle', timeout=30000)
-                await asyncio.sleep(5) # Wait for messages to potentially arrive
-                # More robust selector for messages containing codes
-                messages = await page.query_selector_all("div.message, li.sms, tr.message-row") # Example selectors
-                for message_element in reversed(messages): # Check newest first
-                    message_text = await message_element.inner_text()
-                    # Use regex to find common code patterns
-                    code_match = re.search(r'verification code is[:\s]*\b(\d{4,8})\b', message_text, re.IGNORECASE) or \
-                                 re.search(r'\b(\d{4,8})\b\s*is your.*?code', message_text, re.IGNORECASE) or \
-                                 re.search(r'code:\s*\b(\d{4,8})\b', message_text, re.IGNORECASE) or \
-                                 re.search(r'PIN:\s*\b(\d{4,8})\b', message_text, re.IGNORECASE)
-                    if code_match:
-                        code = code_match.group(1)
-                        await self.log_operation('info', f"Found SMS code {code} for phone {phone}")
-                        return code
-                await self.log_operation('debug', f"SMS code not found on attempt {attempt + 1}. Retrying.")
-            except PlaywrightTimeoutError:
-                await self.log_operation('warning', f"Timeout reloading/finding messages on attempt {attempt + 1}.")
-            except Exception as e:
-                 await self.log_operation('error', f"Error getting SMS code on attempt {attempt + 1}: {e}")
-            await asyncio.sleep(10) # Wait longer between retries
-
-        await self.log_operation('error', f"SMS code not received for phone {phone} after multiple attempts.")
-        raise Exception("SMS code not received.")
+    # async def _get_sms_code(self, page, phone):
+    #     # ... (previous implementation relying on public SMS providers) ...
+    #     await self.log_operation('warning', "SMS code retrieval using public SMS providers is disabled.")
+    #     return None # Return None until replacement strategy is implemented
+    # --- End Phone Verification Overhaul Needed ---
 
 
     async def _extract_api_key(self, page, service):
@@ -1118,84 +980,27 @@ class BrowsingAgent:
         return api_key
 
 
-    async def check_recurring_credits(self):
-        """Check for recurring credit resets and notify agents."""
-        # This method seems redundant with reuse_accounts, consider merging or removing
-        await self.log_operation('debug', "Executing check_recurring_credits (potentially redundant).")
-        # Keeping the logic for now in case it serves a distinct notification purpose
-        while True:
-            try:
-                async with self.session_maker() as session:
-                    one_month_ago = datetime.utcnow() - timedelta(days=30)
-                    # Assuming 'is_recurring' column exists
-                    try:
-                        result = await session.execute(
-                            sqlalchemy.text("SELECT service, email, api_key FROM accounts WHERE is_recurring = TRUE AND created_at < :threshold"),
-                            {"threshold": one_month_ago}
-                        )
-                        accounts = result.fetchall()
-                    except Exception as db_err_recur:
-                        await self.log_operation('error', f"DB error fetching recurring accounts: {db_err_recur}")
-                        accounts = [] # Continue gracefully
+    # --- Redundant/Placeholder Methods Commented Out ---
+    # async def check_recurring_credits(self):
+    #     """Check for recurring credit resets and notify agents."""
+    #     # This method seems redundant with reuse_accounts, consider merging or removing
+    #     # ... (previous implementation) ...
+    #     pass
 
-                    for service, email, api_key in accounts:
-                        # Find agent responsible for this service (needs implementation)
-                        # agent_name = self.get_agent_for_service(service)
-                        agent_name = None # Placeholder
-                        if agent_name and agent_name in self.orchestrator.agents:
-                            # Ensure agent has the notification method
-                            agent = self.orchestrator.agents[agent_name]
-                            if hasattr(agent, 'notify_recurring_account'):
-                                await agent.notify_recurring_account(service, email, api_key)
-                                await self.log_operation('info', f"Notified {agent_name} of recurring account for {service}: {email}")
-                            else:
-                                await self.log_operation('warning', f"Agent {agent_name} lacks 'notify_recurring_account' method.")
-                        # Send general notification regardless
-                        if hasattr(self.orchestrator, 'send_notification'):
-                             await self.orchestrator.send_notification(
-                                 "Recurring Credits Available",
-                                 f"Account for {service} with email {email} may have refreshed credits."
-                             )
+    # async def monitor_credits(self, services):
+    #     """Monitor credits and rotate accounts when drained."""
+    #     # This method seems complex and potentially overlaps with reuse_accounts.
+    #     # Consider simplifying or integrating credit checks directly into agent workflows
+    #     # ... (previous implementation) ...
+    #     pass
 
-                    # Update timestamp only if reuse logic doesn't handle it
-                    # This might cause conflicts if reuse_accounts also updates it.
-                    # Consider consolidating the update logic in reuse_accounts.
-                    # await session.execute(
-                    #     sqlalchemy.text("UPDATE accounts SET created_at = :now WHERE is_recurring = TRUE AND created_at < :threshold"),
-                    #     {"now": datetime.utcnow(), "threshold": one_month_ago}
-                    # )
-                    # await session.commit()
-                await asyncio.sleep(86400)  # Check daily
-            except Exception as e:
-                await self.log_operation('error', f"Recurring credits check loop failed: {e}")
-                logger.error(f"Recurring credits check loop failed: {e}")
-                await asyncio.sleep(3600) # Wait longer after failure
-
-
-    async def monitor_credits(self, services):
-        """Monitor credits and rotate accounts when drained."""
-        # This method seems complex and potentially overlaps with reuse_accounts.
-        # Consider simplifying or integrating credit checks directly into agent workflows
-        # where the credits are actually consumed.
-        await self.log_operation('warning', "monitor_credits function execution started - review for necessity/overlap.")
-        if not services:
-            logger.warning("Monitor_credits called with no services.")
-            await self.log_operation('warning', "monitor_credits called with empty service list.")
-            return
-
-        # Simplified placeholder - Full implementation requires careful state management
-        # and integration with account usage.
-        await self.log_operation('info', f"Placeholder: Monitoring credits for services: {services}")
-        await asyncio.sleep(3600) # Example delay
-
-
-    async def manage_gemini_services(self):
-        """Placeholder for managing specific Gemini interactions."""
-        # This method seems highly specific and might belong in a dedicated agent
-        # or be integrated into ThinkTool/Orchestrator strategies.
-        await self.log_operation('warning', "manage_gemini_services function execution started - review for necessity/placement.")
-        await self.log_operation('info', "Placeholder: Managing Gemini services (Deep Search, AI Studio).")
-        await asyncio.sleep(3600) # Example delay
+    # async def manage_gemini_services(self):
+    #     """Placeholder for managing specific Gemini interactions."""
+    #     # This method seems highly specific and might belong in a dedicated agent
+    #     # or be integrated into ThinkTool/Orchestrator strategies.
+    #     # ... (previous implementation) ...
+    #     pass
+    # --- End Redundant/Placeholder Methods ---
 
 
     async def store_gemini_results(self, type, data):
@@ -1299,51 +1104,343 @@ class BrowsingAgent:
                         except Exception: pass # Ignore errors on close
 
 
+    # --- Placeholder Methods for UGC Workflow ---
+
+    async def _login_to_service(self, service_name: str, page, credentials: dict):
+        """Placeholder: Logs into a service using provided credentials."""
+        await self.log_operation('info', f"Placeholder: Attempting login to {service_name}")
+        # Implementation will involve:
+        # 1. Navigating to the login page.
+        # 2. Filling email/username and password from credentials dict using page.fill().
+        # 3. Clicking the login button using page.click().
+        # 4. Handling potential 2FA or verification steps if necessary.
+        # 5. Checking for successful login (e.g., presence of dashboard element).
+        await asyncio.sleep(random.uniform(1.5, 3.0)) # Simulate action
+        await self.log_operation('info', f"Placeholder: Simulated login to {service_name}")
+        return True # Simulate success
+
+    async def _generate_avatar_video(self, service_name: str, page, script: str, avatar_details: dict):
+        """Placeholder: Generates avatar video using Argil/Heygen."""
+        await self.log_operation('info', f"Placeholder: Generating avatar video on {service_name} with script: '{script[:30]}...'")
+        # Implementation will involve:
+        # 1. Navigating to the video creation section.
+        # 2. Selecting/uploading avatar based on avatar_details.
+        # 3. Inputting the script.
+        # 4. Selecting voice options.
+        # 5. Starting generation and waiting.
+        # 6. Finding the download link/button for the generated video.
+        await asyncio.sleep(random.uniform(4.0, 7.0)) # Simulate action
+        download_url_or_path = f"/path/to/simulated/{service_name}_video.mp4"
+        await self.log_operation('info', f"Placeholder: Simulated video generation on {service_name}. Result path: {download_url_or_path}")
+        return download_url_or_path # Return path or URL to the generated video
+
+    async def _edit_video(self, service_name: str, page, source_video_path: str, assets: dict):
+        """Placeholder: Edits video using Descript."""
+        await self.log_operation('info', f"Placeholder: Editing video '{source_video_path}' on {service_name}")
+        # Implementation will involve:
+        # 1. Navigating to the editor.
+        # 2. Uploading the source_video_path.
+        # 3. Uploading/adding B-roll assets from assets dict.
+        # 4. Performing edits (adding text, syncing visuals - might require complex interaction or LLM guidance).
+        # 5. Exporting/rendering the final video.
+        # 6. Finding the download link/button for the edited video.
+        await asyncio.sleep(random.uniform(5.0, 8.0)) # Simulate action
+        edited_video_path = f"/path/to/simulated/edited_{os.path.basename(source_video_path)}"
+        await self.log_operation('info', f"Placeholder: Simulated video editing on {service_name}. Result path: {edited_video_path}")
+        return edited_video_path
+
+    async def _download_asset(self, page, download_trigger_selector: str, target_dir: str, expected_filename: str = None):
+        """Placeholder: Downloads a file triggered by clicking a selector."""
+        await self.log_operation('info', f"Placeholder: Attempting download from selector '{download_trigger_selector}' to '{target_dir}'")
+        # Implementation will involve:
+        # 1. Setting up a download listener: page.on("download", lambda download: await download.save_as(os.path.join(target_dir, download.suggested_filename)))
+        # 2. Clicking the download trigger selector: await page.click(download_trigger_selector)
+        # 3. Waiting for the download to complete.
+        # 4. Returning the path to the downloaded file.
+        await asyncio.sleep(random.uniform(2.0, 4.0)) # Simulate action
+        simulated_path = os.path.join(target_dir, expected_filename or "downloaded_file.tmp")
+        # Simulate file creation
+        os.makedirs(target_dir, exist_ok=True)
+        with open(simulated_path, "w") as f: f.write("Simulated download content")
+        await self.log_operation('info', f"Placeholder: Simulated download complete to {simulated_path}")
+        return simulated_path
+
+    # --- End Placeholder UGC Methods ---
+
+
     async def run(self):
         """Main loop processing tasks from the queue."""
         await self.log_operation('info', "BrowsingAgent run loop started.")
         # Start periodic tasks in the background
         asyncio.create_task(self.reuse_accounts_periodically())
-        # asyncio.create_task(self.check_recurring_credits()) # Consider removing/merging this
+        # asyncio.create_task(self.check_recurring_credits()) # Redundant, commented out
 
         while True:
+            browser = None
+            context = None
+            page = None
+            proxy = None
+            task = None # Initialize task to None
             try:
                 await self.log_operation('debug', f"Waiting for task. Queue size: {self.task_queue.qsize()}")
                 task = await self.task_queue.get()
-                await self.log_operation('info', f"Processing task: {task.get('action', 'N/A')} for service: {task.get('service_url', task.get('service', 'N/A'))}")
-
-                service_url = task.get('service_url', task.get('service', ''))
                 action = task.get('action')
+                await self.log_operation('info', f"Processing task: {action} - Details: {task}")
 
-                if action == 'create_account' and service_url:
-                    result = await self.create_account(service_url, retry_count=0)
-                    if result:
-                        # Report success to orchestrator
-                        service_name = service_url.split('//')[-1].split('/')[0].replace('www.', '')
-                        if hasattr(self.orchestrator, 'report_account_created') and callable(self.orchestrator.report_account_created):
-                             await self.orchestrator.report_account_created(service_name, result)
+                # --- Task Dispatching ---
+                workflow_id = task.get('workflow_id')
+                workflow_state = task.get('workflow_state', {}) # Get current state passed from orchestrator
+
+                if action == 'create_account':
+                    service_url = task.get('service_url')
+                    if service_url:
+                        # Use a database session for the duration of the account creation attempt
+                        async with self.session_maker() as session:
+                            result = await self.create_account(service_url, retry_count=0, db=session) # Pass session
+                        if result:
+                            # Report success to orchestrator (standard account creation)
+                            service_name = service_url.split('//')[-1].split('/')[0].replace('www.', '')
+                            if hasattr(self.orchestrator, 'report_account_created') and callable(self.orchestrator.report_account_created):
+                                 await self.orchestrator.report_account_created(service_name, result)
+                            else:
+                                 await self.log_operation('warning', f"Orchestrator missing 'report_account_created' method.")
+                            # If part of a UGC workflow, also report to UGC step complete
+                            if workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete'):
+                                 await self.orchestrator.report_ugc_step_complete(
+                                     workflow_id=workflow_id,
+                                     completed_step='acquire_or_verify_account', # Assume creation implies acquisition
+                                     result={'success': True, 'service_name': service_name, 'account_details': result},
+                                     current_state=workflow_state
+                                 )
+                        elif workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete'):
+                            # Report failure if account creation failed within a workflow
+                            service_name = service_url.split('//')[-1].split('/')[0].replace('www.', '')
+                            await self.orchestrator.report_ugc_step_complete(
+                                workflow_id=workflow_id,
+                                completed_step='acquire_or_verify_account',
+                                result={'success': False, 'service_name': service_name, 'reason': 'Account creation failed'},
+                                current_state=workflow_state
+                            )
+                    else:
+                        await self.log_operation('warning', f"Task 'create_account' missing 'service_url'. Task: {task}")
+
+                elif action == 'acquire_or_verify_account':
+                    # Check if we have valid credentials, if not, queue creation task
+                    service_name = task.get('service_name')
+                    if not service_name:
+                         await self.log_operation('error', f"Task 'acquire_or_verify_account' missing 'service_name'. Task: {task}")
+                         # Report failure back to orchestrator if possible
+                         if workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete'):
+                             await self.orchestrator.report_ugc_step_complete(
+                                 workflow_id=workflow_id, completed_step=action,
+                                 result={'success': False, 'reason': 'Missing service_name'}, current_state=workflow_state
+                             )
+                         continue # Skip task
+
+                    from utils.account_manager import get_valid_credentials
+                    step_success = False
+                    async with self.session_maker() as session:
+                        credentials = await get_valid_credentials(service_name, db=session)
+                        if credentials:
+                            await self.log_operation('info', f"Valid credentials found for {service_name} (Account ID: {credentials.get('account_id')}).")
+                            step_success = True
+                            # TODO: Add verification step here if needed (e.g., try logging in)
                         else:
-                             await self.log_operation('warning', f"Orchestrator missing 'report_account_created' method.")
-                    # Update provider success only if relevant (SMS) - logic is placeholder
-                    # self._update_provider_success(service_url, bool(result))
+                            await self.log_operation('warning', f"No valid credentials found for {service_name}. Queueing creation task.")
+                            # Queue account creation task
+                            await self.task_queue.put({
+                                'action': 'create_account',
+                                'service_url': f'https://{service_name}',
+                                'workflow_id': workflow_id, # Pass workflow context
+                                'workflow_state': workflow_state
+                            })
+                            # Don't report completion yet, wait for create_account result
+
+                    # If credentials found directly, report success for this step
+                    if step_success and workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete'):
+                         await self.orchestrator.report_ugc_step_complete(
+                             workflow_id=workflow_id,
+                             completed_step='acquire_or_verify_account',
+                             result={'success': True, 'service_name': service_name},
+                             current_state=workflow_state
+                         )
+
+
+                elif action == 'generate_ugc_video':
+                    # Handles video generation using services like Heygen/Argil
+                    service_to_use = task.get('target_service')
+                    if not service_to_use:
+                         await self.log_operation('error', f"Task 'generate_ugc_video' missing 'target_service'. Task: {task}")
+                         if workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete'):
+                             await self.orchestrator.report_ugc_step_complete(
+                                 workflow_id=workflow_id, completed_step=action,
+                                 result={'success': False, 'reason': 'Missing target_service'}, current_state=workflow_state
+                             )
+                         continue
+
+                    from utils.account_manager import get_valid_credentials, update_account_status
+                    step_success = False
+                    step_result_data = {}
+
+                    async with self.session_maker() as session:
+                        credentials = await get_valid_credentials(service_to_use, db=session)
+                        if not credentials:
+                            await self.log_operation('error', f"No valid credentials for {service_to_use} for 'generate_ugc_video'. Task: {task}")
+                            step_result_data = {'success': False, 'reason': f'No credentials for {service_to_use}'}
+                        else:
+                            account_id = credentials.get('account_id')
+                            async with self.browser_semaphore:
+                                proxy = await self.get_next_proxy(service_to_use)
+                                if not proxy:
+                                    await self.log_operation('error', f"No proxy for {service_to_use} for 'generate_ugc_video'. Task: {task}")
+                                    step_result_data = {'success': False, 'reason': 'No proxy available'}
+                                else:
+                                    async with async_playwright() as p:
+                                        browser = await p.chromium.launch(headless=True, proxy={
+                                            'server': f"http://{proxy['server']}", 'username': proxy['username'], 'password': proxy['password']
+                                        })
+                                        context = await browser.new_context()
+                                        page = await context.new_page()
+                                        try:
+                                            login_success = await self._login_to_service(service_to_use, page, credentials)
+                                            if not login_success:
+                                                await update_account_status(account_id, is_available=False, notes="Login failed during UGC task", db=session)
+                                                raise Exception("Login Failed")
+
+                                            generated_video_path_or_url = await self._generate_avatar_video(
+                                                service_name=service_to_use, page=page, script=task.get('script'), avatar_details=task.get('avatar_prefs', {})
+                                            )
+                                            if generated_video_path_or_url:
+                                                step_success = True
+                                                step_result_data['generated_video_path_or_url'] = generated_video_path_or_url
+                                                # TODO: Add download step here using _download_asset
+                                                # downloaded_path = await self._download_asset(...)
+                                                # step_result_data['downloaded_path'] = downloaded_path
+                                            else:
+                                                raise Exception("Video generation failed")
+                                            await self.log_operation('info', f"UGC Task 'generate_ugc_video' completed for {service_to_use} (Account ID: {account_id})")
+                                        except Exception as ugc_err:
+                                            await self.log_operation('error', f"Error during 'generate_ugc_video' for {service_to_use} (Account ID: {account_id}): {ugc_err}")
+                                            logger.exception(f"Error during UGC task {task}")
+                                            step_success = False
+                                            step_result_data['reason'] = str(ugc_err)
+                                        finally:
+                                            if context: await context.close()
+                                            if browser: await browser.close()
+
+                    # Report completion status to Orchestrator outside browser/session blocks
+                    if workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete'):
+                        step_result_data['success'] = step_success
+                        await self.orchestrator.report_ugc_step_complete(
+                            workflow_id=workflow_id,
+                            completed_step='generate_ugc_video',
+                            result=step_result_data,
+                            current_state=workflow_state
+                        )
+
+                elif action == 'edit_ugc_video':
+                    # Handles video editing using services like Descript
+                    service_to_use = task.get('target_service')
+                    source_video_path = task.get('source_video_path')
+                    if not service_to_use or not source_video_path:
+                         await self.log_operation('error', f"Task 'edit_ugc_video' missing 'target_service' or 'source_video_path'. Task: {task}")
+                         if workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete'):
+                             await self.orchestrator.report_ugc_step_complete(
+                                 workflow_id=workflow_id, completed_step=action,
+                                 result={'success': False, 'reason': 'Missing target_service or source_video_path'}, current_state=workflow_state
+                             )
+                         continue
+
+                    from utils.account_manager import get_valid_credentials, update_account_status
+                    step_success = False
+                    step_result_data = {}
+
+                    async with self.session_maker() as session:
+                        credentials = await get_valid_credentials(service_to_use, db=session)
+                        if not credentials:
+                            await self.log_operation('error', f"No valid credentials for {service_to_use} for 'edit_ugc_video'. Task: {task}")
+                            step_result_data = {'success': False, 'reason': f'No credentials for {service_to_use}'}
+                        else:
+                            account_id = credentials.get('account_id')
+                            async with self.browser_semaphore:
+                                proxy = await self.get_next_proxy(service_to_use)
+                                if not proxy:
+                                    await self.log_operation('error', f"No proxy for {service_to_use} for 'edit_ugc_video'. Task: {task}")
+                                    step_result_data = {'success': False, 'reason': 'No proxy available'}
+                                else:
+                                    async with async_playwright() as p:
+                                        browser = await p.chromium.launch(headless=True, proxy={
+                                            'server': f"http://{proxy['server']}", 'username': proxy['username'], 'password': proxy['password']
+                                        })
+                                        context = await browser.new_context()
+                                        page = await context.new_page()
+                                        try:
+                                            login_success = await self._login_to_service(service_to_use, page, credentials)
+                                            if not login_success:
+                                                await update_account_status(account_id, is_available=False, notes="Login failed during UGC edit task", db=session)
+                                                raise Exception("Login Failed")
+
+                                            edited_video_path_or_url = await self._edit_video(
+                                                service_name=service_to_use, page=page, source_video_path=source_video_path, assets=task.get('assets', {})
+                                            )
+                                            if edited_video_path_or_url:
+                                                step_success = True
+                                                step_result_data['edited_video_path_or_url'] = edited_video_path_or_url
+                                                # TODO: Add download step here using _download_asset
+                                                # downloaded_path = await self._download_asset(...)
+                                                # step_result_data['downloaded_path'] = downloaded_path
+                                            else:
+                                                raise Exception("Video editing failed")
+                                            await self.log_operation('info', f"UGC Task 'edit_ugc_video' completed for {service_to_use} (Account ID: {account_id})")
+                                        except Exception as ugc_err:
+                                            await self.log_operation('error', f"Error during 'edit_ugc_video' for {service_to_use} (Account ID: {account_id}): {ugc_err}")
+                                            logger.exception(f"Error during UGC edit task {task}")
+                                            step_success = False
+                                            step_result_data['reason'] = str(ugc_err)
+                                        finally:
+                                            if context: await context.close()
+                                            if browser: await browser.close()
+
+                    # Report completion status to Orchestrator outside browser/session blocks
+                    if workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete'):
+                        step_result_data['success'] = step_success
+                        await self.orchestrator.report_ugc_step_complete(
+                            workflow_id=workflow_id,
+                            completed_step='edit_ugc_video',
+                            result=step_result_data,
+                            current_state=workflow_state
+                        )
+
+                # --- Add other actions here (e.g., 'download_asset') ---
+
                 else:
-                    await self.log_operation('warning', f"Unknown or invalid task received: {task}")
-                    logger.warning(f"Unknown or invalid task received: {task}")
+                    await self.log_operation('warning', f"Unknown or invalid task action received: {action}. Task: {task}")
+                    logger.warning(f"Unknown or invalid task action received: {action}. Task: {task}")
 
             except Exception as e:
-                await self.log_operation('error', f"Error in BrowsingAgent run loop: {e}")
-                logger.exception("Error in BrowsingAgent run loop") # Log full traceback
+                await self.log_operation('error', f"Error in BrowsingAgent run loop processing task {task}: {e}")
+                logger.exception(f"Error processing task {task}") # Log full traceback
+                # If error happened during a workflow step, report failure
+                if workflow_id and hasattr(self.orchestrator, 'report_ugc_step_complete') and action in ['acquire_or_verify_account', 'generate_ugc_video', 'edit_ugc_video']:
+                     try:
+                         await self.orchestrator.report_ugc_step_complete(
+                             workflow_id=workflow_id,
+                             completed_step=action, # Report failure for the action being processed
+                             result={'success': False, 'reason': f'Agent loop error: {e}'},
+                             current_state=workflow_state
+                         )
+                     except Exception as report_err:
+                          logger.error(f"Failed to report error to orchestrator: {report_err}")
                 # Avoid continuous fast loops on persistent errors
-                await asyncio.sleep(60)
+                await asyncio.sleep(random.uniform(20.0, 40.0)) # Longer random sleep on outer loop error
             finally:
-                 # Ensure task_done is called even if processing fails mid-way
-                 # Check if task was retrieved before calling task_done
-                 if 'task' in locals() and task is not None:
+                 # Ensure task_done is called
+                 if task is not None:
                      try:
                          self.task_queue.task_done()
                      except ValueError: # Handle case where task might already be done
                          pass
-                 await asyncio.sleep(1) # Small delay to prevent tight loop if queue is empty
+                 await asyncio.sleep(random.uniform(0.5, 1.5)) # Small random delay
 
 
     # Removed process_queue and process_task as logic is integrated into run()
@@ -1380,9 +1477,10 @@ class BrowsingAgent:
                 # Using CAST for broader compatibility attempt
                 # Ensure correct SQL syntax for date comparison based on the actual DB used
                 # For PostgreSQL:
-                # sql_query = "SELECT COUNT(*) FROM accounts WHERE service = :service AND created_at::date = :today"
+                # For PostgreSQL:
+                sql_query = "SELECT COUNT(*) FROM accounts WHERE service = :service AND created_at::date = :today"
                 # For SQLite:
-                sql_query = "SELECT COUNT(*) FROM accounts WHERE service = :service AND DATE(created_at) = :today"
+                # sql_query = "SELECT COUNT(*) FROM accounts WHERE service = :service AND DATE(created_at) = :today"
 
                 result = await session.execute(
                    sqlalchemy.text(sql_query), # Use text() for raw SQL with ORM session

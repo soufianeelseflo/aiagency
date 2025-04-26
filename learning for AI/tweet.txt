@@ -1,0 +1,22 @@
+if the entire point of AI is instruction following...
+
+why are you not instructing AI on how to instruct itself?
+
+why write out a fresh prompt every time when one of your models can generate better ones for you based off your pre-determined conditions?
+
+
+----------------
+
+
+when using AI to build websites...
+
+you can go to claude, then ask it to take your screenshot + idea on what you want to add
+
+& create clear-cut instructions that an AI website generator like bolt new will clearly understand
+
+now you've got a prompt that helps you effectively prompt lol
+
+
+-----------------
+
+

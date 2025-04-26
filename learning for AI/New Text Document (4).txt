@@ -1,0 +1,24 @@
+the #1 skill required to run a successful AI automation agency isn't even automation...
+
+it's understanding how businesses operate & the problems they face
+
+automating workflows is challenging when you hardly understand their purpose
+
+it's the same story as devs trying to create B2B software without having ever ran a business, in 99.9% of cases they'll fail...
+
+technical skills are only one part of the puzzle...
+
+hence why the "visionary + builder" duo is arguably the best combo possible - one understands the game & has a vision, the other brings it to life
+
+AI automation sounds intimidating but it's stupidly easy...
+
+all you need is a baseline understanding of the following things:
+
+- workflow automation tools like n8n
+- data structures (JSON)
+- prompt engineering
+- conditional logic
+- API requests
+- webhooks
+
+& now you can charge companies thousands of $ to build AI agents lol

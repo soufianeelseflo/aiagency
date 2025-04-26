@@ -5,7 +5,7 @@ import os
 import json
 import smtplib
 from email.message import EmailMessage
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone # Ensure datetime and timezone are imported
 import pytz
 from collections import Counter
 
@@ -14,6 +14,7 @@ from sqlalchemy.future import select
 from sqlalchemy import update, desc
 
 # Assuming these exist and are correctly set up
+from typing import Optional, Dict, Any # Added for type hints
 from models import Client, EmailLog, Lead, PromptTemplate # Add others if needed
 from utils.database import encrypt_data, decrypt_data # For email body if needed, though maybe not encrypting content itself
 from config.settings import settings
@@ -22,47 +23,53 @@ from config.settings import settings
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import pybreaker # For SMTP circuit breaker
 
+# Import the base class and KBInterface placeholder
+from .base_agent import GeniusAgentBase, KBInterface # Use relative import
+from prompts.agent_meta_prompts import EMAIL_AGENT_META_PROMPT # Import meta prompt
+
 logger = logging.getLogger(__name__)
 
 # SMTP Circuit Breaker
 smtp_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=60 * 10) # 10 min timeout
 
-class PuppeteerAgent:
+class EmailAgent(GeniusAgentBase): # Renamed and inherited
     """
-    Puppeteer Agent v2.0: Executes hyper-personalized, psychologically optimized
+    Email Agent (Genius Level): Executes hyper-personalized, psychologically optimized
     email outreach campaigns. Masters human mimicry, spam evasion, engagement tracking,
-    and automated A/B/n testing of persuasive techniques.
+    internal copywriting, and automated A/B/n testing of persuasive techniques.
     """
 
-    def __init__(self, session_maker: callable, config: object, orchestrator: object):
-        self.session_maker = session_maker
-        self.config = config
-        self.orchestrator = orchestrator
-        self.think_tool = orchestrator.agents.get('think')
-        self.secure_storage = orchestrator.secure_storage
+    # Ensure KBInterface is imported correctly at the top
+    # from .base_agent import GeniusAgentBase, KBInterface
 
-        self.task_queue = asyncio.PriorityQueue() # Tasks: (priority, {'type': 'send_email', 'client_id': 123})
-                                                 # Priority = 1.0 - engagement_score
-        self.max_concurrency = getattr(config, 'PUPPETEER_MAX_CONCURRENCY', 25)
-        self.active_sends = 0
-        self.send_semaphore = asyncio.Semaphore(self.max_concurrency)
+    def __init__(self, session_maker: callable, orchestrator: object, kb_interface: KBInterface): # Accepts kb_interface
+        agent_name = "EmailAgent"
+        # Pass kb_interface to the base class constructor
+        super().__init__(agent_name=agent_name, kb_interface=kb_interface)
+        # self.config is inherited from GeniusAgentBase
+        # self.kb_interface is inherited from GeniusAgentBase
+        self.session_maker = session_maker # Keep DB session maker for operational data
+        self.orchestrator = orchestrator # Keep orchestrator reference
+        self.think_tool = orchestrator.agents.get('think') # Keep for non-core tasks initially
+        self.secure_storage = orchestrator.secure_storage # Keep for secure data access
 
-        # Daily limits per sending account (managed via Orchestrator/DB ideally)
-        self.daily_limits = {} # { 'sender_email': {'limit': 100, 'sent': 0, 'reset_time': ...} }
-        self.global_daily_limit = getattr(config, 'PUPPETEER_GLOBAL_DAILY_LIMIT', 1000)
-        self.global_sent_today = 0
-        self.global_reset_time = self._get_next_reset_time_utc()
+        # --- Internal State Initialization ---
+        self.internal_state['task_queue'] = asyncio.PriorityQueue()
+        self.internal_state['max_concurrency'] = getattr(self.config, 'EMAIL_AGENT_MAX_CONCURRENCY', 25) # Use new setting name
+        self.internal_state['active_sends'] = 0
+        self.internal_state['send_semaphore'] = asyncio.Semaphore(self.internal_state['max_concurrency'])
+        self.internal_state['daily_limits'] = {} # { 'sender_email': {'limit': 100, 'sent': 0, 'reset_time': ...} }
+        self.internal_state['global_daily_limit'] = getattr(self.config, 'EMAIL_AGENT_MAX_PER_DAY', 1000) # Use new setting name
+        self.internal_state['global_sent_today'] = 0
+        self.internal_state['global_reset_time'] = self._get_next_reset_time_utc()
+        self.internal_state['smtp_providers'] = self.config.SMTP_PROVIDERS if self.config else []
+        if not self.internal_state['smtp_providers']:
+             self.logger.critical("EmailAgent: SMTP_PROVIDERS configuration is missing or empty!")
+        self.internal_state['current_provider_index'] = 0
+        self.internal_state['active_tests'] = {} # { 'test_id': {'variant_a_count': 0, 'variant_b_count': 0, ...} }
+        self.internal_state['campaign_stats'] = {} # Placeholder for campaign performance tracking
 
-        # SMTP Providers (fetched from config)
-        self.smtp_providers = settings.SMTP_PROVIDERS
-        if not self.smtp_providers:
-             logger.critical("PuppeteerAgent: SMTP_PROVIDERS configuration is missing or empty!")
-        self.current_provider_index = 0
-
-        # A/B Testing Framework State (simple version)
-        self.active_tests = {} # { 'test_id': {'variant_a_count': 0, 'variant_b_count': 0, ...} }
-
-        logger.info("Puppeteer Agent v2.0 (Psychological Outreach) initialized.")
+        self.logger.info("Email Agent (Genius Level) initialized.")
 
     # --- Task Queuing & Prioritization ---
     async def queue_email_task(self, client_id: int, campaign_id: Optional[int] = None):
@@ -127,101 +134,142 @@ class PuppeteerAgent:
             logger.info(f"Processed OSINT leads: Created={created_count}, Queued={queued_count}, Skipped={skipped_count}")
 
 
-    # --- Email Generation (Multi-Stage) ---
-    async def generate_email_content(self, client: Client, campaign_id: Optional[int] = None):
-        """Generates subject and body using the multi-stage process."""
+    # --- Email Generation (Internal Logic) ---
+    async def generate_email_content(self, client: Client, campaign_id: Optional[int] = None) -> tuple[Optional[str], Optional[str]]:
+        """
+        Generates subject and body using internal logic and a single LLM call guided by a dynamic prompt.
+        Relies on self.generate_dynamic_prompt() to create context-rich instructions.
+        """
+        subject: Optional[str] = None
+        body: Optional[str] = None
+        subject_kf_id: Optional[int] = None
+        body_kf_id: Optional[int] = None # Treating whole body as one fragment for now
+        composition_ids: Dict[str, Any] = {}
         try:
-            # 1. Get Prompts via ThinkTool (Handles caching)
-            draft_prompt_template = await self.think_tool.get_prompt("PuppeteerAgent", "email_draft_v3")
-            humanize_prompt_template = await self.think_tool.get_prompt("PuppeteerAgent", "email_humanize_v3")
-            validate_prompt_template = await self.think_tool.get_prompt("PuppeteerAgent", "email_validate_v3") # Gemini validation prompt
-            subject_prompt_template = await self.think_tool.get_prompt("PuppeteerAgent", "email_subject_v2")
+            # 1. Prepare Context for Dynamic Prompt
+            # Fetch recent interactions, OSINT summary if available from KB (Placeholder in generate_dynamic_prompt)
+            # Placeholder - KBInterface needs implementation
+            osint_summary = "No specific OSINT data available."
+            # if self.kb_interface:
+            #     osint_data = await self.kb_interface.get_knowledge(query=f"OSINT summary for {client.email}", type_filter='osint_summary', limit=1)
+            #     if osint_data: osint_summary = osint_data[0]['content']
 
-            if not all([draft_prompt_template, humanize_prompt_template, validate_prompt_template, subject_prompt_template]):
-                logger.error(f"Missing core prompt templates for client {client.id}. Aborting generation.")
-                # TODO: Trigger ThinkTool self-critique or alert
-                return None, None
-
-            # 2. Prepare Context
-            # Fetch recent interactions, OSINT summary if available
-            osint_summary = "No specific OSINT data available." # Placeholder - fetch from OSINTData via client_id/email
-            client_context = {
-                "name": client.name,
-                "email": client.email,
-                "country": client.country,
-                "interests": client.interests.split(',') if client.interests else ['their work'],
-                "engagement_score": client.engagement_score,
+            task_context = {
+                "client_info": {
+                    "id": client.id,
+                    "name": client.name,
+                    "email": client.email,
+                    "country": client.country,
+                    "interests": client.interests.split(',') if client.interests else ['their work'],
+                    "engagement_score": client.engagement_score,
+                    "timezone": client.timezone,
+                },
                 "osint_summary": osint_summary,
+                "campaign_id": campaign_id,
+                "task": "Generate personalized email subject and body",
+                "desired_outcome": "Compelling email driving engagement (open, click, reply)",
+                # Add A/B test variant info if applicable
             }
-            primary_interest = client_context['interests'][0]
 
-            # 3. Generate Initial Draft
-            draft_prompt = draft_prompt_template.format(
-                client_context_json=json.dumps(client_context),
-                primary_interest=primary_interest
-            )
-            initial_draft = await self.think_tool._call_llm_with_retry(draft_prompt, temperature=0.6, max_tokens=150)
-            if not initial_draft: raise Exception("Failed to generate initial draft.")
+            # 2. Generate the Dynamic Prompt using Agent's Internal Logic
+            # This method will incorporate meta-prompt, context, KB insights, etc.
+            comprehensive_prompt = await self.generate_dynamic_prompt(task_context)
 
-            # 4. Humanize Draft
-            regional_adapt = self._get_regional_adaptation(client.country)
-            humanize_prompt = humanize_prompt_template.format(
-                draft=initial_draft,
-                regional_adaptation=regional_adapt
-            )
-            humanized_body = await self.think_tool._call_llm_with_retry(humanize_prompt, temperature=0.9, max_tokens=400)
-            if not humanized_body:
-                logger.warning(f"Humanization failed for client {client.id}, using initial draft.")
-                humanized_body = initial_draft # Fallback
+            # 3. Make Single LLM Call for Subject & Body Generation
+            # Instruct the LLM (via the prompt) to return structured output, e.g., JSON or specific delimiters
+            # Example instruction within the prompt: "Generate the email. Output ONLY JSON with keys 'subject' and 'body'."
+            llm_response_str = await self.think_tool._call_llm_with_retry(
+                comprehensive_prompt,
+                temperature=0.75, # Adjust temperature for creative generation
+                max_tokens=600 # Allow sufficient length for subject and body
+            ) # Using think_tool's call method as a proxy for internal LLM access for now
 
-            # 5. Validate Final Body (Optional - uses Gemini via ThinkTool)
-            validate_prompt = validate_prompt_template.format(email_body=humanized_body)
-            # Use a specific method in ThinkTool that might route to Gemini or cheaper model for validation
-            validation_result = await self.think_tool.validate_output(
-                 output_to_validate=humanized_body,
-                 validation_criteria="Assess statistical predictability (1-10 score). Score < 9 is predictable.",
-                 agent_name="PuppeteerAgent",
-                 context=f"Validating email body for client {client.id}"
-            ) # Returns dict {'valid': bool, 'feedback': str}
-            if not validation_result.get('valid', True): # Default to valid if validation fails
-                 logger.warning(f"Email body validation failed for client {client.id}: {validation_result.get('feedback')}. Sending anyway.")
-                 # Optionally trigger prompt self-critique here via ThinkTool
+            if not llm_response_str:
+                raise Exception("LLM call failed to return content.")
 
-            # 6. Generate Subject Line
-            subject_prompt = subject_prompt_template.format(
-                 client_name=client.name.split()[0], # First name
-                 primary_interest=primary_interest,
-                 company_name=client.email.split('@')[1].split('.')[0] # Basic company guess
-            )
-            subject = await self.think_tool._call_llm_with_retry(subject_prompt, temperature=0.8, max_tokens=30)
-            if not subject: subject = f"Quick thought on {primary_interest}" # Fallback
+            # 4. Parse LLM Response (assuming JSON output as instructed in prompt)
+            try:
+                # Attempt to find JSON block if LLM adds extra text
+                json_start = llm_response_str.find('{')
+                json_end = llm_response_str.rfind('}') + 1
+                if json_start != -1 and json_end != -1:
+                    llm_response_json_str = llm_response_str[json_start:json_end]
+                    llm_response = json.loads(llm_response_json_str)
+                    subject = llm_response.get('subject')
+                    body = llm_response.get('body')
+                else:
+                    # Fallback: Try simple splitting if not JSON (e.g., "Subject: ...\nBody: ...")
+                    lines = llm_response_str.strip().split('\n', 1)
+                    if lines[0].lower().startswith('subject:'):
+                        subject = lines[0][len('subject:'):].strip()
+                        body = lines[1].strip() if len(lines) > 1 else None
+                    else: # Assume entire response is body if no clear structure
+                         self.logger.warning(f"Could not parse LLM response structure for client {client.id}. Using full response as body.")
+                         body = llm_response_str.strip()
 
-            # 7. A/B Testing Logic (Example: Subject Line Variants)
-            # test_id = f"subject_test_{campaign_id}" if campaign_id else "subject_test_default"
-            # if test_id in self.active_tests:
-            #     # Alternate between variants A and B
-            #     if self.active_tests[test_id]['variant_a_count'] <= self.active_tests[test_id]['variant_b_count']:
-            #         # Use variant A (original subject)
-            #         self.active_tests[test_id]['variant_a_count'] += 1
-            #         variant_tag = "A"
-            #     else:
-            #         # Generate variant B subject (e.g., different style)
-            #         subject_b_prompt = ... # Prompt for variant B
-            #         subject = await self.think_tool._call_llm_with_retry(...)
-            #         self.active_tests[test_id]['variant_b_count'] += 1
-            #         variant_tag = "B"
-            #     # Add variant tag to log later
-            # else: variant_tag = None
+                if not subject:
+                    subject = f"Quick thought for {client.name.split()[0]}" # Fallback subject
+                    self.logger.warning(f"LLM response missing subject for client {client.id}. Using fallback.")
+                if not body:
+                    raise Exception("LLM response parsed, but body content is missing.")
 
-            # 8. Add Tracking Pixel (Benign)
-            pixel_url = f"https://{settings.AGENCY_TRACKING_DOMAIN}/track/{uuid.uuid4()}.png" # Assume tracking endpoint exists
-            final_body = humanized_body + f'<img src="{pixel_url}" width="1" height="1" alt="">'
+            except json.JSONDecodeError as jde:
+                self.logger.error(f"Failed to parse JSON response from LLM for client {client.id}: {jde}. Response: {llm_response_str[:200]}...")
+                # Fallback: Use full response as body, generate fallback subject
+                subject = f"Following up with {client.name.split()[0]}"
+                body = llm_response_str.strip() # Use the raw response as body
+            except Exception as parse_exc:
+                 self.logger.error(f"Error parsing LLM response for client {client.id}: {parse_exc}. Response: {llm_response_str[:200]}...")
+                 raise # Reraise parsing error
 
-            return subject.strip().replace('"', ''), final_body
+            # 5. A/B Testing Logic Placeholder (Remains commented out)
+            # ... (Keep existing commented A/B logic here for future integration) ...
+
+            # 6. Add Tracking Pixel
+            # TODO: Ensure settings.AGENCY_TRACKING_DOMAIN and uuid are correctly imported/available
+            import uuid # Temporary import, move to top later
+            pixel_url = f"http://localhost:8000/track/{uuid.uuid4()}.png" # Placeholder URL, use settings
+            # if self.config and hasattr(self.config, 'AGENCY_TRACKING_DOMAIN'):
+            #     pixel_url = f"https://{self.config.AGENCY_TRACKING_DOMAIN}/track/{uuid.uuid4()}.png"
+            # else:
+            #     self.logger.warning("AGENCY_TRACKING_DOMAIN not found in config. Using placeholder pixel URL.")
+
+            final_body = body + f'<img src="{pixel_url}" width="1" height="1" alt="">'
+
+            # Clean subject line
+            subject = subject.strip().replace('"', '')
+
+            self.logger.info(f"Generated email content internally for client {client.id}")
+
+            # 7. Store generated content in Knowledge Base
+            if self.kb_interface and subject and final_body:
+                # Store subject
+                subject_kf_id = await self.kb_interface.add_knowledge(
+                    content=subject,
+                    data_type='email_subject',
+                    source_agent=self.agent_name,
+                    metadata={'client_id': client.id, 'campaign_id': campaign_id}
+                )
+                if subject_kf_id:
+                    composition_ids['subject_kf_id'] = subject_kf_id
+
+                # Store body (as one fragment for now)
+                # TODO: Implement body snippet extraction logic later
+                body_kf_id = await self.kb_interface.add_knowledge(
+                    content=final_body, # Store final HTML body with pixel
+                    data_type='email_body_snippet', # Use generic type for now
+                    source_agent=self.agent_name,
+                    metadata={'client_id': client.id, 'campaign_id': campaign_id, 'snippet_type': 'full_body'}
+                )
+                if body_kf_id:
+                    # Store as list even though it's one ID, for future compatibility
+                    composition_ids['body_snippets_kf_ids'] = [body_kf_id]
+
+            return subject, final_body, composition_ids # Return composition IDs
 
         except Exception as e:
-            logger.error(f"Email content generation failed for client {client.id}: {e}", exc_info=True)
-            return None, None
+            self.logger.error(f"Internal email content generation failed for client {client.id}: {e}", exc_info=True)
+            return None, None, {} # Return empty dict on failure
 
     def _get_regional_adaptation(self, country_code):
         # Simple example, expand as needed
@@ -236,10 +284,11 @@ class PuppeteerAgent:
             self.active_sends += 1
             log_status = "failed"
             log_entry = None
-            subject = None
-            body = None
-            recipient = None
-            sender_email = None
+            subject: Optional[str] = None
+            body: Optional[str] = None
+            recipient: Optional[str] = None
+            sender_email: Optional[str] = None
+            composition_ids: Dict[str, Any] = {} # To store fragment IDs
 
             try:
                 # 0. Check Global Daily Limit
@@ -271,10 +320,12 @@ class PuppeteerAgent:
                     await self._log_email(client_id, recipient, "Compliance Block", "", "blocked", None)
                     return
 
-                # 3. Generate Content
-                subject, body = await self.generate_email_content(client, campaign_id)
+                # 3. Generate Content & Get Composition IDs
+                subject, body, composition_ids = await self.generate_email_content(client, campaign_id)
                 if not subject or not body:
-                    logger.error(f"Failed to generate content for {client.id}. Skipping send.")
+                    self.logger.error(f"Failed to generate content for {client.id}. Skipping send.")
+                    # Log failure?
+                    await self._log_email(client_id, recipient, "Content Gen Failed", "", "failed_generation", sender_email)
                     return
 
                 # 4. Optimal Send Time Calculation & Wait
@@ -298,17 +349,21 @@ class PuppeteerAgent:
                     self.global_sent_today += 1
                     logger.info(f"Email SENT to {recipient} via {sender_email}. Subject: {subject[:50]}...")
                     # Update client last interaction time
+                    # Update client last interaction time (Verification: This existing logic correctly tracks basic interaction)
                     async with self.session_maker() as session:
                          await session.execute(update(Client).where(Client.id == client_id).values(last_interaction=datetime.now(timezone.utc)))
                          await session.commit()
+                         self.logger.debug(f"Updated last_interaction time for client {client_id}")
                 else:
                     log_status = "failed"
                     # Failure handled by retry/breaker, log as failed here
                     logger.warning(f"Email FAILED for {recipient} via {sender_email}.")
 
-                log_entry = await self._log_email(client_id, recipient, subject, body, log_status, sender_email) # Log pixelated body
+                # Pass composition_ids to log function
+                log_entry = await self._log_email(client_id, recipient, subject, body, log_status, sender_email, composition_ids)
 
-                # 8. A/B Testing: Log variant if applicable
+                # 8. A/B Testing: Log variant if applicable (Needs integration with composition)
+                # variant_tag = composition_ids.get('ab_variant') # Example if variant info is added
                 # if log_entry and variant_tag:
                 #     async with self.session_maker() as session:
                 #         await session.execute(update(EmailLog).where(EmailLog.id == log_entry.id).values(ab_test_variant=variant_tag))
@@ -475,8 +530,12 @@ class PuppeteerAgent:
             # logger.debug(f"SMTP send successful via {host}") # Logged in calling function
 
 
-    async def _log_email(self, client_id, recipient, subject, body, status, sender_email):
-        """Logs email details to the database."""
+    async def _log_email(self, client_id, recipient, subject, body, status, sender_email, composition_ids: Optional[Dict[str, Any]] = None):
+        """
+        Logs email details to the database.
+        Includes placeholder logic for linking to knowledge items used in composition.
+        """
+        # composition_ids might look like: {'subject': 10, 'hook': 15, 'body_snippets': [20, 25], 'cta': 30}
         try:
             async with self.session_maker() as session:
                 log = EmailLog(
@@ -486,18 +545,45 @@ class PuppeteerAgent:
                     content=body, # Store the HTML body (with pixel)
                     status=status,
                     timestamp=datetime.now(timezone.utc),
-                    agent_version='Puppeteer_v2.0',
+                    agent_version='EmailAgent_Genius_v1.0', # Updated version
                     # opened_at=None, # Updated via tracking endpoint later
                     # responded_at=None # Updated via reply processing later
-                    # sender_account=sender_email # Add if schema supports
+                    sender_account=sender_email # Assuming EmailLog model has this field
                 )
                 session.add(log)
                 await session.commit()
                 await session.refresh(log)
-                logger.debug(f"Logged email to {recipient}, status: {status}, ID: {log.id}")
+                self.logger.debug(f"Logged email to {recipient}, status: {status}, EmailLog ID: {log.id}")
+
+                # --- Link composition via KBInterface ---
+                if composition_ids and self.kb_interface and log.id: # Check if KB is available and log was successful
+                    try:
+                        # Prepare details for add_email_composition
+                        composition_details = {
+                            "subject_kf_id": composition_ids.get('subject_kf_id'),
+                            "hook_kf_id": composition_ids.get('hook_kf_id'), # Add if hook extraction is implemented
+                            "body_snippets_kf_ids": composition_ids.get('body_snippets_kf_ids'),
+                            "cta_kf_id": composition_ids.get('cta_kf_id') # Add if CTA extraction is implemented
+                        }
+                        # Remove None values before sending
+                        cleaned_composition_details = {k: v for k, v in composition_details.items() if v is not None}
+
+                        if cleaned_composition_details: # Only add if there's something to link
+                            await self.kb_interface.add_email_composition(
+                                email_log_id=log.id,
+                                composition_details=cleaned_composition_details
+                            )
+                            self.logger.debug(f"Linked EmailLog {log.id} to composition items via KBInterface.")
+                        else:
+                            self.logger.debug(f"No valid composition IDs found to link for EmailLog {log.id}.")
+
+                    except Exception as comp_e:
+                        self.logger.error(f"Failed to link email composition for EmailLog {log.id} via KBInterface: {comp_e}", exc_info=True)
+                # --- End Linking Composition ---
+
                 return log
         except Exception as e:
-            logger.error(f"Failed to log email for {recipient}: {e}", exc_info=True)
+            self.logger.error(f"Failed to log email for {recipient}: {e}", exc_info=True)
             return None
 
 
@@ -544,5 +630,173 @@ class PuppeteerAgent:
                 break
             except Exception as e:
                 logger.critical(f"Puppeteer Agent: CRITICAL error in run loop: {e}", exc_info=True)
-                await self.orchestrator.report_error("PuppeteerAgent", f"Critical run loop error: {e}")
+                await self.orchestrator.report_error("EmailAgent", f"Critical run loop error: {e}")
                 await asyncio.sleep(60) # Wait after critical error
+
+    # --- Abstract Method Implementations (Placeholders) ---
+
+    async def execute_task(self, task_details: Dict[str, Any]) -> Any:
+        """Core method to execute the agent's primary function for a given task."""
+        task_type = task_details.get('type')
+        if task_type == 'send_email':
+            client_id = task_details.get('client_id')
+            campaign_id = task_details.get('campaign_id')
+            if client_id:
+                self.logger.info(f"Executing send_email task for client {client_id}")
+                # Wrap existing logic, will be refactored further
+                await self.send_email_task(client_id, campaign_id)
+                return {"status": "completed"} # Or return actual result
+            else:
+                self.logger.error("execute_task: Missing client_id for send_email task")
+                return {"status": "failed", "reason": "Missing client_id"}
+        else:
+            self.logger.warning(f"execute_task: Unknown task type '{task_type}'")
+            return {"status": "failed", "reason": f"Unknown task type '{task_type}'"}
+
+    async def learning_loop(self):
+        """
+        Prototype Learning Loop (v1 - Simulated Data).
+        Periodically simulates retrieving performance data, analyzing it,
+        and updating internal strategy state.
+        """
+        self.logger.info("Executing learning loop prototype...")
+
+        try:
+            # --- 1. Simulate Data Retrieval (Placeholder) ---
+            # In reality, this would query KBInterface/DB using logic from database_schema_updates.md
+            # Example: await self.kb_interface.get_performance_summary('email_subject', period='7d')
+            simulated_performance_data = [
+                {'type': 'email_subject', 'content': 'Quick question about [Interest]', 'open_rate': 0.35, 'sample_size': 150, 'id': 10},
+                {'type': 'email_subject', 'content': 'Idea for [Company Name]', 'open_rate': 0.45, 'sample_size': 120, 'id': 11},
+                {'type': 'email_subject', 'content': 'Following up', 'open_rate': 0.20, 'sample_size': 200, 'id': 12},
+                # Add simulated data for hooks, CTAs etc. later
+            ]
+            self.logger.debug(f"Simulated performance data retrieved: {len(simulated_performance_data)} items.")
+
+            # --- 2. Simulate Analysis (Placeholder) ---
+            # Find the best performing subject line based on open rate, requiring a minimum sample size.
+            best_subject_template = self.internal_state.get('preferred_subject_template', "Quick question about [Interest]") # Start with current or default
+            highest_open_rate = 0.0
+            min_sample_size = 50 # Require minimum samples for significance
+
+            for item in simulated_performance_data:
+                # Ensure item has necessary keys before accessing
+                if item.get('type') == 'email_subject' and item.get('sample_size', 0) >= min_sample_size:
+                    current_open_rate = item.get('open_rate', 0.0)
+                    if current_open_rate > highest_open_rate:
+                        highest_open_rate = current_open_rate
+                        best_subject_template = item.get('content', best_subject_template) # Update template
+
+            self.logger.info(f"Simulated Analysis: Best performing subject template identified: '{best_subject_template}' (Open Rate: {highest_open_rate:.2f})")
+
+            # --- 3. Simulate Strategy Update (Update Internal State) ---
+            # Store the learned preference in internal_state.
+            # The generate_dynamic_prompt method can later use this state.
+            if self.internal_state.get('preferred_subject_template') != best_subject_template:
+                self.internal_state['preferred_subject_template'] = best_subject_template
+                self.internal_state['last_learning_update_ts'] = datetime.now(timezone.utc)
+                self.logger.info(f"Internal state updated with new preferred subject template: '{best_subject_template}'")
+            else:
+                self.logger.info("No change in preferred subject template based on simulated analysis.")
+
+        except Exception as e:
+            self.logger.error(f"Error during learning loop prototype: {e}", exc_info=True)
+
+        # --- Loop Delay ---
+        # Keep running periodically
+        try:
+            # Use a shorter delay for testing/demonstration initially
+            await asyncio.sleep(60 * 10) # Run every 10 minutes for now
+        except asyncio.CancelledError:
+            self.logger.info("Learning loop cancelled.")
+            raise # Propagate cancellation
+
+    async def self_critique(self) -> Dict[str, Any]:
+        """Method for the agent to evaluate its own performance and strategy."""
+        self.logger.info("self_critique: Placeholder - Not yet implemented.")
+        # TODO: Implement logic to analyze internal_state['campaign_stats'], compare against goals, identify issues.
+        # Potentially use LLM call with specific critique prompt.
+        return {"status": "ok", "feedback": "Self-critique not implemented."}
+
+    async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
+        """
+        Constructs context-rich prompts for LLM calls, incorporating internal state and KB insights.
+        Prototype v1: Uses internal state for learned preferences, simulates KB retrieval.
+        """
+        self.logger.debug(f"Generating dynamic prompt for task context: {task_context.get('task')}")
+
+        # 1. Start with the base meta-prompt defining the agent's persona and goals
+        prompt_parts = [EMAIL_AGENT_META_PROMPT]
+
+        # 2. Add specific task context
+        prompt_parts.append("\n--- Current Task Context ---")
+        prompt_parts.append(f"Task: {task_context.get('task', 'Generate email')}")
+        prompt_parts.append(f"Desired Outcome: {task_context.get('desired_outcome', 'Drive engagement')}")
+        if task_context.get('campaign_id'):
+            prompt_parts.append(f"Campaign ID: {task_context['campaign_id']}")
+
+        client_info = task_context.get('client_info', {})
+        prompt_parts.append("\n--- Recipient Profile ---")
+        prompt_parts.append(f"Name: {client_info.get('name', 'N/A')}")
+        prompt_parts.append(f"Email: {client_info.get('email', 'N/A')}")
+        prompt_parts.append(f"Country: {client_info.get('country', 'N/A')}")
+        prompt_parts.append(f"Interests: {client_info.get('interests', ['general business'])}")
+        prompt_parts.append(f"Engagement Score: {client_info.get('engagement_score', 0.1):.2f}")
+        prompt_parts.append(f"OSINT Summary: {task_context.get('osint_summary', 'N/A')}")
+
+        # 3. Incorporate Learned Preferences from Internal State
+        prompt_parts.append("\n--- Learned Preferences (Internal State) ---")
+        preferred_subject = self.internal_state.get('preferred_subject_template', None)
+        if preferred_subject:
+            prompt_parts.append(f"Preferred Subject Template (Based on recent performance): '{preferred_subject}' - Adapt this template creatively.")
+        else:
+            prompt_parts.append("No specific subject preference learned yet. Generate a compelling subject.")
+
+        # Add placeholders for other learned elements (hooks, CTAs) as they get implemented
+        # preferred_hook = self.internal_state.get('preferred_hook_style', 'direct')
+        # prompt_parts.append(f"Preferred Hook Style: {preferred_hook}")
+
+        # 4. Retrieve Relevant Knowledge from KB
+        prompt_parts.append("\n--- Relevant Knowledge (KB Retrieval) ---")
+        if self.kb_interface:
+            try:
+                # Query for best performing subject lines for this type of client/campaign (simplified query)
+                # TODO: Add more context to query (e.g., client industry, campaign goal)
+                subject_perf_query = await self.kb_interface.get_knowledge(
+                    type_filter='email_subject',
+                    # tag_filter=[f"audience:{client_info.get('industry', 'general')}"], # Example tag filter
+                    limit=3 # Get top 3 examples
+                    # TODO: Need sorting by performance in get_knowledge or a dedicated method
+                )
+                if subject_perf_query:
+                    prompt_parts.append("Top Performing Subject Examples (Consider adapting):")
+                    for item in subject_perf_query:
+                        # TODO: Include performance metric (e.g., open rate) once available
+                        prompt_parts.append(f"- '{item.get('content')}'")
+                else:
+                    prompt_parts.append("No specific subject performance data found in KB.")
+
+                # TODO: Query for best hooks, CTAs, body snippets similarly
+                # hook_perf_query = await self.kb_interface.get_knowledge(...)
+                # cta_perf_query = await self.kb_interface.get_knowledge(...)
+
+            except Exception as kb_err:
+                self.logger.error(f"Error retrieving knowledge from KB for dynamic prompt: {kb_err}", exc_info=True)
+                prompt_parts.append("KB Error: Could not retrieve relevant knowledge.")
+        else:
+            prompt_parts.append("KB Interface not available.")
+
+        # 5. Add Specific Instructions for the LLM
+        prompt_parts.append("\n--- Instructions ---")
+        prompt_parts.append("1. Deeply personalize the email using the recipient profile and OSINT summary.")
+        prompt_parts.append("2. Craft a compelling, human-like subject line, strongly considering the preferred template if provided.")
+        prompt_parts.append("3. Write engaging body copy incorporating relevant knowledge and interests.")
+        prompt_parts.append("4. Ensure the tone is appropriate (professional, persuasive, slightly informal).")
+        prompt_parts.append("5. Include a clear Call To Action (CTA), considering the successful example provided.")
+        prompt_parts.append("6. **Output Format:** Respond ONLY with a valid JSON object containing two keys: 'subject' (string) and 'body' (string - HTML formatted). Do not include any other text, preamble, or explanation outside the JSON object.")
+        prompt_parts.append("```json") # Hint for the LLM
+
+        final_prompt = "\n".join(prompt_parts)
+        self.logger.debug(f"Generated dynamic prompt (length: {len(final_prompt)} chars)")
+        # self.logger.debug(f"Prompt Preview:\n{final_prompt[:500]}...") # Optional: Log prompt preview for debugging
+        return final_prompt
