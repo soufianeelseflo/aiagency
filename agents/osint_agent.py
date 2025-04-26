@@ -56,13 +56,26 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
     """
     AGENT_NAME = "OSINTAgent"
 
-    def __init__(self, session_maker: AsyncSession, orchestrator: Any, kb_interface: KBInterface):
+    def __init__(self, session_maker: AsyncSession, orchestrator: Any, kb_interface: KBInterface, shodan_api_key: Optional[str], spiderfoot_api_key: Optional[str]):
+        """Initializes the OSINTAgent.
+
+        Args:
+            session_maker: SQLAlchemy async session maker.
+            orchestrator: The main Orchestrator instance.
+            kb_interface: The interface for interacting with the Knowledge Base.
+            shodan_api_key: The Shodan API Key (fetched from Vault, can be None).
+            spiderfoot_api_key: The SpiderFoot API Key (fetched from Vault, can be None).
+        """
         super().__init__(agent_name=self.AGENT_NAME, kb_interface=kb_interface)
         # self.config is inherited
         # self.kb_interface is inherited
         self.session_maker = session_maker # Keep for saving OSINTData records
         self.orchestrator = orchestrator # Keep for reporting/notifications/LLM access proxy
         self.think_tool = orchestrator.agents.get('think') # Keep for analysis LLM calls initially
+
+        # Store passed-in secrets
+        self._shodan_api_key = shodan_api_key
+        self._spiderfoot_api_key = spiderfoot_api_key
 
         # --- Internal State Initialization ---
         self.internal_state['task_queue'] = asyncio.Queue()
@@ -71,10 +84,10 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
         self.internal_state['memory_cache'] = {} # Simple cache for insights (consider moving to KB)
         self.internal_state['meta_prompt'] = OSINT_AGENT_META_PROMPT
 
-        # Tool Configuration (API Keys loaded from config/settings)
-        self.internal_state['shodan_api_key'] = self.config.get("SHODAN_API_KEY")
-        self.internal_state['spiderfoot_api_key'] = self.config.get("SPIDERFOOT_API_KEY")
-        self.internal_state['spiderfoot_url'] = self.config.get("SPIDERFOOT_URL", "http://localhost:5001")
+        # Tool Configuration (API Keys passed in, URL from config)
+        # self.internal_state['shodan_api_key'] = self.config.get("SHODAN_API_KEY") # Use self._shodan_api_key
+        # self.internal_state['spiderfoot_api_key'] = self.config.get("SPIDERFOOT_API_KEY") # Use self._spiderfoot_api_key
+        self.internal_state['spiderfoot_url'] = self.config.get("SPIDERFOOT_URL", "http://localhost:5001") # URL is config
 
         # Feature Flags for Aggressive Tools
         self.internal_state['enable_google_dorking'] = bool(self.config.get("OSINT_ENABLE_GOOGLE_DORKING", False))
@@ -153,8 +166,8 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
         if tool_name == 'DarkPoolSearch': return self.enable_dark_pool
         if tool_name == 'WebcamSearch': return self.enable_webcam_search
         # Assume other standard tools are always enabled if configured (e.g., have API key)
-        if tool_name == 'Shodan': return bool(self.shodan_api_key)
-        if tool_name == 'SpiderFoot': return bool(self.spiderfoot_api_key) and bool(self.spiderfoot_url)
+        if tool_name == 'Shodan': return bool(self._shodan_api_key) # Use stored key
+        if tool_name == 'SpiderFoot': return bool(self._spiderfoot_api_key) and bool(self.internal_state.get('spiderfoot_url')) # Use stored key and URL from state
         # Add checks for other tools requiring keys/config if necessary
         return True # Default to enabled for tools without specific flags/keys
 
@@ -715,12 +728,12 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
         """Run Shodan search using the API."""
         # Requires shodan library and API key
         logger.info(f"Running Shodan search for query: {query}")
-        if not self.shodan_api_key:
-            logger.warning("Shodan API key not configured. Skipping Shodan search.")
-            return {"error": "Shodan API key not configured"}
+        if not self._shodan_api_key: # Check stored key
+            logger.warning("Shodan API key not available. Skipping Shodan search.")
+            return {"error": "Shodan API key not available"}
         try:
             import shodan
-            api = shodan.Shodan(self.shodan_api_key)
+            api = shodan.Shodan(self._shodan_api_key) # Use stored key
             # Use search_cursor for potentially large results, or simple search for smaller ones
             # results = api.search(query) # Simple search
             # Cursor example: Get first N results
@@ -822,11 +835,12 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
 
     async def run_SpiderFoot(self, target: str) -> Dict:
         """Interact with a running SpiderFoot instance API."""
-        # Requires a running SpiderFoot HX or embedded instance accessible at self.spiderfoot_url
-        logger.info(f"Initiating SpiderFoot scan for target: {target} via {self.spiderfoot_url}")
-        if not self.spiderfoot_api_key or not self.spiderfoot_url:
-            logger.warning("SpiderFoot URL or API key not configured. Skipping scan.")
-            return {"error": "SpiderFoot URL or API key not configured"}
+        # Requires a running SpiderFoot HX or embedded instance accessible
+        spiderfoot_url = self.internal_state.get('spiderfoot_url')
+        logger.info(f"Initiating SpiderFoot scan for target: {target} via {spiderfoot_url}")
+        if not self._spiderfoot_api_key or not spiderfoot_url: # Check stored key and URL
+            logger.warning("SpiderFoot URL or API key not available. Skipping scan.")
+            return {"error": "SpiderFoot URL or API key not available"}
 
         scan_name = f"OSINTAgent_{target}_{int(time.time())}"
         # Select modules - use a safe subset by default, make configurable
@@ -841,10 +855,10 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
                     'modulelist': modules_to_run,
                     'usecase': 'all' # Or specify 'footprint', 'investigate', 'passive'
                 }
-                headers = {'X-API-KEY': self.spiderfoot_api_key}
+                headers = {'X-API-KEY': self._spiderfoot_api_key} # Use stored key
                 scan_id = None
-                logger.debug(f"Starting SpiderFoot scan: URL={self.spiderfoot_url}/startscan, Payload={start_payload}")
-                async with session.post(f"{self.spiderfoot_url}/startscan", json=start_payload, headers=headers) as response:
+                logger.debug(f"Starting SpiderFoot scan: URL={spiderfoot_url}/startscan, Payload={start_payload}")
+                async with session.post(f"{spiderfoot_url}/startscan", json=start_payload, headers=headers) as response:
                     if response.status == 200:
                         scan_id = await response.text() # API returns scan ID directly
                         scan_id = scan_id.strip('"') # Remove quotes if present
@@ -868,7 +882,7 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
 
                     await asyncio.sleep(poll_interval)
                     logger.debug(f"Polling SpiderFoot scan status for ID: {scan_id}")
-                    async with session.get(f"{self.spiderfoot_url}/scanstatus?id={scan_id}", headers=headers) as status_response:
+                    async with session.get(f"{spiderfoot_url}/scanstatus?id={scan_id}", headers=headers) as status_response:
                          if status_response.status == 200:
                               status_text = await status_response.text()
                               status_text = status_text.strip('"')
@@ -888,7 +902,7 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
                 # 3. Retrieve Scan Results (Summary or specific types)
                 # Example: Get summary
                 logger.debug(f"Retrieving SpiderFoot summary for scan ID: {scan_id}")
-                async with session.get(f"{self.spiderfoot_url}/scansummary?id={scan_id}", headers=headers) as summary_response:
+                async with session.get(f"{spiderfoot_url}/scansummary?id={scan_id}", headers=headers) as summary_response:
                      if summary_response.status == 200:
                           results = await summary_response.json()
                           logger.info(f"SpiderFoot scan {scan_id} for '{target}' completed. Retrieved summary.")
@@ -901,8 +915,8 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
                           return {"error": f"Failed to retrieve SpiderFoot results (Status: {summary_response.status})", "details": error_text}
 
         except aiohttp.ClientConnectionError as e:
-             logger.error(f"Could not connect to SpiderFoot at {self.spiderfoot_url}: {e}")
-             return {"error": f"Could not connect to SpiderFoot at {self.spiderfoot_url}"}
+             logger.error(f"Could not connect to SpiderFoot at {spiderfoot_url}: {e}")
+             return {"error": f"Could not connect to SpiderFoot at {spiderfoot_url}"}
         except Exception as e:
             logger.error(f"SpiderFoot interaction failed for {target}: {e}", exc_info=True)
             return {"error": str(e)}

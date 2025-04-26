@@ -41,7 +41,16 @@ class VoiceAgent(GeniusAgentBase): # Renamed and inherited
     # Ensure KBInterface is imported correctly at the top
     # from .base_agent import GeniusAgentBase, KBInterface
 
-    def __init__(self, session_maker: AsyncSession, orchestrator: Any, kb_interface: KBInterface): # Accepts kb_interface
+    def __init__(self, session_maker: AsyncSession, orchestrator: Any, kb_interface: KBInterface, twilio_auth_token: str, deepgram_api_key: str): # Accepts kb_interface and secrets
+        """Initializes the VoiceAgent.
+
+        Args:
+            session_maker: SQLAlchemy async session maker.
+            orchestrator: The main Orchestrator instance.
+            kb_interface: The interface for interacting with the Knowledge Base.
+            twilio_auth_token: The Twilio Auth Token (fetched from Vault).
+            deepgram_api_key: The Deepgram API Key (fetched from Vault).
+        """
         # Pass kb_interface to the base class constructor
         super().__init__(agent_name=self.AGENT_NAME, kb_interface=kb_interface)
         # self.config is inherited from GeniusAgentBase
@@ -49,6 +58,10 @@ class VoiceAgent(GeniusAgentBase): # Renamed and inherited
         self.session_maker = session_maker # Keep DB session maker
         self.orchestrator = orchestrator # Keep orchestrator reference
         self.think_tool = orchestrator.agents.get('think') # Keep for non-core tasks initially
+
+        # Store passed-in secrets
+        self._twilio_auth_token = twilio_auth_token
+        self._deepgram_api_key = deepgram_api_key
 
         # --- Internal State Initialization ---
         self.internal_state['target_country'] = self.config.get("VOICE_TARGET_COUNTRY", "USA")
@@ -64,24 +77,32 @@ class VoiceAgent(GeniusAgentBase): # Renamed and inherited
         self.internal_state['active_calls'] = {} # Track state per call_sid: {'state': '...', 'log': []}
 
         # --- Essential Clients (Direct Attributes) ---
-        self.twilio_account_sid = self.config.get("TWILIO_ACCOUNT_SID")
-        self.twilio_auth_token = self.config.get("TWILIO_AUTH_TOKEN")
-        self.deepgram_api_key = self.config.get("DEEPGRAM_API_KEY")
+        self.twilio_account_sid = self.config.get("TWILIO_ACCOUNT_SID") # SID is non-secret config
+        # self.twilio_auth_token = self.config.get("TWILIO_AUTH_TOKEN") # Use passed-in _twilio_auth_token
+        # self.deepgram_api_key = self.config.get("DEEPGRAM_API_KEY") # Use passed-in _deepgram_api_key
 
-        if not all([self.twilio_account_sid, self.twilio_auth_token, self.deepgram_api_key]):
-             self.logger.critical(f"{self.AGENT_NAME}: Missing critical API credentials (Twilio SID/Token, Deepgram Key). Agent will likely fail.")
-             # Consider raising an error during Orchestrator init if critical config is missing
-             # raise ValueError("Missing critical VoiceAgent configuration")
+        # Check if essential non-secret config and passed-in secrets are present
+        if not self.twilio_account_sid:
+             self.logger.critical(f"{self.AGENT_NAME}: Missing critical configuration: TWILIO_ACCOUNT_SID.")
+             raise ValueError("Missing TWILIO_ACCOUNT_SID configuration")
+        if not self._twilio_auth_token:
+             self.logger.critical(f"{self.AGENT_NAME}: Twilio Auth Token was not provided during initialization.")
+             raise ValueError("Missing Twilio Auth Token")
+        if not self._deepgram_api_key:
+             self.logger.critical(f"{self.AGENT_NAME}: Deepgram API Key was not provided during initialization.")
+             raise ValueError("Missing Deepgram API Key")
 
         try:
-            self.twilio_client = TwilioClient(self.twilio_account_sid, self.twilio_auth_token)
+            # Initialize Twilio client using SID from config and token from argument
+            self.twilio_client = TwilioClient(self.twilio_account_sid, self._twilio_auth_token)
+            self.logger.info(f"{self.AGENT_NAME}: Twilio client initialized.")
         except TwilioException as e:
              self.logger.critical(f"{self.AGENT_NAME}: Failed to initialize Twilio client: {e}. Check credentials.")
              raise ValueError(f"Twilio client initialization failed: {e}") from e
 
         try:
-            # Ensure Deepgram client is initialized correctly
-            self.deepgram_client = Deepgram(self.deepgram_api_key)
+            # Initialize Deepgram client using key from argument
+            self.deepgram_client = Deepgram(self._deepgram_api_key)
             self.logger.info(f"{self.AGENT_NAME}: Deepgram client initialized.")
         except Exception as e:
             self.logger.critical(f"{self.AGENT_NAME}: Failed to initialize Deepgram client: {e}", exc_info=True)

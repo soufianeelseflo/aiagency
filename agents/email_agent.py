@@ -42,7 +42,16 @@ class EmailAgent(GeniusAgentBase): # Renamed and inherited
     # Ensure KBInterface is imported correctly at the top
     # from .base_agent import GeniusAgentBase, KBInterface
 
-    def __init__(self, session_maker: callable, orchestrator: object, kb_interface: KBInterface): # Accepts kb_interface
+    def __init__(self, session_maker: callable, orchestrator: object, kb_interface: KBInterface, smtp_password: str, imap_password: str): # Accepts kb_interface and passwords
+        """Initializes the EmailAgent.
+
+        Args:
+            session_maker: SQLAlchemy async session maker.
+            orchestrator: The main Orchestrator instance.
+            kb_interface: The interface for interacting with the Knowledge Base.
+            smtp_password: The password for the primary SMTP account (fetched from Vault).
+            imap_password: The password for the primary IMAP account (fetched from Vault).
+        """
         agent_name = "EmailAgent"
         # Pass kb_interface to the base class constructor
         super().__init__(agent_name=agent_name, kb_interface=kb_interface)
@@ -53,6 +62,11 @@ class EmailAgent(GeniusAgentBase): # Renamed and inherited
         self.think_tool = orchestrator.agents.get('think') # Keep for non-core tasks initially
         self.secure_storage = orchestrator.secure_storage # Keep for secure data access
 
+        # Store fetched passwords securely (though ideally avoid storing if possible)
+        # For now, store them in internal state for use by SMTP/IMAP functions
+        self._smtp_password = smtp_password
+        self._imap_password = imap_password
+
         # --- Internal State Initialization ---
         self.internal_state['task_queue'] = asyncio.PriorityQueue()
         self.internal_state['max_concurrency'] = getattr(self.config, 'EMAIL_AGENT_MAX_CONCURRENCY', 25) # Use new setting name
@@ -62,9 +76,20 @@ class EmailAgent(GeniusAgentBase): # Renamed and inherited
         self.internal_state['global_daily_limit'] = getattr(self.config, 'EMAIL_AGENT_MAX_PER_DAY', 1000) # Use new setting name
         self.internal_state['global_sent_today'] = 0
         self.internal_state['global_reset_time'] = self._get_next_reset_time_utc()
-        self.internal_state['smtp_providers'] = self.config.SMTP_PROVIDERS if self.config else []
+        # Update SMTP providers to include the fetched password
+        self.internal_state['smtp_providers'] = []
+        if self.config and self.config.SMTP_PROVIDERS:
+            for provider_config in self.config.SMTP_PROVIDERS:
+                # Assuming only one provider for now, add the password
+                if provider_config.get('email') == self.config.HOSTINGER_EMAIL:
+                    provider_config['pass'] = self._smtp_password
+                    self.internal_state['smtp_providers'].append(provider_config)
+                else:
+                    # Handle multiple providers if logic is added later
+                    self.logger.warning(f"Skipping SMTP provider config for {provider_config.get('email')} as password handling assumes single primary account.")
+
         if not self.internal_state['smtp_providers']:
-             self.logger.critical("EmailAgent: SMTP_PROVIDERS configuration is missing or empty!")
+             self.logger.critical("EmailAgent: SMTP_PROVIDERS configuration is missing, empty, or password could not be added!")
         self.internal_state['current_provider_index'] = 0
         self.internal_state['active_tests'] = {} # { 'test_id': {'variant_a_count': 0, 'variant_b_count': 0, ...} }
         self.internal_state['campaign_stats'] = {} # Placeholder for campaign performance tracking
@@ -480,8 +505,12 @@ class EmailAgent(GeniusAgentBase): # Renamed and inherited
         host = sender_config['host']
         port = sender_config['port']
         email = sender_config['email']
-        # Fetch password securely each time if possible, or assume it's loaded in sender_config
-        password = sender_config['pass'] # Or fetch from Vault via orchestrator/secure_storage
+        # Password should now be present in sender_config from __init__
+        password = sender_config.get('pass')
+        if not password:
+             logger.error(f"SMTP password missing for sender {email}. Cannot send.")
+             # This should ideally not happen if init logic is correct
+             raise smtplib.SMTPAuthenticationError("Password not available for SMTP account.")
 
         msg = EmailMessage()
         # Use set_content for plain text, add_alternative for HTML

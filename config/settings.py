@@ -37,9 +37,10 @@ if not DATABASE_ENCRYPTION_KEY:
      raise ValueError("DATABASE_ENCRYPTION_KEY must be set in the environment.")
 
 # --- LLM API Configuration ---
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") # Primary key for Orchestrator init
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # For direct Gemini calls (validation, vision)
+# Secrets like API keys will be fetched from Vault at runtime
+# OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") # Moved to Vault
+# DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") # Moved to Vault
+# GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Moved to Vault
 
 # --- LLM Model Mapping ---
 # Defines preferred models for different tasks via OpenRouter
@@ -72,35 +73,35 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek/deepseek-coder")
 
 # --- External Service Credentials ---
 # SMTP (Hostinger Example)
-HOSTINGER_EMAIL = os.getenv("HOSTINGER_EMAIL")
-HOSTINGER_SMTP_PASS = os.getenv("HOSTINGER_SMTP_PASS")
-HOSTINGER_SMTP = os.getenv("HOSTINGER_SMTP", "smtp.hostinger.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+HOSTINGER_EMAIL = os.getenv("HOSTINGER_EMAIL") # Non-secret identifier
+# HOSTINGER_SMTP_PASS = os.getenv("HOSTINGER_SMTP_PASS") # Moved to Vault
+HOSTINGER_SMTP = os.getenv("HOSTINGER_SMTP", "smtp.hostinger.com") # Non-secret config
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587)) # Non-secret config
 
 # Hostinger IMAP (for reading verification emails from aliases)
-HOSTINGER_IMAP_HOST = os.getenv("HOSTINGER_IMAP_HOST")
-HOSTINGER_IMAP_PORT = int(os.getenv("HOSTINGER_IMAP_PORT", 993))
-HOSTINGER_IMAP_USER = os.getenv("HOSTINGER_IMAP_USER", os.getenv("HOSTINGER_EMAIL")) # Defaults to SMTP email if not set
-HOSTINGER_IMAP_PASS = os.getenv("HOSTINGER_IMAP_PASS") # MUST be set, likely an App Password
+HOSTINGER_IMAP_HOST = os.getenv("HOSTINGER_IMAP_HOST") # Non-secret config
+HOSTINGER_IMAP_PORT = int(os.getenv("HOSTINGER_IMAP_PORT", 993)) # Non-secret config
+HOSTINGER_IMAP_USER = os.getenv("HOSTINGER_IMAP_USER", os.getenv("HOSTINGER_EMAIL")) # Non-secret identifier
+# HOSTINGER_IMAP_PASS = os.getenv("HOSTINGER_IMAP_PASS") # Moved to Vault
 
 # User Notifications
 USER_EMAIL = os.getenv("USER_EMAIL")
 USER_WHATSAPP_NUMBER = os.getenv("USER_WHATSAPP_NUMBER") # Format: +1xxxxxxxxxx
 
 # Twilio (Voice & WhatsApp)
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER") # Format: whatsapp:+1xxxxxxxxxx
-TWILIO_VOICE_NUMBER = os.getenv("TWILIO_VOICE_NUMBER") # Format: +1xxxxxxxxxx (Must be voice-capable)
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID") # Non-secret identifier
+# TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN") # Moved to Vault
+TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER") # Non-secret config
+TWILIO_VOICE_NUMBER = os.getenv("TWILIO_VOICE_NUMBER") # Non-secret config
 if not TWILIO_VOICE_NUMBER: TWILIO_VOICE_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER", "").replace("whatsapp:", "") # Attempt fallback
-TWILIO_TWIML_BIN_URL = os.getenv("TWILIO_TWIML_BIN_URL") # REQUIRED for Voice Agent streaming
+TWILIO_TWIML_BIN_URL = os.getenv("TWILIO_TWIML_BIN_URL") # Non-secret config
 
 # Deepgram
-DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+# DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY") # Moved to Vault
 
 # Smartproxy (or other proxy provider)
-SMARTPROXY_USERNAME = os.getenv("SMARTPROXY_USERNAME")
-SMARTPROXY_PASSWORD = os.getenv("SMARTPROXY_PASSWORD")
+SMARTPROXY_USERNAME = os.getenv("SMARTPROXY_USERNAME") # Non-secret identifier
+# SMARTPROXY_PASSWORD = os.getenv("SMARTPROXY_PASSWORD") # Moved to Vault
 # Add proxy host/port details if needed directly, though BrowsingAgent handles pool
 
 # HCP Vault
@@ -121,17 +122,17 @@ PAYMENT_TERMS = os.getenv("PAYMENT_TERMS", "Standard terms: 50% upfront, 50% upo
 BASE_UGC_PRICE = float(os.getenv("BASE_UGC_PRICE", 5000.0))
 LEGAL_NOTE = os.getenv("LEGAL_NOTE", "Payment terms as agreed. All sales final upon service commencement. No refunds. Data managed securely. Agency not liable for indirect damages. Governed by laws of Morocco.")
 
-# --- External Service Credentials ---
-FIXED_SALT_STR = "your_secret_salt_string_here"
-FIXED_SALT = hashlib.sha256(FIXED_SALT_STR.encode()).digest()[:32]
+# --- Obsolete Fixed Salt ---
+# FIXED_SALT_STR = "your_secret_salt_string_here" # Removed - Encryption uses per-value salts now
+# FIXED_SALT = hashlib.sha256(FIXED_SALT_STR.encode()).digest()[:32] # Removed
 
 # --- VPN Settings ---
 NORDVPN_DOUBLE_VPN = os.getenv("NORDVPN_DOUBLE_VPN", "true").lower() == "true"
 
 # --- Payout Settings ---
 MOROCCAN_BANK_ACCOUNT = os.getenv("MOROCCAN_BANK_ACCOUNT")
-LEMON_SQUEEZY_API_KEY = os.getenv("LEMON_SQUEEZY_API_KEY")
-LEMON_SQUEEZY_PAYMENT_URL = os.getenv("LEMON_SQUEEZY_PAYMENT_URL")
+# LEMON_SQUEEZY_API_KEY = os.getenv("LEMON_SQUEEZY_API_KEY") # Moved to Vault
+LEMON_SQUEEZY_PAYMENT_URL = os.getenv("LEMON_SQUEEZY_PAYMENT_URL") # Non-secret config
 
 # --- Operational Parameters ---
 BASE_CONCURRENCY = int(os.getenv("BASE_CONCURRENCY", 5))
@@ -155,19 +156,20 @@ if not VPS_IP:
     VPS_IP = "YOUR_VPS_IP_HERE" # Placeholder MUST be replaced in env
 
 # SMTP Providers List (Ensure structure matches EmailAgent usage)
+# SMTP Providers List - Password will be fetched at runtime
 SMTP_PROVIDERS = []
-if HOSTINGER_EMAIL and HOSTINGER_SMTP_PASS and HOSTINGER_SMTP:
+if HOSTINGER_EMAIL and HOSTINGER_SMTP: # Check only for non-secret parts
     SMTP_PROVIDERS.append({
         "host": HOSTINGER_SMTP,
         "port": SMTP_PORT,
         "email": HOSTINGER_EMAIL,
-        "pass": HOSTINGER_SMTP_PASS
+        # "pass": HOSTINGER_SMTP_PASS # Password removed, fetch via Vault later
     })
-# Add logic here to load more providers from environment if needed
+# Add logic here to load more providers from environment if needed (without passwords)
 # e.g., check for SMTP_PROVIDER_2_HOST, etc.
 
 if not SMTP_PROVIDERS:
-     logger.warning("No SMTP providers configured in settings. Email notifications will fail.")
+     logger.warning("No SMTP providers configured in settings (host/port/email). Email notifications might fail if password isn't fetched.")
 
 # --- Meta Prompt (Central Directive for ThinkTool & Overall Agency) ---
 META_PROMPT = """
@@ -193,31 +195,37 @@ class Settings:
     # Define attributes for type hinting and clarity
     DATABASE_URL: Optional[str] = DATABASE_URL
     DATABASE_ENCRYPTION_KEY: Optional[str] = DATABASE_ENCRYPTION_KEY
-    OPENROUTER_API_KEY: Optional[str] = OPENROUTER_API_KEY
-    DEEPSEEK_API_KEY: Optional[str] = DEEPSEEK_API_KEY
-    GEMINI_API_KEY: Optional[str] = GEMINI_API_KEY
+    # Secrets moved to Vault - These attributes remain for type hinting but won't be loaded from env vars
+    OPENROUTER_API_KEY: Optional[str] = None
+    DEEPSEEK_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
+    HOSTINGER_SMTP_PASS: Optional[str] = None
+    HOSTINGER_IMAP_PASS: Optional[str] = None
+    TWILIO_AUTH_TOKEN: Optional[str] = None
+    DEEPGRAM_API_KEY: Optional[str] = None
+    SMARTPROXY_PASSWORD: Optional[str] = None
+    LEMON_SQUEEZY_API_KEY: Optional[str] = None
+
+    # Non-secret or essential bootstrap config loaded from env vars or defaults
+    DATABASE_URL: Optional[str] = DATABASE_URL
+    DATABASE_ENCRYPTION_KEY: Optional[str] = DATABASE_ENCRYPTION_KEY # Keep for DB access
     HOSTINGER_EMAIL: Optional[str] = HOSTINGER_EMAIL
-    HOSTINGER_SMTP_PASS: Optional[str] = HOSTINGER_SMTP_PASS
     HOSTINGER_SMTP: Optional[str] = HOSTINGER_SMTP
     SMTP_PORT: Optional[int] = SMTP_PORT
     HOSTINGER_IMAP_HOST: Optional[str] = HOSTINGER_IMAP_HOST
     HOSTINGER_IMAP_PORT: Optional[int] = HOSTINGER_IMAP_PORT
     HOSTINGER_IMAP_USER: Optional[str] = HOSTINGER_IMAP_USER
-    HOSTINGER_IMAP_PASS: Optional[str] = HOSTINGER_IMAP_PASS
     USER_EMAIL: Optional[str] = USER_EMAIL
     USER_WHATSAPP_NUMBER: Optional[str] = USER_WHATSAPP_NUMBER
     TWILIO_ACCOUNT_SID: Optional[str] = TWILIO_ACCOUNT_SID
-    TWILIO_AUTH_TOKEN: Optional[str] = TWILIO_AUTH_TOKEN
     TWILIO_WHATSAPP_NUMBER: Optional[str] = TWILIO_WHATSAPP_NUMBER
     TWILIO_VOICE_NUMBER: Optional[str] = TWILIO_VOICE_NUMBER
     TWILIO_TWIML_BIN_URL: Optional[str] = TWILIO_TWIML_BIN_URL
-    DEEPGRAM_API_KEY: Optional[str] = DEEPGRAM_API_KEY
     SMARTPROXY_USERNAME: Optional[str] = SMARTPROXY_USERNAME
-    SMARTPROXY_PASSWORD: Optional[str] = SMARTPROXY_PASSWORD
-    HCP_ORGANIZATION_ID: Optional[str] = HCP_ORGANIZATION_ID
-    HCP_PROJECT_ID: Optional[str] = HCP_PROJECT_ID
-    HCP_APP_NAME: Optional[str] = HCP_APP_NAME
-    HCP_API_TOKEN: Optional[str] = HCP_API_TOKEN
+    HCP_ORGANIZATION_ID: Optional[str] = HCP_ORGANIZATION_ID # Keep for Vault access
+    HCP_PROJECT_ID: Optional[str] = HCP_PROJECT_ID # Keep for Vault access
+    HCP_APP_NAME: Optional[str] = HCP_APP_NAME # Keep for Vault access
+    HCP_API_TOKEN: Optional[str] = HCP_API_TOKEN # Keep for Vault access
     PROJECT_NAME: Optional[str] = PROJECT_NAME
     AGENCY_BASE_URL: Optional[str] = AGENCY_BASE_URL
     SENDER_NAME: Optional[str] = SENDER_NAME
@@ -241,7 +249,6 @@ class Settings:
     USER_NAME: Optional[str] = USER_NAME
     NORDVPN_DOUBLE_VPN: Optional[bool] = NORDVPN_DOUBLE_VPN
     MOROCCAN_BANK_ACCOUNT: Optional[str] = MOROCCAN_BANK_ACCOUNT
-    LEMON_SQUEEZY_API_KEY: Optional[str] = LEMON_SQUEEZY_API_KEY
     LEMON_SQUEEZY_PAYMENT_URL: Optional[str] = LEMON_SQUEEZY_PAYMENT_URL
 
     def _convert_type(self, value: str) -> Any:
@@ -260,14 +267,28 @@ class Settings:
 
     def __init__(self):
         # Dynamically load attributes from globals() or os.getenv()
-        for name, default_value in self.__annotations__.items():
-             env_value = os.getenv(name)
-             if env_value is not None:
-                 setattr(self, name, self._convert_type(env_value))
-             elif name in globals(): # Check if defined at module level
-                  setattr(self, name, globals()[name])
-             else:
-                  setattr(self, name, None) # Set to None if not found
+        # Define secrets that should NOT be loaded from env vars here
+        secrets_in_vault = {
+            "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY",
+            "HOSTINGER_SMTP_PASS", "HOSTINGER_IMAP_PASS", "TWILIO_AUTH_TOKEN",
+            "DEEPGRAM_API_KEY", "SMARTPROXY_PASSWORD", "LEMON_SQUEEZY_API_KEY"
+        }
+
+        for name, type_hint in self.__annotations__.items():
+            if name in secrets_in_vault:
+                # Initialize secrets to None; they must be fetched from Vault later
+                setattr(self, name, None)
+            else:
+                # Load non-secret config from env vars or module-level defaults
+                env_value = os.getenv(name)
+                if env_value is not None:
+                    setattr(self, name, self._convert_type(env_value))
+                elif name in globals(): # Check if defined at module level
+                    setattr(self, name, globals()[name])
+                else:
+                    # For attributes not found in env or globals, initialize based on type hint if possible
+                    # This handles Optional[str] etc. correctly, setting them to None
+                    setattr(self, name, None)
 
     def get(self, name: str, default: Any = None) -> Any:
         """Provides dict-like access with a default value."""
@@ -278,11 +299,14 @@ settings = Settings()
 # --- Validation ---
 def validate_core_settings():
     """Validates essential settings required for basic operation."""
-    required = ["DATABASE_URL", "OPENROUTER_API_KEY", "DATABASE_ENCRYPTION_KEY",
-                "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_VOICE_NUMBER",
-                "USER_EMAIL", "HOSTINGER_EMAIL", "HOSTINGER_SMTP_PASS",
-                "HOSTINGER_IMAP_HOST", "HOSTINGER_IMAP_USER", "HOSTINGER_IMAP_PASS", # Added IMAP checks
-                "HCP_API_TOKEN", "HCP_ORGANIZATION_ID", "HCP_PROJECT_ID", "HCP_APP_NAME"]
+    # Validate only essential bootstrap config and Vault access details
+    required = ["DATABASE_URL", "DATABASE_ENCRYPTION_KEY", # Essential for DB
+                "TWILIO_ACCOUNT_SID", # Needed for client init
+                "USER_EMAIL", # Needed for notifications
+                "HOSTINGER_EMAIL", # Needed for notifications/IMAP
+                "HOSTINGER_IMAP_HOST", # Needed for IMAP
+                "HOSTINGER_IMAP_USER", # Needed for IMAP
+                "HCP_API_TOKEN", "HCP_ORGANIZATION_ID", "HCP_PROJECT_ID", "HCP_APP_NAME"] # Vault access
     missing = [key for key in required if not settings.get(key)]
     if missing:
         msg = f"CRITICAL settings missing: {', '.join(missing)}. Agency may not function correctly."

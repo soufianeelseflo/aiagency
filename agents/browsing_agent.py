@@ -35,9 +35,18 @@ logger = logging.getLogger(__name__) # Keep standard logger for agent-specific d
 fake = Faker()
 
 class BrowsingAgent:
-    def __init__(self, session_maker, config, orchestrator, clients_models):
+    def __init__(self, session_maker, config, orchestrator, clients_models, smartproxy_password: str):
+        """Initializes the BrowsingAgent.
+
+        Args:
+            session_maker: SQLAlchemy async session maker.
+            config: The application settings object.
+            orchestrator: The main Orchestrator instance.
+            clients_models: List of LLM clients and models.
+            smartproxy_password: The password for Smartproxy, fetched from Vault.
+        """
         self.session_maker = session_maker
-        self.config = config # Access settings via self.config.HOSTINGER_IMAP_HOST etc.
+        self.config = config # Access non-secret settings via self.config
         self.orchestrator = orchestrator
         self.clients_models = clients_models
         # Ensure 'think' agent is available before accessing it
@@ -47,7 +56,7 @@ class BrowsingAgent:
              # Depending on design, either raise an error or handle gracefully
              # raise ValueError("ThinkTool agent is required for BrowsingAgent")
         self.task_queue = asyncio.Queue()
-        self.max_concurrency = 10 # Default, can be adjusted
+        self.max_concurrency = config.get("BROWSING_AGENT_MAX_CONCURRENCY", 15) # Use config value
 
         # SMS providers remain for potential phone verification needs
         self.sms_providers = [
@@ -58,19 +67,19 @@ class BrowsingAgent:
             'https://receive-sms.cc/',
             'https://www.twilio.com/'
         ]
-        # API keys for SMS providers (if any)
+        # API keys for SMS providers (if any) - Consider moving these to Vault too
         self.sms_api_keys = {provider: os.getenv(f"{provider.split('.')[1].upper()}_API_KEY") for provider in self.sms_providers if provider.endswith('.com')}
         # Success rates for SMS providers
         self.provider_success_rates = {
             'sms': {url: 1.0 for url in self.sms_providers},
         }
 
-        # SmartProxy Configuration (Remains unchanged)
+        # SmartProxy Configuration - Username from config, password passed in
         self.proxy_config = {
-            'username': os.getenv("SMARTPROXY_USERNAME"),
-            'password': os.getenv("SMARTPROXY_PASSWORD"),
-            'base_url': 'dc.us.smartproxy.com',
-            'port_range': range(10000, 10010),
+            'username': self.config.get("SMARTPROXY_USERNAME"), # Get username from config
+            'password': smartproxy_password, # Use passed-in password
+            'base_url': 'dc.us.smartproxy.com', # Hardcoded for now, could be config
+            'port_range': range(10000, 10010), # Hardcoded for now, could be config
         }
 
         # Genius-level meta-prompt
@@ -186,17 +195,22 @@ class BrowsingAgent:
 
     def _initialize_proxy_pool(self):
         """Initialize proxy pool with SmartProxy dedicated datacenter proxies."""
-        if not all([self.proxy_config.get('username'), self.proxy_config.get('password'), self.proxy_config.get('base_url'), self.proxy_config.get('port_range')]):
-             logger.warning("Smartproxy configuration incomplete (username, password, base_url, port_range). Proxy pool will be empty.")
-             op_logger.warning("Smartproxy configuration incomplete. Proxy pool will be empty.")
+        # Check if essential proxy config is present (username/password now checked)
+        if not all([self.proxy_config.get('username'), self.proxy_config.get('password')]):
+             logger.warning("Smartproxy configuration incomplete (username or password missing). Proxy pool will be empty.")
+             op_logger.warning("Smartproxy configuration incomplete (username or password missing). Proxy pool will be empty.")
              return
 
-        for port in self.proxy_config['port_range']:
-            proxy = f"{self.proxy_config['base_url']}:{port}"
+        # Use configured base_url and port_range if available, otherwise keep defaults
+        base_url = self.proxy_config.get('base_url', 'dc.us.smartproxy.com')
+        port_range = self.proxy_config.get('port_range', range(10000, 10010))
+
+        for port in port_range:
+            proxy = f"{base_url}:{port}"
             self.proxy_pool.append({
                 'server': proxy,
                 'username': self.proxy_config['username'],
-                'password': self.proxy_config['password'],
+                'password': self.proxy_config['password'], # Use stored password
                 'failure_count': 0,
                 'last_checked': 0
             })
@@ -302,7 +316,7 @@ class BrowsingAgent:
     async def _validate_proxy(self, proxy):
         """Validate proxy connectivity."""
         proxy_url = f"http://{proxy['server']}"
-        auth = aiohttp.BasicAuth(proxy['username'], proxy['password'])
+        auth = aiohttp.BasicAuth(proxy['username'], proxy['password']) # Use stored password
         try:
             async with aiohttp.ClientSession() as session:
                 # Using a known reliable target for validation
@@ -455,7 +469,7 @@ class BrowsingAgent:
                     browser = await p.chromium.launch(headless=True, proxy={
                         'server': f"http://{proxy['server']}",
                         'username': proxy['username'],
-                        'password': proxy['password']
+                        'password': proxy['password'] # Use stored password
                     })
                     context = await browser.new_context(**fingerprint)
                     page = await context.new_page()
@@ -1076,7 +1090,7 @@ class BrowsingAgent:
                     browser = await p.chromium.launch(headless=True, proxy={
                         'server': f"http://{proxy['server']}",
                         'username': proxy['username'],
-                        'password': proxy['password']
+                        'password': proxy['password'] # Use stored password
                     })
                     context = await browser.new_context()
                     page = await context.new_page()
@@ -1108,20 +1122,23 @@ class BrowsingAgent:
 
     async def _login_to_service(self, service_name: str, page, credentials: dict):
         """Placeholder: Logs into a service using provided credentials."""
-        await self.log_operation('info', f"Placeholder: Attempting login to {service_name}")
+        await self.log_operation('warning', f"Executing PLACEHOLDER for _login_to_service({service_name}). Actual Playwright logic needed.")
+        logger.warning(f"Executing PLACEHOLDER for _login_to_service({service_name}). Actual Playwright logic needed.")
         # Implementation will involve:
         # 1. Navigating to the login page.
         # 2. Filling email/username and password from credentials dict using page.fill().
         # 3. Clicking the login button using page.click().
         # 4. Handling potential 2FA or verification steps if necessary.
         # 5. Checking for successful login (e.g., presence of dashboard element).
-        await asyncio.sleep(random.uniform(1.5, 3.0)) # Simulate action
-        await self.log_operation('info', f"Placeholder: Simulated login to {service_name}")
+        await asyncio.sleep(random.uniform(0.5, 1.0)) # Simulate action
+        await self.log_operation('warning', f"Finished PLACEHOLDER for _login_to_service({service_name}). Returning simulated success.")
+        logger.warning(f"Finished PLACEHOLDER for _login_to_service({service_name}). Returning simulated success.")
         return True # Simulate success
 
     async def _generate_avatar_video(self, service_name: str, page, script: str, avatar_details: dict):
         """Placeholder: Generates avatar video using Argil/Heygen."""
-        await self.log_operation('info', f"Placeholder: Generating avatar video on {service_name} with script: '{script[:30]}...'")
+        await self.log_operation('warning', f"Executing PLACEHOLDER for _generate_avatar_video({service_name}). Actual Playwright logic needed.")
+        logger.warning(f"Executing PLACEHOLDER for _generate_avatar_video({service_name}). Actual Playwright logic needed.")
         # Implementation will involve:
         # 1. Navigating to the video creation section.
         # 2. Selecting/uploading avatar based on avatar_details.
@@ -1129,14 +1146,16 @@ class BrowsingAgent:
         # 4. Selecting voice options.
         # 5. Starting generation and waiting.
         # 6. Finding the download link/button for the generated video.
-        await asyncio.sleep(random.uniform(4.0, 7.0)) # Simulate action
+        await asyncio.sleep(random.uniform(1.0, 2.0)) # Simulate action
         download_url_or_path = f"/path/to/simulated/{service_name}_video.mp4"
-        await self.log_operation('info', f"Placeholder: Simulated video generation on {service_name}. Result path: {download_url_or_path}")
+        await self.log_operation('warning', f"Finished PLACEHOLDER for _generate_avatar_video({service_name}). Returning simulated path: {download_url_or_path}")
+        logger.warning(f"Finished PLACEHOLDER for _generate_avatar_video({service_name}). Returning simulated path: {download_url_or_path}")
         return download_url_or_path # Return path or URL to the generated video
 
     async def _edit_video(self, service_name: str, page, source_video_path: str, assets: dict):
         """Placeholder: Edits video using Descript."""
-        await self.log_operation('info', f"Placeholder: Editing video '{source_video_path}' on {service_name}")
+        await self.log_operation('warning', f"Executing PLACEHOLDER for _edit_video({service_name}, source: {source_video_path}). Actual Playwright logic needed.")
+        logger.warning(f"Executing PLACEHOLDER for _edit_video({service_name}). Actual Playwright logic needed.")
         # Implementation will involve:
         # 1. Navigating to the editor.
         # 2. Uploading the source_video_path.
@@ -1144,25 +1163,28 @@ class BrowsingAgent:
         # 4. Performing edits (adding text, syncing visuals - might require complex interaction or LLM guidance).
         # 5. Exporting/rendering the final video.
         # 6. Finding the download link/button for the edited video.
-        await asyncio.sleep(random.uniform(5.0, 8.0)) # Simulate action
+        await asyncio.sleep(random.uniform(1.0, 2.0)) # Simulate action
         edited_video_path = f"/path/to/simulated/edited_{os.path.basename(source_video_path)}"
-        await self.log_operation('info', f"Placeholder: Simulated video editing on {service_name}. Result path: {edited_video_path}")
+        await self.log_operation('warning', f"Finished PLACEHOLDER for _edit_video({service_name}). Returning simulated path: {edited_video_path}")
+        logger.warning(f"Finished PLACEHOLDER for _edit_video({service_name}). Returning simulated path: {edited_video_path}")
         return edited_video_path
 
     async def _download_asset(self, page, download_trigger_selector: str, target_dir: str, expected_filename: str = None):
         """Placeholder: Downloads a file triggered by clicking a selector."""
-        await self.log_operation('info', f"Placeholder: Attempting download from selector '{download_trigger_selector}' to '{target_dir}'")
+        await self.log_operation('warning', f"Executing PLACEHOLDER for _download_asset(selector='{download_trigger_selector}'). Actual Playwright logic needed.")
+        logger.warning(f"Executing PLACEHOLDER for _download_asset(selector='{download_trigger_selector}'). Actual Playwright logic needed.")
         # Implementation will involve:
         # 1. Setting up a download listener: page.on("download", lambda download: await download.save_as(os.path.join(target_dir, download.suggested_filename)))
         # 2. Clicking the download trigger selector: await page.click(download_trigger_selector)
         # 3. Waiting for the download to complete.
         # 4. Returning the path to the downloaded file.
-        await asyncio.sleep(random.uniform(2.0, 4.0)) # Simulate action
+        await asyncio.sleep(random.uniform(0.5, 1.0)) # Simulate action
         simulated_path = os.path.join(target_dir, expected_filename or "downloaded_file.tmp")
         # Simulate file creation
         os.makedirs(target_dir, exist_ok=True)
         with open(simulated_path, "w") as f: f.write("Simulated download content")
-        await self.log_operation('info', f"Placeholder: Simulated download complete to {simulated_path}")
+        await self.log_operation('warning', f"Finished PLACEHOLDER for _download_asset. Returning simulated path: {simulated_path}")
+        logger.warning(f"Finished PLACEHOLDER for _download_asset. Returning simulated path: {simulated_path}")
         return simulated_path
 
     # --- End Placeholder UGC Methods ---

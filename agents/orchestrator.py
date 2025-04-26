@@ -43,7 +43,7 @@ think_controller.register("run_pre", lambda args, kwargs: True)
 think_controller.register("run_post", lambda result: True)
 
 from config.settings import settings
-from utils.secure_storage import SecureStorage
+from utils.secure_storage import SecureStorage, VaultError # Import VaultError
 # encrypt_data, decrypt_data_fixed_salt_migration imported above
 from twilio.rest import Client as TwilioClient
 # Base, Client, Metric, ExpenseLog, MigrationStatus imported above
@@ -81,58 +81,44 @@ def create_session_maker(engine, schema='public'):
 class Orchestrator:
     """Central coordinator of the AI agency, managing agents and operations autonomously."""
 
-    async def initialize_primary_api_key(self):
-        async with self.session_maker() as session:
-            result = await session.execute(
-                "SELECT COUNT(*) FROM accounts WHERE service = 'openrouter.ai'"
-            )
-            count = result.scalar()
-            if count == 0:
-                primary_api_key = os.getenv("OPENROUTER_API_KEY")
-                if primary_api_key:
-                    account = Account(
-                        service="openrouter.ai",
-                        email="primary@example.com",  # Dummy email
-                        password="",
-                        api_key=primary_api_key,
-                        phone="",
-                        cookies="",
-                        is_available=True
-                    )
-                    session.add(account)
-                    await session.commit()
-                    logger.info("Added primary OpenRouter API key to database")
+    # --- Methods related to direct API key storage in Account table (Marked for Removal/Rework) ---
+    # async def initialize_primary_api_key(self):
+    #     # This method stores OPENROUTER_API_KEY directly in DB, conflicts with Vault strategy.
+    #     # Needs removal or rework based on how multiple keys/accounts are managed via Vault.
+    #     logger.warning("DEPRECATED: initialize_primary_api_key relies on direct DB key storage.")
+    #     pass # Commented out implementation
 
-        async def get_available_openrouter_clients(self):
-            async with self.session_maker() as session:
-                result = await session.execute(
-                    "SELECT api_key FROM accounts WHERE service = 'openrouter.ai' AND is_available = TRUE"
-                )
-                api_keys = [row[0] for row in result.fetchall()]
-                if not api_keys:
-                    logger.warning("No available OpenRouter API keys; creating new accounts.")
-                    await self.create_openrouter_accounts(5)  # Create 5 more if none available
-                    result = await session.execute(
-                        "SELECT api_key FROM accounts WHERE service = 'openrouter.ai' AND is_available = TRUE"
-                    )
-                    api_keys = [row[0] for row in result.fetchall()]
-                clients = [AsyncOpenAI(api_key=key, base_url="https://openrouter.ai/api/v1") for key in api_keys]
-                return clients
+    # async def get_available_openrouter_clients(self):
+    #     # This method reads api_key directly from DB, conflicts with Vault strategy.
+    #     # Needs rework to fetch keys from Vault based on account info (e.g., vault_path).
+    #     logger.warning("DEPRECATED: get_available_openrouter_clients relies on direct DB key storage.")
+    #     # Placeholder: Return only the primary client initialized via Vault for now
+    #     if self.openrouter_client:
+    #         return [self.openrouter_client]
+    #     else:
+    #         logger.error("Primary OpenRouter client not initialized. Cannot provide clients.")
+    #         return []
 
-        async def reset_api_key_availability(self):
-            while True:
-                await asyncio.sleep(86400)  # 24 hours
-                async with self.session_maker() as session:
-                    await session.execute(
-                        "UPDATE accounts SET is_available = TRUE WHERE service = 'openrouter.ai'"
-                    )
-                    await session.commit()
-                logger.info("Reset API key availability for OpenRouter")
+    # async def reset_api_key_availability(self):
+    #     # This method operates on the Account table's is_available flag, related to direct key management.
+    #     # May need rework depending on how account rotation/availability is handled with Vault.
+    #     logger.warning("DEPRECATED: reset_api_key_availability related to direct DB key management.")
+    #     pass # Commented out implementation
 
-        async def create_openrouter_accounts(self, num_accounts):
-            for _ in range(num_accounts):
-                await self.agents['browsing'].task_queue.put({'service_url': 'https://openrouter.ai'})
-            logger.info(f"Queued {num_accounts} OpenRouter account creation tasks.")
+    async def create_openrouter_accounts(self, num_accounts):
+        # This queues tasks for BrowsingAgent, which should handle Vault storage upon creation. OK.
+        if 'browsing' not in self.agents:
+             logger.error("Browsing agent not initialized. Cannot queue OpenRouter account creation.")
+             return
+        for _ in range(num_accounts):
+            # Ensure the task specifies Vault storage is expected
+            await self.agents['browsing'].task_queue.put({
+                'action': 'create_account',
+                'service_url': 'https://openrouter.ai',
+                'store_in_vault': True # Add flag indicating Vault usage
+            })
+        logger.info(f"Queued {num_accounts} OpenRouter account creation tasks (for Vault storage).")
+    # --- End Deprecated/Reworked Methods ---
         
     def __init__(self, schema='public'):
         self.config = settings
@@ -158,18 +144,21 @@ class Orchestrator:
         self.deepgram_connections: Dict[str, websockets.client.WebSocketClientProtocol] = {} # Architect-Zero: Added registry for Deepgram WS
         self.temp_audio_dir = "/tmp/hosted_audio" # Architect-Zero: Added temp dir for audio hosting
         os.makedirs(self.temp_audio_dir, exist_ok=True) # Architect-Zero: Ensure temp dir exists
-        required_env_vars = [
-            "HOSTINGER_EMAIL", "HOSTINGER_SMTP_PASS", "USER_EMAIL",
-            "MOROCCAN_BANK_ACCOUNT", "MOROCCAN_SWIFT_CODE",
-            "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
-            "TWILIO_WHATSAPP_NUMBER", "USER_WHATSAPP_NUMBER",
-            "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"
+        # Validate essential non-secret env vars (DB URL, Vault config are checked in settings.py)
+        essential_config = [
+            "DATABASE_URL", "DATABASE_ENCRYPTION_KEY", # Checked in settings.py
+            "HCP_ORGANIZATION_ID", "HCP_PROJECT_ID", "HCP_APP_NAME", "HCP_API_TOKEN", # Checked in settings.py
+            "TWILIO_ACCOUNT_SID", # Needed early?
+            "USER_EMAIL", # Needed for notifications
+            "HOSTINGER_EMAIL", # Needed for notifications/IMAP
         ]
-        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-        if missing_vars:
-            error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
-            logger.error(error_msg)
-            asyncio.create_task(self.send_notification("Missing Settings", error_msg))
+        missing_config = [var for var in essential_config if not self.config.get(var)]
+        if missing_config:
+            # Log critical error but allow startup to potentially fetch from Vault later if possible?
+            # For now, maintain critical failure if essential bootstrap config is missing.
+            error_msg = f"CRITICAL: Missing essential configuration settings: {', '.join(missing_config)}. Cannot start."
+            logger.critical(error_msg)
+            # Cannot send notification yet as components might not be ready
             raise ValueError(error_msg)
 
     async def check_system_health(self):
@@ -186,96 +175,146 @@ class Orchestrator:
         logger.info(f"System health: CPU={cpu_usage}%, Memory={memory_usage}%, Errors={recent_errors}, Healthy={health_ok}")
         return health_ok
         
+    @think_step("initialize_agents")
     async def initialize_agents(self):
-        """Initialize all agents with their respective API clients and models."""
+        """Initialize all agents, fetching necessary secrets from Vault."""
+        logger.info("Fetching secrets required for agent initialization...")
         try:
-            # ThinkTool
+            # Fetch secrets concurrently
+            results = await asyncio.gather(
+                self.secure_storage.get_secret('hostinger-smtp-pass'),
+                self.secure_storage.get_secret('hostinger-imap-pass'),
+                self.secure_storage.get_secret('twilio-auth-token'),
+                self.secure_storage.get_secret('deepgram-api-key'),
+                self.secure_storage.get_secret('smartproxy-password'),
+                # Add other secrets needed by agents here...
+                return_exceptions=True # Return exceptions instead of raising immediately
+            )
+            # Assign fetched secrets, checking for errors
+            secret_names = ['hostinger-smtp-pass', 'hostinger-imap-pass', 'twilio-auth-token', 'deepgram-api-key', 'smartproxy-password']
+            fetched_secrets = {}
+            initialization_failed = False
+            for name, result in zip(secret_names, results):
+                if isinstance(result, Exception):
+                    logger.critical(f"Failed to fetch required secret '{name}' from Vault: {result}. Agent initialization cannot proceed.")
+                    initialization_failed = True
+                else:
+                    fetched_secrets[name] = result
+            
+            if initialization_failed:
+                 raise VaultError("Failed to fetch one or more required secrets for agent initialization.")
+
+            logger.info("Required secrets fetched successfully. Initializing agents...")
+
+            # --- Agent Initialization with Fetched Secrets ---
+            # Ensure LLM clients are ready (assuming initialize_clients was called first)
+            # TODO: Rework self.openrouter_clients / self.deepseek_clients based on Vault account management
+            # For now, assume primary clients exist if initialize_clients succeeded
+            llm_clients = []
+            if self.openrouter_client: llm_clients.append(self.openrouter_client)
+            if self.deepseek_client: llm_clients.append(self.deepseek_client)
+            if not llm_clients: logger.warning("No LLM clients available during agent initialization.")
+
+            # ThinkTool (Doesn't seem to need specific secrets directly)
             self.agents['think'] = ThinkTool(
                 self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['think']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+                # Pass appropriate client/model mapping
+                clients_models=[(c, self.config.OPENROUTER_MODELS.get('think', self.config.DEEPSEEK_MODEL)) for c in llm_clients]
             )
-            # EmailAgent
+            # EmailAgent (Needs SMTP/IMAP pass)
             self.agents['email'] = EmailAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['email']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+                smtp_password=fetched_secrets['hostinger-smtp-pass'],
+                imap_password=fetched_secrets['hostinger-imap-pass'],
+                clients_models=[(c, self.config.OPENROUTER_MODELS.get('email_draft_llm', self.config.DEEPSEEK_MODEL)) for c in llm_clients]
             )
             # LegalComplianceAgent
             self.agents['legal'] = LegalComplianceAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['legal']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+                clients_models=[(c, self.config.OPENROUTER_MODELS.get('legal_validate', self.config.DEEPSEEK_MODEL)) for c in llm_clients]
             )
             # OSINTAgent
             self.agents['osint'] = OSINTAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['osint']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+                clients_models=[(c, self.config.OPENROUTER_MODELS.get('osint_analyze', self.config.DEEPSEEK_MODEL)) for c in llm_clients]
             )
             # ScoringAgent
             self.agents['scoring'] = ScoringAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['scoring']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+                clients_models=[(c, self.config.OPENROUTER_MODELS.get('scoring', self.config.DEEPSEEK_MODEL)) for c in llm_clients] # Assuming a 'scoring' model key exists
             )
-            # VoiceSalesAgent
+            # VoiceSalesAgent (Needs Twilio Auth, Deepgram Key)
             self.agents['voice_sales'] = VoiceSalesAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['voice_sales']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+                twilio_auth_token=fetched_secrets['twilio-auth-token'],
+                deepgram_api_key=fetched_secrets['deepgram-api-key'],
+                clients_models=[(c, self.config.OPENROUTER_MODELS.get('voice_response_llm', self.config.DEEPSEEK_MODEL)) for c in llm_clients]
             )
             # OptimizationAgent
             self.agents['optimization'] = OptimizationAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['optimization']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+                clients_models=[(c, self.config.OPENROUTER_MODELS.get('optimization', self.config.DEEPSEEK_MODEL)) for c in llm_clients] # Assuming 'optimization' model key
             )
-            # BrowsingAgent (uses DeepSeek primarily)
+            # BrowsingAgent (Needs Smartproxy Pass)
             self.agents['browsing'] = BrowsingAgent(
                 self.session_maker, self.config, self,
-                clients_models=[(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
+                smartproxy_password=fetched_secrets['smartproxy-password'],
+                # Pass appropriate client/model mapping, maybe specific browsing models
+                clients_models=[(c, self.config.OPENROUTER_MODELS.get('browsing_infer_steps', self.config.DEEPSEEK_MODEL)) for c in llm_clients]
             )
             logger.info("All agents initialized successfully.")
+        # Removed duplicate except block below
+        # except Exception as e:
+        #     logger.error(f"Agent initialization failed: {e}")
+        #     await self.send_notification("Agent Initialization Failed", str(e))
+        #     raise
+        # Removed duplicate logger.info below
+        except VaultError as ve:
+            logger.critical(f"CRITICAL: Failed to fetch secrets during agent initialization: {ve}. Cannot proceed.")
+            # Optionally send notification if possible at this stage
+            raise # Halt startup
         except Exception as e:
-            logger.error(f"Agent initialization failed: {e}")
-            await self.send_notification("Agent Initialization Failed", str(e))
+            logger.error(f"Agent initialization failed: {e}", exc_info=True)
+            # await self.send_notification("Agent Initialization Failed", str(e)) # May fail if notification depends on failed secrets
             raise
 
     @think_step("initialize_clients")
     async def initialize_clients(self):
-        """Initialize OpenRouter as the primary client and DeepSeek for website tasks."""
+        """Initialize primary LLM API clients by fetching keys from Vault."""
+        logger.info("Initializing primary LLM clients...")
         try:
-            # Initialize OpenRouter client (primary)
-            openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+            # Fetch keys from Vault
+            openrouter_api_key = await self.secure_storage.get_secret('openrouter-api-key')
+            deepseek_api_key = await self.secure_storage.get_secret('deepseek-api-key')
+            # gemini_api_key = await self.secure_storage.get_secret('gemini-api-key') # Fetch if needed directly
+
             if not openrouter_api_key:
-                error_msg = "OPENROUTER_API_KEY not set in environment variables"
-                logger.error(error_msg)
-                await self.send_notification("API Key Error", error_msg)
-                raise ValueError(error_msg)
+                raise VaultError("Required secret 'openrouter-api-key' not found in Vault.")
             self.openrouter_client = AsyncOpenAI(
                 api_key=openrouter_api_key,
                 base_url="https://openrouter.ai/api/v1"
             )
             logger.info("OpenRouter client initialized successfully.")
 
-            # Initialize DeepSeek client (for websites)
-            deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
             if not deepseek_api_key:
-                error_msg = "DEEPSEEK_API_KEY not set in environment variables"
-                logger.error(error_msg)
-                await self.send_notification("API Key Error", error_msg)
-                raise ValueError(error_msg)
+                raise VaultError("Required secret 'deepseek-api-key' not found in Vault.")
             self.deepseek_client = AsyncDeepSeekClient(
                 api_key=deepseek_api_key,
                 base_url="https://api.deepseek.com"
             )
             logger.info("DeepSeek client initialized successfully.")
+
+            # Initialize other clients like Gemini if needed directly
+
+        except VaultError as ve:
+            error_msg = f"Failed to initialize API clients due to Vault error: {ve}"
+            logger.critical(error_msg)
+            # Cannot send notification reliably if basic clients fail
+            raise # Halt startup
         except Exception as e:
-            error_msg = f"Failed to initialize API clients: {e}"
-            logger.error(error_msg)
-            await self.send_notification("API Client Initialization Failed", error_msg)
-            raise
+            error_msg = f"Unexpected error initializing API clients: {e}"
+            logger.critical(error_msg, exc_info=True)
+            raise # Halt startup
 
     @think_step("initialize_database")
     async def initialize_database(self):
@@ -386,117 +425,15 @@ class Orchestrator:
                 await session.rollback() # Ensure rollback on any error
                 raise Exception(f"Migration '{migration_name}' failed: {e}") from e # Halt startup
 
-    async def initialize_primary_api_key(self):
-        async with self.session_maker() as session:
-            # Need to import Account model if not already available globally
-            from models import Account
-            result = await session.execute(
-                select(func.count(Account.id)).where(Account.service == 'openrouter.ai') # Use ORM style
-            )
-            count = result.scalar()
-            if count == 0:
-                primary_api_key = os.getenv("OPENROUTER_API_KEY")
-                if primary_api_key:
-                    account = Account(
-                        service="openrouter.ai",
-                        email="primary@example.com",  # Dummy email
-                        password="",
-                        api_key=primary_api_key,
-                        phone="",
-                        cookies="",
-                        is_available=True
-                    )
-                    session.add(account)
-                    await session.commit()
-                    logger.info("Added primary OpenRouter API key to database")
-
-        async def get_available_openrouter_clients(self):
-            async with self.session_maker() as session:
-                result = await session.execute(
-                    "SELECT api_key FROM accounts WHERE service = 'openrouter.ai' AND is_available = TRUE"
-                )
-                api_keys = [row[0] for row in result.fetchall()]
-                if not api_keys:
-                    logger.warning("No available OpenRouter API keys; creating new accounts.")
-                    await self.create_openrouter_accounts(5)  # Create 5 more if none available
-                    result = await session.execute(
-                        "SELECT api_key FROM accounts WHERE service = 'openrouter.ai' AND is_available = TRUE"
-                    )
-                    api_keys = [row[0] for row in result.fetchall()]
-                clients = [AsyncOpenAI(api_key=key, base_url="https://openrouter.ai/api/v1") for key in api_keys]
-                return clients
-
-        async def reset_api_key_availability(self):
-            while True:
-                await asyncio.sleep(86400)  # 24 hours
-                async with self.session_maker() as session:
-                    await session.execute(
-                        "UPDATE accounts SET is_available = TRUE WHERE service = 'openrouter.ai'"
-                    )
-                    await session.commit()
-                logger.info("Reset API key availability for OpenRouter")
-
-        async def create_openrouter_accounts(self, num_accounts):
-            for _ in range(num_accounts):
-                await self.agents['browsing'].task_queue.put({'service_url': 'https://openrouter.ai'})
-            logger.info(f"Queued {num_accounts} OpenRouter account creation tasks.")
-        
-    @think_step("initialize_agents")
-    async def initialize_agents(self):
-        """Initialize all agents with their respective API clients and models."""
-        try:
-            # ThinkTool
-            self.agents['think'] = ThinkTool(
-                self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['think']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
-            )
-            # EmailAgent
-            self.agents['email'] = EmailAgent(
-                self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['email']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
-            )
-            # LegalComplianceAgent
-            self.agents['legal'] = LegalComplianceAgent(
-                self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['legal']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
-            )
-            # OSINTAgent
-            self.agents['osint'] = OSINTAgent(
-                self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['osint']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
-            )
-            # ScoringAgent
-            self.agents['scoring'] = ScoringAgent(
-                self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['scoring']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
-            )
-            # VoiceSalesAgent
-            self.agents['voice_sales'] = VoiceSalesAgent(
-                self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['voice_sales']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
-            )
-            # OptimizationAgent
-            self.agents['optimization'] = OptimizationAgent(
-                self.session_maker, self.config, self,
-                clients_models=[(client, self.config.OPENROUTER_MODELS['optimization']) for client in self.openrouter_clients] + 
-                            [(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
-            )
-            # BrowsingAgent (uses DeepSeek primarily)
-            self.agents['browsing'] = BrowsingAgent(
-                self.session_maker, self.config, self,
-                clients_models=[(client, self.config.DEEPSEEK_MODEL) for client in self.deepseek_clients]
-            )
-            logger.info("All agents initialized successfully.")
-        except Exception as e:
-            logger.error(f"Agent initialization failed: {e}")
-            await self.send_notification("Agent Initialization Failed", str(e))
-            raise
+    # --- Removed Duplicate Method Definitions ---
+    # The following methods were duplicated due to a previous partial diff application
+    # and have been removed:
+    # - initialize_primary_api_key (also deprecated)
+    # - get_available_openrouter_clients (also deprecated)
+    # - reset_api_key_availability (also deprecated)
+    # - create_openrouter_accounts
+    # - initialize_agents
+    # --- End Removed Duplicates ---
 
     async def collect_agent_feedback(self):
         nlp = spacy.load("en_core_web_sm")
@@ -540,7 +477,22 @@ class Orchestrator:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=5, max=60))
     @email_breaker
     async def send_notification(self, subject, body):
-        await send_notification(subject, body, self.config)
+        """Sends email notification, fetching password via Vault."""
+        try:
+            # Fetch SMTP password from Vault
+            smtp_pass = await self.secure_storage.get_secret('hostinger-smtp-pass')
+            if not smtp_pass:
+                raise VaultError("SMTP password ('hostinger-smtp-pass') not found in Vault.")
+            
+            # Call the utility function, passing the fetched password
+            # Assuming send_notification utility function signature is updated to accept smtp_password
+            await send_notification(subject, body, self.config, smtp_password=smtp_pass)
+        except VaultError as ve:
+             logger.error(f"Failed to send notification '{subject}' due to Vault error: {ve}")
+             # Decide if this should re-raise or just log
+        except Exception as e:
+             # Catch errors from send_notification itself (already logged there)
+             logger.error(f"Error occurred during send_notification call: {e}")
 
     async def send_whatsapp_notification(self, message):
         try:
@@ -897,11 +849,11 @@ class Orchestrator:
             await self.initialize_clients()
             await self.initialize_database() # Ensures tables exist, including MigrationStatus
             await self._run_encryption_migration_v2() # Run migration after DB init, before agents
-            await self.initialize_primary_api_key()
-            await self.initialize_agents() # Agents initialized after migration is confirmed complete
+            # await self.initialize_primary_api_key() # Removed - Relied on direct key storage
+            await self.initialize_agents() # Agents initialized after migration & client init
             
-            # Create initial OpenRouter accounts immediately
-            await self.create_openrouter_accounts(5)  # Start with 5 accounts
+            # Create initial OpenRouter accounts immediately (via BrowsingAgent -> Vault)
+            await self.create_openrouter_accounts(5)
             
             await self.start_testing_phase()
             self.approved = True # Assuming testing phase implies approval for now

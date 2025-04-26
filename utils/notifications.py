@@ -12,17 +12,26 @@ smtp_notification_breaker = pybreaker.CircuitBreaker(fail_max=3, reset_timeout=6
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(smtplib.SMTPException))
 @smtp_notification_breaker
-async def send_notification(subject, body, config):
-    """Send email notifications with retry logic and circuit breaker."""
+async def send_notification(subject: str, body: str, config, smtp_password: str):
+    """
+    Send email notifications with retry logic and circuit breaker.
+    Accepts SMTP password directly instead of relying on config object for it.
+    """
     sender_email = config.get("HOSTINGER_EMAIL")
     recipient_email = config.get("USER_EMAIL")
     smtp_host = config.get("HOSTINGER_SMTP")
     smtp_port = config.get("SMTP_PORT")
-    smtp_pass = config.get("HOSTINGER_SMTP_PASS")
+    # smtp_pass is now passed as an argument
 
-    if not all([sender_email, recipient_email, smtp_host, smtp_port, smtp_pass]):
-        logger.error("Notification failed: Missing SMTP configuration in settings.")
-        raise ValueError("Missing SMTP configuration for notifications.")
+    if not all([sender_email, recipient_email, smtp_host, smtp_port, smtp_password]):
+        # Check for missing password specifically
+        missing = [item for item, value in {
+            "sender_email": sender_email, "recipient_email": recipient_email,
+            "smtp_host": smtp_host, "smtp_port": smtp_port, "smtp_password": smtp_password
+        }.items() if not value]
+        error_msg = f"Notification failed: Missing SMTP configuration or password: {', '.join(missing)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
 
     try:
         msg = EmailMessage()
@@ -40,7 +49,7 @@ async def send_notification(subject, body, config):
             smtp_host,
             smtp_port,
             sender_email,
-            smtp_pass,
+            smtp_password, # Pass the argument here
             msg
         )
         logger.info(f"Notification sent to {recipient_email}: {subject}")
