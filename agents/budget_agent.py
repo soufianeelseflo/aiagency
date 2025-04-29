@@ -1,242 +1,296 @@
 import asyncio
 import logging
-from datetime import datetime
-import numpy as np
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
-from utils.secure_storage import SecureStorage
-from models import Metric
-import psutil
+from datetime import datetime, timedelta # Ensure timedelta is imported if needed elsewhere, added datetime
+from typing import Dict, Any, Optional, List # Added imports
+from decimal import Decimal, ROUND_HALF_UP # Added imports
+import json # Added import
+
+# Removed unused imports: numpy, sqlalchemy, SecureStorage, Metric, psutil
+# Note: If sqlalchemy, SecureStorage, Metric, psutil are used by other methods not modified here (like optimize_costs, run), they should be re-added.
+# Assuming they are NOT needed for the core budget logic implemented now.
 
 # Configure production-grade logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("agency.log"), logging.StreamHandler()]
-)
+# Assuming logging is configured elsewhere or keeping the basic config
+if not logger.hasHandlers(): # Avoid adding handlers multiple times if imported elsewhere
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s", # Improved format
+        handlers=[logging.FileHandler("agency.log"), logging.StreamHandler()]
+    )
 
 class BudgetAgent:
     """A genius-level BudgetAgent for an AI agency, ensuring financial precision and growth.
 
-    Manages budgets, tracks expenses, and optimizes costs in real-time, fully integrated
-    with the Orchestrator and other agents. Designed for a real system targeting
-    $6,000 in 24 hours and $100M in 9 months, optimized for VPS constraints.
+    Manages budgets, tracks expenses, and provides budget checks.
     """
 
     def __init__(self, session_maker, config, orchestrator, clients_models):
-        self.session_maker = session_maker
+        """Initializes the BudgetAgent."""
+        self.session_maker = session_maker # Keep if needed for other methods like optimize_costs
         self.config = config
-        self.orchestrator = orchestrator
-        self.clients_models = clients_models  # List of (client, model) tuples
-        self.secure_storage = SecureStorage()
-        self.total_budget = 50.0
-        self.alert_threshold = 0.8
-        self.expense_categories = ["API", "Proxy", "Email", "Legal", "Voice", "Concurrency", "Other"]
-        self.category_budgets = {
-            cat: self.total_budget / len(self.expense_categories)
-            for cat in self.expense_categories
+        self.orchestrator = orchestrator # Keep for potential notifications
+        self.clients_models = clients_models # Keep if used elsewhere
+        # self.secure_storage = SecureStorage() # Removed, not used in new methods
+
+        self.budgets: Dict[str, Decimal] = {} # Category -> Limit
+        self.expenses: Dict[str, Decimal] = {} # Category -> Spent
+        self.expense_log: List[Dict[str, Any]] = [] # Log of individual expenses
+
+        # Load initial budgets (example - refine with actual config structure)
+        initial_budgets = self.config.get('BUDGETS', {
+            "LLM": Decimal("100.00"),
+            "API": Decimal("50.00"),
+            "Resource": Decimal("50.00"), # e.g., Twilio numbers
+            "Proxy": Decimal("20.00"),
+            "Default": Decimal("10.00") # Fallback category
+        })
+        for category, limit in initial_budgets.items():
+            try:
+                # Ensure limit is Decimal, converting from string or float if necessary
+                if isinstance(limit, (int, float)):
+                    limit_decimal = Decimal(str(limit)).quantize(Decimal("0.00"), rounding=ROUND_HALF_UP)
+                elif isinstance(limit, str):
+                     limit_decimal = Decimal(limit).quantize(Decimal("0.00"), rounding=ROUND_HALF_UP)
+                elif isinstance(limit, Decimal):
+                     limit_decimal = limit.quantize(Decimal("0.00"), rounding=ROUND_HALF_UP)
+                else:
+                    logger.warning(f"Invalid type for budget limit '{limit}' for category '{category}'. Skipping.")
+                    continue
+
+                category_lower = category.lower()
+                self.budgets[category_lower] = limit_decimal
+                self.expenses[category_lower] = Decimal("0.00") # Initialize expenses
+            except Exception as e:
+                 logger.error(f"Error processing initial budget for category '{category}' with limit '{limit}': {e}")
+
+        # Ensure default category exists if not provided
+        if "default" not in self.budgets:
+             default_limit = Decimal("10.00") # Default fallback limit
+             self.budgets["default"] = default_limit
+             self.expenses["default"] = Decimal("0.00")
+             logger.info(f"Default budget category not found in config, added with limit: {default_limit}")
+
+
+        logger.info(f"BudgetAgent initialized with budgets: { {k: float(v) for k, v in self.budgets.items()} }") # Log floats for readability
+        # Removed old initializations: total_budget, alert_threshold, expense_categories, category_budgets
+
+    async def record_expense(self, agent_name: str, amount: float, category: str, description: str) -> bool:
+        """Records an expense against a budget category."""
+        category_lower = category.lower()
+        try:
+            # Use high precision for intermediate calculations, round for storage if needed
+            amount_decimal = Decimal(str(amount)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+        except Exception as e:
+             logger.error(f"Invalid amount format '{amount}' for expense recording: {e}")
+             return False
+
+        if amount_decimal <= 0:
+            logger.warning(f"Attempted to record non-positive expense ({amount_decimal}) for {category}. Skipping.")
+            return False
+
+        # Use default category if provided one doesn't exist
+        if category_lower not in self.budgets:
+            original_category = category_lower
+            logger.warning(f"Unknown budget category '{category}'. Using 'default'.")
+            category_lower = "default"
+            if category_lower not in self.budgets:
+                 # This case should be prevented by __init__, but check defensively
+                 logger.error("Default budget category not found. Cannot record expense.")
+                 return False # Cannot record if even default is missing
+
+        # Ensure the category exists in expenses (might be newly defaulted)
+        if category_lower not in self.expenses:
+            self.expenses[category_lower] = Decimal("0.00")
+
+        self.expenses[category_lower] += amount_decimal
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent": agent_name,
+            "amount": float(amount_decimal), # Store as float in log for easier JSON/readability
+            "category": category_lower,
+            "original_category": original_category if category_lower == "default" and original_category != "default" else None, # Log original if defaulted
+            "description": description,
+            "cumulative_spent": float(self.expenses[category_lower]) # Store as float
         }
-        # self.expenditure_cache = 0.0 # Removed flawed cache
-        logger.info("BudgetAgent initialized with total budget ${:.2f}".format(self.total_budget))
+        self.expense_log.append(log_entry)
 
-    async def track_expense(self, amount: float, category: str, description: str):
-        """Track an expense with real-time validation and database persistence.
+        # Log with precision
+        log_amount_str = f"{amount_decimal:.6f}".rstrip('0').rstrip('.') # Format nicely
+        log_total_str = f"{self.expenses[category_lower]:.6f}".rstrip('0').rstrip('.')
+        logger.info(f"Recorded expense: {log_amount_str} in '{category_lower}' for '{agent_name}'. New total: {log_total_str}")
 
-        Args:
-            amount: Expense amount in dollars.
-            category: Expense category (e.g., 'API', 'Proxy').
-            description: Details of the expense.
+        # Check if budget exceeded and log/notify
+        if self.expenses[category_lower] > self.budgets[category_lower]:
+             limit_str = f"{self.budgets[category_lower]:.2f}"
+             spent_str = f"{self.expenses[category_lower]:.6f}".rstrip('0').rstrip('.')
+             logger.warning(f"Budget exceeded for category '{category_lower}'! Limit: {limit_str}, Spent: {spent_str}")
+             # TODO: Trigger notification via Orchestrator?
+             # Example: await self.orchestrator.notify_budget_exceeded(category_lower, self.budgets[category_lower], self.expenses[category_lower])
+        return True
 
-        Raises:
-            ValueError: If category is invalid or budget exceeded.
-        """
-        if category not in self.expense_categories:
-            raise ValueError(f"Invalid category: {category}")
+    async def check_budget(self, category: str, proposed_amount: float) -> bool:
+        """Checks if a proposed expense is within the budget for a category."""
+        category_lower = category.lower()
+        try:
+            amount_decimal = Decimal(str(proposed_amount)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+        except Exception as e:
+             logger.error(f"Invalid proposed amount format '{proposed_amount}' for budget check: {e}")
+             return False
 
-        async with self.session_maker() as session:
-            # Validate category budget
-            current_expenditure = await self.get_category_expenditure(session, category)
-            if current_expenditure + amount > self.category_budgets[category]:
-                logger.error(f"Budget exceeded for {category}: ${current_expenditure + amount:.2f} > ${self.category_budgets[category]:.2f}")
-                raise ValueError(f"Budget exceeded for {category}")
+        if amount_decimal <= 0:
+             logger.debug(f"Proposed amount ({amount_decimal}) is non-positive. Budget check trivially passes.")
+             return True # Spending nothing is always within budget
 
-            # Log expense with encrypted description
-            encrypted_desc = self.secure_storage.encrypt(description)
-            await session.execute(
-                text("""
-                    INSERT INTO expense_logs (amount, category, description, timestamp)
-                    VALUES (:amount, :category, :description, :timestamp)
-                """),
-                {
-                    "amount": amount,
-                    "category": category,
-                    "description": encrypted_desc,
-                    "timestamp": datetime.utcnow()
-                }
-            )
-            await session.commit()
+        original_category = category_lower
+        if category_lower not in self.budgets:
+            logger.warning(f"Checking budget for unknown category '{category}'. Using 'default'.")
+            category_lower = "default"
+            if category_lower not in self.budgets:
+                 logger.error("Default budget category not found. Cannot check budget.")
+                 return False # Cannot approve if category doesn't exist
 
-            # Check thresholds after successful commit
-            # Fetch total expenditure directly instead of relying on flawed cache
-            total_expenditure = await self.get_total_expenditure(session)
-            if total_expenditure >= self.total_budget * self.alert_threshold:
-                await self.send_budget_alert(total_expenditure)
-            logger.info(f"Tracked expense: ${amount:.2f} in {category} - {description}")
+        limit = self.budgets[category_lower]
+        # Use .get() for expenses, as a category might exist in budgets but have no expenses yet
+        current_spent = self.expenses.get(category_lower, Decimal("0.00"))
+        remaining = limit - current_spent
+
+        # Format for logging
+        prop_amt_str = f"{amount_decimal:.6f}".rstrip('0').rstrip('.')
+        remain_str = f"{remaining:.6f}".rstrip('0').rstrip('.')
+
+        if amount_decimal <= remaining:
+            new_remain_str = f"{remaining - amount_decimal:.6f}".rstrip('0').rstrip('.')
+            log_cat = f"'{category_lower}'"
+            if original_category != category_lower:
+                log_cat += f" (originally '{original_category}')"
+            logger.debug(f"Budget check PASSED for {prop_amt_str} in {log_cat}. Remaining after proposed: {new_remain_str} (Current remaining: {remain_str})")
+            return True
+        else:
+            log_cat = f"'{category_lower}'"
+            if original_category != category_lower:
+                log_cat += f" (originally '{original_category}')"
+            logger.warning(f"Budget check FAILED for {prop_amt_str} in {log_cat}. Proposed amount exceeds remaining budget. Remaining: {remain_str}")
+            return False
+
+    async def get_budget_summary(self) -> Dict[str, Any]:
+        """Returns a summary of current budget status."""
+        summary = {}
+        total_limit = Decimal("0.00")
+        total_spent = Decimal("0.00")
+
+        # Iterate through defined budgets to ensure all categories are included
+        for category, limit in self.budgets.items():
+            # Expenses might not exist for a category if nothing spent yet
+            spent = self.expenses.get(category, Decimal("0.00"))
+            remaining = limit - spent
+            summary[category] = {
+                # Convert Decimals to float for JSON compatibility/simpler display
+                "limit": float(limit.quantize(Decimal("0.00"))),
+                "spent": float(spent.quantize(Decimal("0.00"))),
+                "remaining": float(remaining.quantize(Decimal("0.00")))
+            }
+            total_limit += limit
+            total_spent += spent # Accumulate total spent from actual expenses dict
+
+        # Calculate overall summary
+        summary["overall"] = {
+             "limit": float(total_limit.quantize(Decimal("0.00"))),
+             "spent": float(total_spent.quantize(Decimal("0.00"))),
+             "remaining": float((total_limit - total_spent).quantize(Decimal("0.00")))
+        }
+        logger.info("Generated budget summary.")
+        # Consider logging the summary itself at DEBUG level if needed
+        # logger.debug(f"Budget Summary: {json.dumps(summary, indent=2)}")
+        return summary
+
+
+    # --- Keeping other methods for now, but they might need refactoring ---
+    # --- to use the new self.budgets/self.expenses structure ---
+    # --- or be removed if their functionality is fully replaced. ---
 
     async def allocate_budget(self, category: str, amount: float):
-        """Dynamically allocate budget to a category, maintaining total budget integrity.
+        """Dynamically allocate budget to a category. (NEEDS REFACTORING for Decimal)"""
+        # TODO: Refactor this method to use self.budgets (Dict[str, Decimal])
+        # and ensure amount is handled as Decimal.
+        category_lower = category.lower()
+        try:
+            amount_decimal = Decimal(str(amount)).quantize(Decimal("0.00"), rounding=ROUND_HALF_UP)
+        except Exception as e:
+            logger.error(f"Invalid amount format '{amount}' for budget allocation: {e}")
+            return # Or raise ValueError
 
-        Args:
-            category: Target category.
-            amount: New budget amount.
+        if category_lower not in self.budgets:
+             logger.error(f"Cannot allocate budget: Invalid category '{category}'")
+             return # Or raise ValueError
 
-        Raises:
-            ValueError: If category invalid or allocation exceeds total budget.
-        """
-        if category not in self.expense_categories:
-            raise ValueError(f"Invalid category: {category}")
+        # Check against total budget limit if one is defined/tracked separately
+        # current_total_limit = sum(self.budgets.values())
+        # potential_new_total = current_total_limit - self.budgets[category_lower] + amount_decimal
+        # if potential_new_total > SOME_OVERALL_LIMIT:
+        #     raise ValueError("Allocation exceeds overall budget limit")
 
-        other_budgets = sum(
-            self.category_budgets[cat] for cat in self.expense_categories if cat != category
-        )
-        if other_budgets + amount > self.total_budget:
-            raise ValueError(f"Allocation of ${amount:.2f} to {category} exceeds total budget")
+        self.budgets[category_lower] = amount_decimal
+        logger.info(f"Allocated {amount_decimal:.2f} to {category_lower}")
 
-        self.category_budgets[category] = amount
-        logger.info(f"Allocated ${amount:.2f} to {category}")
 
-    async def get_budget_status(self):
-        """Retrieve real-time budget status for monitoring and decision-making.
+    async def send_budget_alert(self, category: str, limit: Decimal, spent: Decimal):
+        """Notify Orchestrator when a specific budget category threshold is reached or exceeded."""
+        # Modified to be more specific
+        subject = f"Budget Alert: Category '{category}' Threshold Reached"
+        body = f"Budget category '{category}' exceeded limit. Limit: {limit:.2f}, Spent: {spent:.2f}"
+        # Assuming orchestrator has a method like this
+        if hasattr(self.orchestrator, 'send_notification'):
+             await self.orchestrator.send_notification(subject, body, level="WARNING") # Example
+        else:
+             logger.warning("Orchestrator does not have send_notification method.")
+        logger.warning(f"Budget alert triggered for category '{category}': Limit={limit:.2f}, Spent={spent:.2f}")
 
-        Returns:
-            dict: Total and category-specific budget details.
-        """
-        async with self.session_maker() as session:
-            total_expenditure = await self.get_total_expenditure(session)
-            category_expenditures = {}
-            for category in self.expense_categories:
-                category_expenditures[category] = await self.get_category_expenditure(session, category)
 
-            status = {
-                "total_budget": self.total_budget,
-                "total_expenditure": total_expenditure,
-                "remaining_budget": self.total_budget - total_expenditure,
-                "category_budgets": self.category_budgets,
-                "category_expenditures": category_expenditures
-            }
-            logger.debug(f"Budget status: {status}")
-            return status
+    async def optimize_costs(self):
+        """Dynamically adjust budgets based on system performance. (NEEDS REFACTORING)"""
+        # TODO: Refactor this method significantly.
+        # - It should use self.expenses (Dict[str, Decimal]) for current spending.
+        # - It relies on orchestrator agents ('optimization', 'scoring') which might change.
+        # - Database interaction for expenses is removed in the new model (in-memory log).
+        # - The logic needs to be adapted to the new in-memory structure.
+        logger.warning("optimize_costs method needs refactoring for the new budget structure.")
+        # Placeholder logic or disable until refactored
+        pass
 
-    async def send_budget_alert(self, total_expenditure: float):
-        """Notify Orchestrator when budget threshold is reached.
 
-        Args:
-            total_expenditure: Current total expenditure.
-        """
-        subject = "Budget Alert: Threshold Reached"
-        body = f"Total expenditure: ${total_expenditure:.2f}, Budget: ${self.total_budget:.2f}, Threshold: {self.alert_threshold * 100}%"
-        await self.orchestrator.send_notification(subject, body)
-        logger.warning("Budget alert triggered: " + body)
-
-        async def optimize_costs(self):
-            """Dynamically adjust budgets based on system performance."""
-            async with self.session_maker() as session:
-                expenses = await session.execute(
-                    text("SELECT category, SUM(amount) as total FROM expenses GROUP BY category")
-                )
-                expense_data = {row.category: row.total for row in expenses.fetchall()}
-                
-                # Get system insights
-                optimization_insights = await self.orchestrator.agents['optimization'].get_insights()
-                concurrency_limits = optimization_insights.get("concurrency_limits", {})
-                scoring_insights = await self.orchestrator.agents['scoring'].get_insights()
-                profit = scoring_insights.get("total_profit", 0.0)
-                
-                # Adjust budgets based on concurrency and profit
-                total_current_budget = sum(self.category_budgets.values())
-                for category in self.expense_categories:
-                    current_expense = expense_data.get(category, 0.0)
-                    predicted = current_expense * 1.1  # 10% growth assumption
-                    
-                    if category == "Concurrency":
-                        active_agents = len([agent for agent, limit in concurrency_limits.items() if limit > 1])
-                        predicted += active_agents * 0.5  # Extra $0.50 per active agent
-                    
-                    if predicted > self.category_budgets[category] and profit > total_current_budget:
-                        new_budget = min(predicted * 1.2, self.total_budget * 0.3)  # Cap at 30% of total
-                        await self.allocate_budget(category, new_budget)
-                        logger.info(f"Adjusted {category} budget to ${new_budget:.2f} due to demand.")
-                    elif current_expense < self.category_budgets[category] * 0.5:
-                        new_budget = max(self.total_budget / len(self.expense_categories), current_expense * 1.1)
-                        await self.allocate_budget(category, new_budget)
-                        logger.info(f"Reduced {category} budget to ${new_budget:.2f} due to low usage.")
-
-    async def get_total_expenditure(self, session: AsyncSession) -> float:
-        """Calculate total expenditure from database.
-
-        Args:
-            session: Active database session.
-
-        Returns:
-            float: Total expenditure.
-        """
-        result = await session.execute(text("SELECT SUM(amount) FROM expense_logs"))
-        total = result.scalar() or 0.0
-        self.expenditure_cache = total  # Sync cache
-        return total
-
-    async def get_category_expenditure(self, session: AsyncSession, category: str) -> float:
-        """Calculate expenditure for a specific category.
-
-        Args:
-            session: Active database session.
-            category: Target category.
-
-        Returns:
-            float: Category expenditure.
-        """
-        result = await session.execute(
-            text("SELECT SUM(amount) FROM expense_logs WHERE category = :category"),
-            {"category": category}
-        )
-        return result.scalar() or 0.0
-
-    # Removed adjust_concurrency as it's likely redundant with Orchestrator/OptimizationAgent logic
+    # Removed old DB-dependent methods: get_total_expenditure, get_category_expenditure
+    # Removed old track_expense, get_budget_status
 
     async def run(self):
-        """Run BudgetAgent continuously with hourly insights and optimization.
-
-        Respects manual approval, with robust error handling.
-        Concurrency management is assumed to be handled by Orchestrator/OptimizationAgent.
-        """
+        """Run BudgetAgent continuously. (NEEDS REFACTORING)"""
+        # TODO: Refactor this method.
+        # - `optimize_costs` needs refactoring first.
+        # - `get_budget_status` is replaced by `get_budget_summary`.
+        # - Database interaction for metrics needs review (is Metric model still used?).
+        # - Logic relying on orchestrator.approved might need review.
+        logger.warning("BudgetAgent run loop needs refactoring for the new budget structure.")
         while True:
             try:
-                # Use getattr for safe access to orchestrator.approved
-                if getattr(self.orchestrator, 'approved', False):
-                    # Removed concurrency semaphore logic tied to the removed adjust_concurrency
-                    await self.optimize_costs()
-                    status = await self.get_budget_status()
-                    # Log metrics for Grafana
-                    async with self.session_maker() as session:
-                        metric = Metric(
-                            agent_name="budget",
-                            timestamp=datetime.utcnow(),
-                            metric_name="budget_status",
-                            value=json.dumps(status) # Log as JSON string
-                        )
-                        session.add(metric)
-                        await session.commit()
-                    logger.info("Budget cycle completed.")
-                else:
-                    logger.info("BudgetAgent: Awaiting manual approval from Orchestrator.")
-                await asyncio.sleep(3600)  # Hourly cycle
+                # Example: Periodically log summary
+                summary = await self.get_budget_summary()
+                logger.info(f"Periodic Budget Summary: {json.dumps(summary)}")
+
+                # Placeholder for potential future optimization calls
+                # if getattr(self.orchestrator, 'approved', False): # Check approval if needed
+                #    await self.optimize_costs() # Needs refactor
+
+                await asyncio.sleep(3600)  # Hourly cycle (or configurable)
+
             except asyncio.CancelledError:
                  logger.info("BudgetAgent run loop cancelled.")
                  break
             except Exception as e:
                 logger.error(f"BudgetAgent run error: {e}", exc_info=True)
-                # Ensure report_error method exists before calling
+                # Report error if orchestrator supports it
                 if hasattr(self.orchestrator, 'report_error'):
-                    await self.orchestrator.report_error("BudgetAgent", str(e))
-                await asyncio.sleep(60)  # Retry after 1 minute
+                    try:
+                        await self.orchestrator.report_error("BudgetAgent", str(e))
+                    except Exception as report_e:
+                        logger.error(f"Failed to report error to orchestrator: {report_e}")
+                await asyncio.sleep(60) # Wait before retrying loop

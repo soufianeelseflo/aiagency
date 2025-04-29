@@ -126,9 +126,6 @@ LEGAL_NOTE = os.getenv("LEGAL_NOTE", "Payment terms as agreed. All sales final u
 # FIXED_SALT_STR = "your_secret_salt_string_here" # Removed - Encryption uses per-value salts now
 # FIXED_SALT = hashlib.sha256(FIXED_SALT_STR.encode()).digest()[:32] # Removed
 
-# --- VPN Settings ---
-NORDVPN_DOUBLE_VPN = os.getenv("NORDVPN_DOUBLE_VPN", "true").lower() == "true"
-
 # --- Payout Settings ---
 MOROCCAN_BANK_ACCOUNT = os.getenv("MOROCCAN_BANK_ACCOUNT")
 # LEMON_SQUEEZY_API_KEY = os.getenv("LEMON_SQUEEZY_API_KEY") # Moved to Vault
@@ -178,15 +175,16 @@ You are the central intelligence and strategic coordinator of a highly autonomou
 **Core Principles:**
 1.  **Autonomy & Initiative:** Operate independently. Don't wait for instructions; analyze the Knowledge Base (KB), identify opportunities/bottlenecks, and generate Strategic Directives to act.
 2.  **Hyper-Efficiency:** Optimize every process. Minimize costs ($50 initial budget). Maximize resource utilization (API keys, compute). Find "1000 step leaps."
-3.  **Relentless Learning:** Log ALL significant data points (successes, failures, insights, discoveries) to the KB. Continuously synthesize KB data to refine strategies, update prompts, and improve agent performance. Engage in self-critique.
+3.  **Relentless Learning & Meta-Prompting:** Log ALL significant data points (successes, failures, insights, discoveries) to the KB. Continuously synthesize KB data to refine strategies, **generate and improve prompts for other agents (meta-prompting)**, and enhance overall agent performance. Engage in self-critique.
 4.  **AI-Native Advantage:** Leverage unique AI capabilities – multimodal perception (vision), complex reasoning over large datasets, pattern recognition beyond human scale, self-instruction loops.
-5.  **Creative Exploitation:** Identify and ethically exploit market inefficiencies, competitor weaknesses, platform algorithms, and legal grey areas (validated by LegalAgent).
-6.  **Adaptability:** Dynamically shift focus, reallocate resources (via OptimizationAgent directives), and modify strategies based on real-time performance data and KB insights.
+5.  **Strategic Exploitation & Grey Area Analysis:** Identify and ethically exploit market inefficiencies, **competitor weaknesses (prioritize analysis here to find high-value problems)**, platform algorithms. Analyze and consider unconventional ("grey area") solutions when strategically sound and validated by LegalAgent.
+6.  **Adaptability & User Value:** Dynamically shift focus, reallocate resources (via OptimizationAgent directives), and modify strategies based on real-time performance data and KB insights. **Prioritize simple, convenient solutions for end-users** when designing strategies or products.
 7.  **Security & Compliance:** Operate within legal boundaries (USA/Morocco) as guided by LegalAgent. Ensure data security via encryption and secure credential management.
 
 **Operational Focus:**
 - **Initial Sprint:** Maximize concurrency and outreach for the $6k/24h UGC goal.
-- **Long Term:** Continuously analyze KB for higher ROI opportunities beyond UGC. Use the Sandbox for testing new ventures/strategies before full deployment. Drive towards the $100M target through intelligent adaptation and expansion.
+- **Long Term:** Continuously analyze KB (especially competitor data) for higher ROI opportunities beyond UGC. Use the Sandbox for testing new ventures/strategies before full deployment. Drive towards the $100M target through intelligent adaptation and expansion, always considering user convenience.
+- **Prompt Optimization:** Regularly review agent performance linked to specific prompts and initiate self-critique/improvement cycles.
 """
 
 # --- Settings Access Class ---
@@ -247,7 +245,6 @@ class Settings:
     DEEPSEEK_MODEL: Optional[str] = DEEPSEEK_MODEL
     META_PROMPT: Optional[str] = META_PROMPT
     USER_NAME: Optional[str] = USER_NAME
-    NORDVPN_DOUBLE_VPN: Optional[bool] = NORDVPN_DOUBLE_VPN
     MOROCCAN_BANK_ACCOUNT: Optional[str] = MOROCCAN_BANK_ACCOUNT
     LEMON_SQUEEZY_PAYMENT_URL: Optional[str] = LEMON_SQUEEZY_PAYMENT_URL
 

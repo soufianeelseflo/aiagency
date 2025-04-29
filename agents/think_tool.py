@@ -4,12 +4,16 @@ import asyncio
 import logging
 import json
 import random
+import os
+import glob
+import hashlib # Added for caching
+import time # Added for caching TTL (though not directly used in this snippet, good practice)
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import update, and_, or_, desc, asc
+from sqlalchemy import update, and_, or_, desc, asc, delete # Added delete
 from sqlalchemy.dialects.postgresql import JSONB # Assuming PostgreSQL for potential JSONB operators
 
 # Assuming utils/database.py and models.py exist as provided
@@ -23,6 +27,42 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 # Local logger setup
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# Define the updated meta prompt string outside the class or inside __init__ if preferred
+THINK_TOOL_META_PROMPT = """
+You are the ThinkTool, the central cognitive engine (v4.0) for an autonomous AI agency focused on maximizing profit and efficiency, primarily through UGC (User-Generated Content) services and related ventures.
+
+**Core Cognitive Functions & Principles:**
+
+1.  **Strategic Synthesis & Planning:**
+    *   Continuously synthesize insights from all agent activities, performance data (profit, errors, metrics), and external sources (market trends, competitor actions).
+    *   Identify novel patterns, validate existing ones, and assess progress towards strategic goals (e.g., $6k/24h, $100M).
+    *   Generate actionable, prioritized Strategic Directives for other agents or the Orchestrator to execute.
+    *   **Prioritize Competitor Analysis:** Actively analyze competitor strategies, weaknesses, and market gaps to identify high-value, real-world problems the agency can solve uniquely or more effectively.
+
+2.  **Knowledge & Learning Management:**
+    *   Maintain and curate the agency's Knowledge Base (fragments, patterns, directives, prompts).
+    *   Drive the learning loop, identifying effective strategies and discarding ineffective ones based on empirical results.
+
+3.  **Meta-Prompting & Agent Optimization:**
+    *   **Generate and Refine Prompts:** Actively critique, refine, and generate new prompts for all agents (including yourself) based on performance feedback, observed issues, or strategic shifts. Aim for clarity, effectiveness, and alignment with agent goals.
+    *   Identify opportunities to improve agent workflows and efficiency.
+
+4.  **Solution Design & Validation:**
+    *   Reflect critically on proposed actions, assessing data completeness, compliance, risk, goal alignment, and efficiency.
+    *   **Critically Analyze External Data:** Scrutinize external information (e.g., transcripts, search results, OSINT data) against internal knowledge (KB, patterns) and core objectives before integration or action.
+    *   Validate agent outputs against criteria and learned patterns.
+    *   **Value Simplicity & Convenience:** Favor solutions that are simple, robust, and convenient for end-users and internal operations. Avoid unnecessary complexity.
+
+5.  **Opportunity Scouting & Innovation:**
+    *   Proactively scan the technological horizon (new tools, APIs, research) for relevant advancements.
+    *   Identify potential new business opportunities, service offerings, or significant efficiency improvements.
+    *   **Consider Unconventional Solutions:** Analyze and consider unconventional ("grey area") tactics or approaches when rigorous analysis indicates they are strategically sound, ethically justifiable within defined constraints, and offer a significant advantage towards achieving core objectives. Assess risks carefully.
+
+6.  **Resource Optimization:** Inherently optimize for computational resources, API costs, and agent time.
+
+**Overall Goal:** Drive the agency towards exponential growth in profit and capability through intelligent analysis, strategic direction, and continuous adaptation.
+"""
 
 class ThinkTool:
     """
@@ -43,8 +83,12 @@ class ThinkTool:
         self.session_maker = session_maker
         self.config = config
         self.orchestrator = orchestrator
-        self.meta_prompt = getattr(config, 'META_PROMPT', "Default Meta Prompt: Maximize profit and efficiency.")
+        # Use the detailed meta prompt defined above
+        self.meta_prompt = THINK_TOOL_META_PROMPT
         self.logger = logger # Use the module-level logger
+
+        # Initialize knowledge base for synthesized learning materials
+        self.knowledge_base: Dict[str, Any] = {}
 
         # In-memory cache for active prompts { (agent_name, prompt_key): prompt_content }
         self.prompt_cache: Dict[tuple[str, str], str] = {}
@@ -54,6 +98,138 @@ class ThinkTool:
         self.last_radar_run: Optional[datetime] = None
 
         self.logger.info("ThinkTool v4.0 initialized.")
+
+        # Load initial learning materials
+        # Run synchronously during init for simplicity, consider async/background task later
+        self._load_and_synthesize_learning_materials()
+
+    # --- Knowledge Loading & Synthesis ---
+
+    async def _load_and_synthesize_learning_materials(self):
+        """Loads and processes text files from the learning directory."""
+        learning_dir = 'learning for AI/'
+        self.logger.info(f"ThinkTool: Loading learning materials from '{learning_dir}'...")
+        processed_files = 0
+        try:
+            # Ensure the directory exists (optional, depends on desired error handling)
+            if not os.path.isdir(learning_dir):
+                self.logger.warning(f"Learning directory '{learning_dir}' not found. Skipping loading.")
+                return
+
+            # Find all .txt files recursively (adjust pattern if needed)
+            # Using glob.glob for simplicity, consider os.walk for more control
+            file_pattern = os.path.join(learning_dir, '**', '*.txt') # Search recursively
+            learning_files = glob.glob(file_pattern, recursive=True)
+
+            if not learning_files:
+                self.logger.info(f"No .txt files found in '{learning_dir}'.")
+                return
+
+            self.logger.info(f"Found {len(learning_files)} potential learning files.")
+
+            for file_path in learning_files:
+                try:
+                    self.logger.debug(f"Processing learning file: {file_path}")
+                    # Simulate reading the file content (replace with actual tool call later)
+                    try:
+                        # In a real scenario, this would likely involve an async call:
+                        # file_content_result = await self.orchestrator.use_tool('read_file', {'path': file_path})
+                        # file_content = file_content_result.get('content') if file_content_result else None
+                        # For now, simulate reading directly or assume content is available
+                        # This requires the agent process to have file system access
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            file_content = f.read()
+                        self.logger.info(f"Successfully read content from: {file_path}")
+
+                        if not file_content:
+                            self.logger.warning(f"File is empty or could not be read: {file_path}")
+                            continue # Skip to next file
+
+                        # --- Analysis/Synthesis Simulation ---
+                        self.logger.info(f"Analyzing content from: {file_path} using LLM...")
+
+                        # --- Formulate LLM Prompt for Analysis ---
+                        # Note: Ensure file_content is available from the read operation above
+                        analysis_prompt = f"""
+                        Analyze the following text content extracted from '{os.path.basename(file_path)}'.
+                        Identify key concepts, actionable strategies, relevant mindsets, or code techniques.
+                        Determine which agent(s) (e.g., ThinkTool, EmailAgent, All) or system components these insights apply to.
+                        Categorize the insight type (e.g., 'strategy', 'mindset', 'technique', 'market_insight').
+                        Return the analysis as a JSON object with keys: 'source', 'summary', 'key_concepts' (list), 'applicable_agents' (list), 'type'.
+
+                        Context from ThinkTool Meta Prompt (consider relevant parts):
+                        {self.meta_prompt[:500]}... # Include relevant parts or summary
+
+                        Content:
+                        {file_content[:4000]} # Limit content length for prompt
+                        """
+                        # TODO: Refine prompt, potentially include specific goals or context
+
+                        # --- Call LLM for Analysis (Conceptual / Simulated) ---
+                        # In a real implementation, use the centralized LLM call method:
+                        synthesized_insights_json = await self._call_llm_with_retry(
+                            analysis_prompt,
+                            temperature=0.5,
+                            max_tokens=1024, # Adjust as needed
+                            is_json_output=True
+                        )
+                        logger.info(f"LLM analysis complete for {file_path}.")
+
+                        # --- Process LLM Response ---
+                        synthesized_insights = None # Initialize
+                        if synthesized_insights_json:
+                            try:
+                                synthesized_insights = json.loads(synthesized_insights_json)
+                                # Basic validation
+                                required_keys = ['source', 'summary', 'key_concepts', 'applicable_agents', 'type']
+                                if not all(k in synthesized_insights for k in required_keys):
+                                    raise ValueError("LLM response missing required keys.")
+                                # Ensure source matches (optional but good practice)
+                                if synthesized_insights.get('source') != file_path:
+                                     self.logger.warning(f"LLM response source '{synthesized_insights.get('source')}' mismatch for file '{file_path}'. Overwriting.")
+                                     synthesized_insights['source'] = file_path # Correct the source
+
+                                synthesized_insights['processed_at'] = datetime.now(timezone.utc).isoformat() # Add timestamp
+                                self.logger.info(f"Successfully parsed LLM insights for {file_path}")
+
+                            except (json.JSONDecodeError, ValueError) as json_error:
+                                self.logger.error(f"Error parsing LLM response for {file_path}: {json_error}")
+                                # Handle parsing error - maybe log raw response, skip storage, or log error fragment
+                                synthesized_insights = None # Ensure it's None if parsing failed
+                        else:
+                             self.logger.error(f"LLM analysis returned no content for {file_path}.")
+
+                        # --- Knowledge Storage ---
+                        # Store insights in the knowledge base using filename as key
+                        kb_key = os.path.basename(file_path)
+                        self.knowledge_base[kb_key] = synthesized_insights
+                        self.logger.info(f"Stored insights from {kb_key} into knowledge base.")
+
+                        processed_files += 1
+
+                    except FileNotFoundError:
+                         self.logger.error(f"Learning file not found: {file_path}")
+                    except IOError as io_err:
+                         self.logger.error(f"IOError reading learning file {file_path}: {io_err}")
+                    except Exception as e:
+                        # Catch errors during analysis or storage specifically
+                        self.logger.error(f"Error processing learning file {file_path} after reading: {e}", exc_info=True)
+                        # Optionally log this error as a KnowledgeFragment
+                        # await self.log_knowledge_fragment(...)
+
+                except Exception as file_error: # Catch errors for the outer try block (line 129)
+                    self.logger.error(f"General error processing learning file {file_path}: {file_error}", exc_info=True)
+                    # Optionally log this error as a KnowledgeFragment
+                    # await self.log_knowledge_fragment(...)
+
+            self.logger.info(f"Finished processing learning materials. Processed {processed_files}/{len(learning_files)} files.")
+            # Log the keys of the loaded knowledge for verification
+            self.logger.info(f"Knowledge base now contains keys: {list(self.knowledge_base.keys())}")
+
+        except Exception as e:
+            self.logger.error(f"Critical error during loading/synthesizing learning materials setup: {e}", exc_info=True)
+            # Report critical error
+            # await self.orchestrator.report_error("ThinkTool", f"Learning material loading failed: {e}")
 
     # --- Standardized LLM Interaction ---
 
@@ -78,6 +254,38 @@ class ThinkTool:
         api_key_identifier: str = "unknown_key" # For logging/reporting issues
 
         try:
+            # --- Caching Logic: Check Cache First ---
+            # Create a unique key based on relevant parameters
+            prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+            # Determine model name early for cache key consistency
+            default_model = getattr(self.config, 'OPENROUTER_MODELS', {}).get('think', "google/gemini-pro") # Fallback model
+            # TODO: Refine model selection based on model_preference if provided and stable
+            model_name_for_cache = default_model # Use the determined model for the cache key
+
+            cache_key_parts = [
+                "llm_call",
+                prompt_hash,
+                model_name_for_cache, # Include model name
+                str(temperature),
+                str(max_tokens),
+                str(is_json_output),
+            ]
+            cache_key = ":".join(cache_key_parts)
+            cache_ttl = 3600 # Default 1 hour TTL for LLM calls
+
+            # Check cache first
+            if hasattr(self.orchestrator, 'get_from_cache'):
+                cached_result = self.orchestrator.get_from_cache(cache_key)
+                if cached_result is not None:
+                    self.logger.debug(f"LLM call cache hit for key: {cache_key[:20]}...{cache_key[-20:]}")
+                    # TODO: Optionally track cache hit metrics
+                    return cached_result # Return cached value
+                else:
+                    self.logger.debug(f"LLM call cache miss for key: {cache_key[:20]}...{cache_key[-20:]}")
+            else:
+                self.logger.warning("Orchestrator does not have 'get_from_cache' method. Skipping cache check.")
+            # --- End Cache Check ---
+
             # 1. Get available clients from Orchestrator
             # TODO: Enhance orchestrator to return clients with associated model info/keys
             # For now, assume orchestrator provides a list of AsyncOpenAI compatible clients
@@ -91,15 +299,14 @@ class ThinkTool:
             api_key_identifier = getattr(llm_client, 'api_key', 'unknown_key')[-6:] # Log last 6 chars
 
             # 2. Determine model name (using 'think' model as default for ThinkTool)
-            # TODO: Allow passing specific model key if needed
-            default_model = getattr(self.config, 'OPENROUTER_MODELS', {}).get('think', "google/gemini-pro") # Fallback model
-            model_name = default_model # Use the default 'think' model for now
+            # Model name already determined above for cache key consistency
+            model_name = model_name_for_cache
 
             # 3. Prepare request arguments
             response_format = {"type": "json_object"} if is_json_output else None
             messages = [{"role": "user", "content": prompt}]
 
-            self.logger.debug(f"ThinkTool LLM Call: Model={model_name}, Temp={temperature}, MaxTokens={max_tokens}, JSON={is_json_output}, Key=...{api_key_identifier}")
+            self.logger.debug(f"ThinkTool LLM Call (Cache Miss): Model={model_name}, Temp={temperature}, MaxTokens={max_tokens}, JSON={is_json_output}, Key=...{api_key_identifier}")
 
             # 4. Make the API call
             response = await llm_client.chat.completions.create(
@@ -112,6 +319,52 @@ class ThinkTool:
             )
 
             content = response.choices[0].message.content.strip()
+
+            # --- Token Tracking & Cost Estimation (Placeholder) ---
+            input_tokens_est = len(prompt) // 4 # Rough estimate
+            output_tokens = 0
+            try:
+                # Attempt to get actual usage if available (depends on LLM client library)
+                if response.usage and response.usage.completion_tokens:
+                    output_tokens = response.usage.completion_tokens
+                    # Use prompt_tokens if available too
+                    if response.usage.prompt_tokens:
+                        input_tokens_est = response.usage.prompt_tokens
+                else:
+                     output_tokens = len(content) // 4 # Rough estimate if usage not available
+            except AttributeError:
+                 output_tokens = len(content) // 4 # Fallback estimate
+
+            total_tokens_est = input_tokens_est + output_tokens
+            # Placeholder cost - refine later based on actual model pricing
+            # Example: $1 per 1 million tokens = $0.000001 per token
+            estimated_cost = total_tokens_est * 0.000001
+            self.logger.debug(f"LLM Call Est. Tokens: ~{total_tokens_est} (In: {input_tokens_est}, Out: {output_tokens}). Est. Cost: ${estimated_cost:.6f}")
+            # --- End Token Tracking ---
+
+            # --- Report Expense ---
+            if estimated_cost > 0 and hasattr(self.orchestrator, 'report_expense'):
+                try:
+                    # Use await if report_expense is async, otherwise remove await
+                    await self.orchestrator.report_expense(
+                        agent_name="ThinkTool",
+                        amount=estimated_cost,
+                        category="LLM",
+                        description=f"LLM call ({model_name or 'unknown_model'}). Estimated tokens: {total_tokens_est}."
+                    )
+                except Exception as report_err:
+                    self.logger.error(f"Failed to report LLM expense: {report_err}", exc_info=True)
+            # --- End Report Expense ---
+
+            # --- Caching Logic: Add to Cache on Success ---
+            # Add successful result to cache
+            if content and hasattr(self.orchestrator, 'add_to_cache'):
+                self.orchestrator.add_to_cache(cache_key, content, ttl_seconds=cache_ttl)
+                self.logger.debug(f"Added LLM result to cache for key: {cache_key[:20]}...{cache_key[-20:]}")
+            elif not hasattr(self.orchestrator, 'add_to_cache'):
+                self.logger.warning("Orchestrator does not have 'add_to_cache' method. Skipping caching result.")
+            # --- End Add to Cache ---
+
 
             # TODO: Track token usage via Orchestrator/BudgetAgent if response includes usage data
             # usage = response.usage
@@ -139,6 +392,48 @@ class ThinkTool:
         self.logger.error(f"ThinkTool LLM call failed after all retries: Model={model_name}, Key=...{api_key_identifier}")
         return None
 
+    async def generate_educational_content(self, topic: str, context: Optional[str] = None) -> Optional[str]:
+        """
+        Generates a concise, user-friendly explanation of a given topic,
+        suitable for the User Education Mechanism.
+
+        Args:
+            topic (str): The topic to explain (e.g., "Grey Area Strategy", "LLM Caching").
+            context (Optional[str]): Additional context about why the explanation is needed.
+
+        Returns:
+            Optional[str]: The generated explanation text, or None on failure.
+        """
+        self.logger.info(f"ThinkTool: Generating educational content for topic: {topic}")
+
+        # Construct LLM prompt
+        prompt = f"""
+        {self.meta_prompt}
+        **Task:** Generate a concise and easy-to-understand explanation for the user about the following topic. Assume the user is intelligent but not necessarily a technical expert. Avoid jargon where possible or explain it simply. Focus on the 'why' and the relevance to the agency's goals.
+
+        **Topic:** {topic}
+
+        **Context (Why this is relevant now):** {context or 'General understanding'}
+
+        **Output:** Provide ONLY the explanation text, suitable for direct display to the user. Start directly with the explanation, without introductory phrases like "Here's an explanation...".
+        """
+
+        # Call LLM using the centralized helper
+        explanation = await self._call_llm_with_retry(
+            prompt,
+            temperature=0.6, # Slightly more creative/explanatory
+            max_tokens=500, # Keep explanations reasonably concise
+            is_json_output=False
+        )
+
+        if explanation:
+            self.logger.info(f"Successfully generated educational content for topic: {topic}")
+            # Optional: Log this explanation as a KnowledgeFragment?
+            # await self.log_knowledge_fragment(...)
+            return explanation
+        else:
+            self.logger.error(f"Failed to generate educational content for topic: {topic} (LLM error).")
+            return None
     # --- Knowledge Base Interface Implementation ---
 
     async def log_knowledge_fragment(self, agent_source: str, data_type: str, content: Union[str, dict], relevance_score: float = 0.5, tags: Optional[List[str]] = None, related_client_id: Optional[int] = None, source_reference: Optional[str] = None) -> Optional[KnowledgeFragment]:
@@ -316,6 +611,88 @@ class ThinkTool:
             await self.orchestrator.report_error("ThinkTool", f"DB Error getting patterns: {e}")
             return []
 
+    async def purge_old_knowledge(self, days_threshold: int = 30):
+        """
+        Deletes KnowledgeFragment records older than the specified threshold (default 30 days).
+        """
+        # Check if db_manager is available via session_maker (assuming session_maker implies db_manager access)
+        if not self.session_maker:
+            self.logger.error("Database session maker not available. Cannot purge old knowledge.")
+            return
+
+        purge_cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_threshold)
+        self.logger.info(f"Purging knowledge fragments older than {purge_cutoff_date.isoformat()}...")
+
+        try:
+            async with self.session_maker() as session: # Use the session_maker directly
+                # Construct the delete statement
+                stmt = delete(KnowledgeFragment).where(KnowledgeFragment.timestamp < purge_cutoff_date)
+
+                # Execute the delete statement
+                result = await session.execute(stmt)
+                await session.commit()
+
+                deleted_count = result.rowcount
+                self.logger.info(f"Successfully purged {deleted_count} old knowledge fragments.")
+
+        except Exception as e:
+            # Rollback is implicitly handled by the context manager on exception
+            self.logger.error(f"Error purging old knowledge fragments: {e}", exc_info=True)
+            # Optionally report error to orchestrator
+            await self.orchestrator.report_error("ThinkTool", f"DB Error purging old knowledge: {e}")
+
+
+    async def handle_feedback(self, insights_data: Dict[str, Dict[str, Any]]):
+        """
+        Processes feedback insights collected from various agents.
+        Currently logs each agent's feedback as a KnowledgeFragment.
+        """
+        self.logger.info(f"ThinkTool received feedback insights from {len(insights_data)} agents.")
+        # self.logger.debug(f"Raw feedback data: {insights_data}") # Keep if needed for debugging
+
+        for agent_name, agent_feedback in insights_data.items():
+            if not isinstance(agent_feedback, dict):
+                self.logger.warning(f"Received non-dict feedback from {agent_name}. Skipping logging for this agent. Data: {agent_feedback}")
+                continue
+
+            # Create a summary or use the raw feedback dictionary as content
+            # For now, let's log the dictionary directly as JSON string content
+            try:
+                content_str = json.dumps(agent_feedback, indent=2)
+                # Use the existing log_knowledge_fragment method signature
+                # log_knowledge_fragment(self, agent_source: str, data_type: str, content: Union[str, dict], relevance_score: float = 0.5, tags: Optional[List[str]] = None, related_client_id: Optional[int] = None, source_reference: Optional[str] = None)
+                fragment_type = "AgentFeedback"
+                source = agent_name # Use agent_name as the agent_source
+                tags = ["feedback", agent_name.lower()] # Add relevant tags
+
+                # Add specific tags based on feedback content if possible
+                if agent_feedback.get("status") == "error" or agent_feedback.get("errors_encountered"):
+                    tags.append("error")
+                if agent_feedback.get("status") == "placeholder":
+                     tags.append("placeholder_insight")
+
+
+                await self.log_knowledge_fragment(
+                    agent_source=source,
+                    data_type=fragment_type,
+                    content=content_str, # Pass the JSON string
+                    tags=tags,
+                    # Pass metadata as source_reference or adapt log_knowledge_fragment if needed
+                    source_reference=f"Original structure stored in content JSON"
+                    # metadata={"original_structure": agent_feedback} # Store original dict if needed - log_knowledge_fragment doesn't support this directly, store in content or source_reference
+                )
+                self.logger.debug(f"Logged feedback from {agent_name} as KnowledgeFragment.")
+
+            except TypeError as e:
+                 self.logger.error(f"Error serializing feedback from {agent_name} to JSON: {e}. Feedback: {agent_feedback}")
+            except Exception as e:
+                self.logger.error(f"Error logging feedback fragment for {agent_name}: {e}", exc_info=True)
+
+        # TODO: Add more sophisticated analysis here later.
+        # - Identify patterns across agent feedback.
+        # - Trigger strategic adjustments based on errors or performance metrics.
+        # - Update internal models or parameters.
+        self.logger.info("Feedback processing complete (logged as fragments).")
     # --- Prompt Template Management ---
 
     async def get_prompt(self, agent_name: str, prompt_key: str) -> Optional[str]:
@@ -575,6 +952,129 @@ class ThinkTool:
 
         # Fallback
         return {"valid": False, "feedback": "ThinkTool validation failed (LLM error or invalid JSON)."}
+
+    async def process_feedback(self, feedback_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Processes feedback collected from various agents to identify issues,
+        successes, and generate actionable insights or directives.
+
+        Args:
+            feedback_data (Dict[str, Any]): A dictionary where keys are agent names
+                                           and values are the feedback/insights collected
+                                           from that agent (structure depends on agent's
+                                           `collect_insights` method).
+
+        Returns:
+            Dict[str, Any]: A dictionary containing validated feedback or newly
+                            generated directives intended for specific agents.
+                            (Structure TBD based on Orchestrator's expectation).
+                            For now, can return an empty dict or summary.
+        """
+        self.logger.info(f"ThinkTool: Processing feedback received from {len(feedback_data)} agents.")
+        processed_results = {} # Placeholder for return value
+
+        if not feedback_data:
+            self.logger.warning("ThinkTool: Received empty feedback data. Skipping processing.")
+            return processed_results
+
+        # 1. Format feedback data for LLM analysis prompt
+        feedback_summary = json.dumps(feedback_data, indent=2, default=str, ensure_ascii=False) # Pretty print JSON
+        # Limit summary size if too large
+        max_summary_len = 4000
+        if len(feedback_summary) > max_summary_len:
+             feedback_summary = feedback_summary[:max_summary_len] + "\n... (feedback truncated)"
+
+        # 2. Construct LLM prompt for feedback analysis
+        analysis_prompt = f"""
+        {self.meta_prompt}
+        **Task:** Analyze the consolidated feedback collected from various agency agents. Identify critical issues, significant successes, emerging trends, and potential areas for optimization or prompt refinement.
+
+        **Consolidated Agent Feedback:**
+        ```json
+        {feedback_summary}
+        ```
+
+        **Analysis & Action Generation:**
+        1.  **Synthesize Key Findings:** Summarize the most important points from the feedback (both positive and negative).
+        2.  **Identify Critical Issues:** Pinpoint any recurring errors, performance bottlenecks, or strategic misalignments reported by agents.
+        3.  **Recognize Successes:** Note any particularly effective strategies or high-performance areas mentioned.
+        4.  **Suggest Actions:** Based on the analysis, propose concrete actions:
+            *   **Directives:** Generate 1-2 high-priority `StrategicDirective` objects (JSON format matching DB model: {{ "target_agent": str, "directive_type": str, "content": str, "priority": int }}) to address critical issues or test improvements.
+            *   **Prompt Critiques:** Identify specific agent prompts (agent_name/prompt_key) that may need refinement based on the feedback. List them as strings: ["AgentName/PromptKey1", "AgentName/PromptKey2"].
+            *   **Knowledge Logging:** Suggest 1-2 key insights derived from the feedback to be logged as `KnowledgeFragment` objects (JSON format: {{'data_type': str, 'content': str|dict, 'tags': list[str], 'relevance': float}}).
+
+        **Output (JSON):**
+        {{
+          "analysis_summary": str,
+          "critical_issues_found": list[str],
+          "key_successes_noted": list[str],
+          "proposed_directives": [ {{ "target_agent": str, "directive_type": str, "content": str, "priority": int }} ],
+          "prompts_to_critique": list[str], // e.g., ["EmailAgent/email_draft", "VoiceSalesAgent/intent_analysis"]
+          "insights_to_log": [ {{'data_type': str, 'content': str|dict, 'tags': list[str], 'relevance': float}} ]
+        }}
+        """
+
+        # 3. Call LLM for analysis
+        self.logger.debug("Calling LLM for feedback analysis...")
+        analysis_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.6, max_tokens=2000, is_json_output=True)
+
+        # 4. Process LLM response and trigger actions
+        if analysis_json:
+            try:
+                analysis_result = json.loads(analysis_json)
+                self.logger.info(f"Feedback analysis complete. Summary: {analysis_result.get('analysis_summary', 'N/A')}")
+
+                # Create new directives
+                async with self.session_maker() as session:
+                     for directive_data in analysis_result.get('proposed_directives', []):
+                         directive = StrategicDirective(
+                             source="ThinkToolFeedback",
+                             timestamp=datetime.now(timezone.utc),
+                             target_agent=directive_data.get('target_agent', 'Orchestrator'),
+                             directive_type=directive_data.get('directive_type', 'general_task'),
+                             content=directive_data.get('content', 'N/A'),
+                             priority=directive_data.get('priority', 5),
+                             status='pending'
+                         )
+                         session.add(directive)
+                         self.logger.info(f"Generated Directive from Feedback for {directive.target_agent}: {directive.directive_type}")
+                     await session.commit()
+
+                # Trigger prompt critiques (run asynchronously)
+                for prompt_identifier in analysis_result.get('prompts_to_critique', []):
+                    try:
+                        agent_name, prompt_key = prompt_identifier.split('/', 1)
+                        # Create task to run critique without blocking feedback loop
+                        asyncio.create_task(self.self_critique_prompt(agent_name, prompt_key, f"Feedback analysis suggested issues: {analysis_result.get('analysis_summary', 'N/A')}"))
+                        self.logger.info(f"Scheduled self-critique for prompt: {prompt_identifier}")
+                    except ValueError:
+                        self.logger.warning(f"Invalid format for prompt identifier in feedback analysis: {prompt_identifier}")
+
+                # Log new knowledge fragments
+                for frag_data in analysis_result.get('insights_to_log', []):
+                    await self.log_knowledge_fragment(
+                        agent_source="ThinkToolFeedback",
+                        data_type=frag_data.get('data_type', 'feedback_insight'),
+                        content=frag_data.get('content', 'Missing content'),
+                        tags=frag_data.get('tags', ['feedback']),
+                        relevance_score=frag_data.get('relevance', 0.7)
+                    )
+
+                # TODO: Determine what structure Orchestrator expects back
+                # For now, just return a summary or the raw analysis
+                processed_results = {"summary": analysis_result.get('analysis_summary', 'Processing complete.')}
+
+            except json.JSONDecodeError:
+                self.logger.error(f"ThinkTool: Failed to decode JSON feedback analysis result: {analysis_json}")
+                processed_results = {"error": "Failed to decode LLM response."}
+            except Exception as e:
+                self.logger.error(f"ThinkTool: Error processing feedback analysis result: {e}", exc_info=True)
+                processed_results = {"error": f"Internal error processing feedback: {e}"}
+        else:
+            self.logger.error("ThinkTool: Feedback analysis failed (LLM error).")
+            processed_results = {"error": "LLM call failed during feedback analysis."}
+
+        return processed_results
 
     # --- New Core Synthesis & Strategy Engines ---
 
@@ -939,13 +1439,13 @@ class ThinkTool:
     # ensuring they use _call_llm_with_retry
 
     async def analyze_visual(self, image_data, task_description):
-         """Analyze visual data (requires appropriate LLM client/model)."""
-         # This might need a specific multimodal client setup via orchestrator
-         self.logger.warning("analyze_visual needs integration with a multimodal LLM client.")
-         # Placeholder implementation using standard LLM (will likely fail for image data)
-         prompt = f"{self.meta_prompt}\nAnalyze visual context for: {task_description}. Describe what you see."
-         analysis = await self._call_llm_with_retry(prompt, max_tokens=500, is_json_output=False)
-         return analysis or "Visual analysis failed or not supported."
+        """Analyze visual data (requires appropriate LLM client/model)."""
+        # This might need a specific multimodal client setup via orchestrator
+        self.logger.warning("analyze_visual needs integration with a multimodal LLM client.")
+        # Placeholder implementation using standard LLM (will likely fail for image data)
+        prompt = f"{self.meta_prompt}\nAnalyze visual context for: {task_description}. Describe what you see."
+        analysis = await self._call_llm_with_retry(prompt, max_tokens=500, is_json_output=False)
+        return analysis or "Visual analysis failed or not supported."
 
     async def handle_quick_challenge(self, challenge_type: str, context: str) -> str:
         """Handle simple, quick challenges."""

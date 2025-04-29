@@ -2,6 +2,7 @@ import os
 import asyncio
 from datetime import datetime, timedelta
 import logging
+import time
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from quart import Quart, request, jsonify, websocket, send_file, url_for # Architect-Zero: Added websocket, send_file, url_for
 import psutil
@@ -21,14 +22,14 @@ import pybreaker
 import websockets # Architect-Zero: Added import
 import base64    # Architect-Zero: Added import
 import uuid      # Architect-Zero: Added import
-from typing import Dict, Optional # Architect-Zero: Added import
+from typing import Dict, Optional, Tuple, Any # Architect-Zero: Added import
 from quart.wrappers.request import Websocket # Architect-Zero: Added import
 from utils.think import think_step, think_controller
 # --- Database & Migration Imports ---
-from sqlalchemy import select, update, text
-from datetime import datetime, timezone
+from sqlalchemy import select, delete, func, update, text # Added delete, func
+from datetime import datetime, timedelta, timezone # Ensure timedelta is here too
 from utils.database import encrypt_data, decrypt_data_fixed_salt_migration # Import both encryption methods
-from models import Base, Client, Metric, ExpenseLog, MigrationStatus # Import necessary models
+from models import Base, Client, Metric, ExpenseLog, MigrationStatus, KnowledgeFragment # Added KnowledgeFragment
 
 # Register basic checklists
 think_controller.register("initialize_clients_pre", lambda args, kwargs: True)
@@ -56,6 +57,9 @@ from agents.think_tool import ThinkTool
 from agents.voice_sales_agent import VoiceSalesAgent
 from agents.optimization_agent import OptimizationAgent
 from utils.notifications import send_notification
+from agents.programmer_agent import ProgrammerAgent
+from agents.social_media_manager import SocialMediaManager
+from agents.legal_agent import LegalAgent # Distinguish from LegalComplianceAgent for now
 
 
             
@@ -144,6 +148,8 @@ class Orchestrator:
         self.deepgram_connections: Dict[str, websockets.client.WebSocketClientProtocol] = {} # Architect-Zero: Added registry for Deepgram WS
         self.temp_audio_dir = "/tmp/hosted_audio" # Architect-Zero: Added temp dir for audio hosting
         os.makedirs(self.temp_audio_dir, exist_ok=True) # Architect-Zero: Ensure temp dir exists
+        self._cache: Dict[str, Tuple[Any, float]] = {} # Key -> (Value, Expiry Timestamp)
+        self.last_education_content: Optional[str] = None # Store for potential use by Orchestrator mode
         # Validate essential non-secret env vars (DB URL, Vault config are checked in settings.py)
         essential_config = [
             "DATABASE_URL", "DATABASE_ENCRYPTION_KEY", # Checked in settings.py
@@ -161,6 +167,14 @@ class Orchestrator:
             # Cannot send notification yet as components might not be ready
             raise ValueError(error_msg)
 
+        # Feedback loop timing attributes
+        self.feedback_interval_seconds: int = 300 # e.g., 5 minutes
+        self.last_feedback_time: float = 0.0 # Initialized properly in run()
+        self.running: bool = False # Controls the main loop in run()
+
+        # Data Purge timing attributes
+        self.purge_interval_seconds: int = 86400 # Default: 24 hours (30 days policy handled by ThinkTool)
+        self.last_purge_time: float = 0.0 # Initialized properly in run()
     async def check_system_health(self):
         """Check system health for auto-approval."""
         cpu_usage = psutil.cpu_percent(interval=1)
@@ -262,6 +276,23 @@ class Orchestrator:
                 # Pass appropriate client/model mapping, maybe specific browsing models
                 clients_models=[(c, self.config.OPENROUTER_MODELS.get('browsing_infer_steps', self.config.DEEPSEEK_MODEL)) for c in llm_clients]
             )
+
+            # --- Initialize NEW Agents ---
+
+            # ProgrammerAgent
+            self.agents['programmer'] = ProgrammerAgent(self) # Pass orchestrator (self)
+            # Note: ProgrammerAgent might need LLM clients later, add clients_models if required by its implementation
+
+            # SocialMediaManager
+            self.agents['social_media'] = SocialMediaManager(self) # Pass orchestrator (self)
+            # Note: SocialMediaManager will likely need BrowsingAgent, ThinkTool, OSINTAgent instances passed or accessed via orchestrator later
+
+            # LegalAgent (Strategic Focus)
+            self.agents['strategic_legal'] = LegalAgent(self) # Pass orchestrator (self), use distinct key
+            # Note: LegalAgent might need OSINTAgent, ThinkTool later
+
+            logger.info("Initialized ProgrammerAgent, SocialMediaManager, and LegalAgent.")
+
             logger.info("All agents initialized successfully.")
         # Removed duplicate except block below
         # except Exception as e:
@@ -425,6 +456,59 @@ class Orchestrator:
                 await session.rollback() # Ensure rollback on any error
                 raise Exception(f"Migration '{migration_name}' failed: {e}") from e # Halt startup
 
+        def get_from_cache(self, key: str) -> Optional[Any]:
+            """
+            Retrieves an item from the in-memory cache if it exists and hasn't expired.
+            """
+            if key in self._cache:
+                value, expiry_ts = self._cache[key]
+                if time.time() < expiry_ts:
+                    logger.debug(f"Cache hit for key: {key}")
+                    return value
+                else:
+                    logger.debug(f"Cache expired for key: {key}")
+                    # Clean up expired entry
+                    del self._cache[key]
+            logger.debug(f"Cache miss for key: {key}")
+            return None
+
+        def add_to_cache(self, key: str, value: Any, ttl_seconds: int = 3600):
+            """
+            Adds an item to the in-memory cache with a Time-To-Live (TTL).
+
+            Args:
+                key (str): The cache key.
+                value (Any): The value to cache.
+                ttl_seconds (int): Time-to-live in seconds (default: 1 hour).
+            """
+            if ttl_seconds <= 0:
+                logger.warning(f"Attempted to add cache key '{key}' with non-positive TTL. Skipping.")
+                return
+
+            expiry_ts = time.time() + ttl_seconds
+            self._cache[key] = (value, expiry_ts)
+            logger.debug(f"Added key '{key}' to cache with TTL {ttl_seconds}s.")
+            # Optional: Add logic to prune cache if it grows too large
+            # self._prune_cache_if_needed()
+
+        # Optional helper for pruning (can be added later if needed)
+        # def _prune_cache_if_needed(self, max_size: int = 1000):
+        #     if len(self._cache) > max_size:
+        #         # Simple pruning: remove oldest items (less efficient)
+        #         # Or remove expired items first
+        #         keys_to_remove = [k for k, (_, expiry) in self._cache.items() if time.time() >= expiry]
+        #         for k in keys_to_remove:
+        #             del self._cache[k]
+        #         # If still too large, remove some non-expired items (e.g., random or LRU)
+        #         while len(self._cache) > max_size:
+        #             try:
+        #                 # Remove a random item (adjust strategy as needed)
+        #                 random_key = next(iter(self._cache))
+        #                 del self._cache[random_key]
+        #             except StopIteration:
+        #                 break # Cache is empty
+        #         logger.info(f"Cache pruned. Current size: {len(self._cache)}")
+
     # --- Removed Duplicate Method Definitions ---
     # The following methods were duplicated due to a previous partial diff application
     # and have been removed:
@@ -518,6 +602,150 @@ class Orchestrator:
         body = f"Error details: {error}"
         await self.send_notification(subject, body)
 
+    async def report_expense(self, agent_name: str, amount: float, category: str, description: str):
+        """
+        Allows agents to report expenses to be tracked by the BudgetAgent.
+
+        Args:
+            agent_name (str): The name of the agent reporting the expense.
+            amount (float): The expense amount.
+            category (str): The expense category (must match BudgetAgent categories).
+            description (str): A description of the expense.
+        """
+        logger.debug(f"Received expense report from {agent_name}: ${amount:.4f} [{category}] - {description}")
+        budget_agent = self.agents.get('budget') # Assuming BudgetAgent is stored with key 'budget'
+
+        if not budget_agent:
+            logger.error("BudgetAgent not found. Cannot track expense.")
+            # Optionally report this critical internal error
+            # await self.report_error("Orchestrator", "BudgetAgent not found during expense tracking.")
+            return # Cannot proceed
+
+        if not hasattr(budget_agent, 'track_expense'):
+            logger.error("BudgetAgent instance does not have a 'track_expense' method. Cannot track expense.")
+            # await self.report_error("Orchestrator", "BudgetAgent missing 'track_expense' method.")
+            return # Cannot proceed
+
+        try:
+            # Delegate the tracking to the BudgetAgent
+            await budget_agent.track_expense(amount=amount, category=category, description=f"({agent_name}) {description}")
+            logger.info(f"Successfully forwarded expense from {agent_name} to BudgetAgent.")
+        except ValueError as budget_err: # Catch budget exceeded or invalid category errors
+            logger.error(f"BudgetAgent rejected expense from {agent_name}: {budget_err}")
+            # Notify the calling agent or take corrective action? For now, just log.
+            # Optionally, re-raise or handle specific budget errors if needed by calling agents.
+        except Exception as e:
+            logger.error(f"Failed to track expense via BudgetAgent for {agent_name}: {e}", exc_info=True)
+            # Report this internal error
+            # await self.report_error("Orchestrator", f"Failed to delegate expense tracking to BudgetAgent: {e}")
+    async def handle_user_education_trigger(self, topic: str, context: Optional[str] = None):
+        """
+        Handles triggers for educating the user on a specific topic.
+        Calls ThinkTool to generate content and prepares it for notification.
+        """
+        logger.info(f"User education trigger received for topic: {topic}")
+
+        think_tool_agent = self.agents.get("think_tool") # Corrected key based on initialization
+        if not think_tool_agent:
+            logger.error("ThinkTool agent not found. Cannot generate educational content.")
+            # Optionally notify user about the internal error?
+            # await self.message_notify_user("Internal Error: Could not find ThinkTool to generate explanation.")
+            return
+
+        if not hasattr(think_tool_agent, 'generate_educational_content'):
+             logger.error("ThinkTool agent does not have 'generate_educational_content' method.")
+             # await self.message_notify_user("Internal Error: ThinkTool is missing the required method to generate explanation.")
+             return
+
+        try:
+            explanation = await think_tool_agent.generate_educational_content(topic, context)
+
+            if explanation:
+                logger.info(f"Educational content generated for '{topic}'. Preparing notification.")
+                # The Orchestrator *mode* will handle the actual notification tool call.
+                # This method just prepares the message content.
+                # We can store it or pass it back if this method had a return value.
+                # For now, just log that it was generated.
+                # In a full implementation, might queue this for the Orchestrator mode's next turn.
+                self.last_education_content = explanation # Store for potential use by Orchestrator mode
+                # Assuming message_notify_user exists or is added later for direct notification
+                # For now, let's just log it, as direct notification might be handled elsewhere
+                logger.info(f"Educational content for '{topic}' stored in self.last_education_content.")
+                # Example direct notification (if Orchestrator has this method):
+                # await self.message_notify_user(f"**Educational Note: {topic}**\n\n{explanation}")
+
+            else:
+                logger.warning(f"ThinkTool failed to generate educational content for topic: {topic}")
+                # Optionally notify user about the failure?
+                # await self.message_notify_user(f"Sorry, I couldn't generate an explanation for '{topic}' right now.")
+
+        except Exception as e:
+            logger.error(f"Error during educational content generation for '{topic}': {e}", exc_info=True)
+            # await self.message_notify_user(f"An error occurred while trying to generate an explanation for '{topic}'.")
+    async def _run_periodic_data_purge(self, interval_seconds: int = 86400): # Default to daily
+        """
+        Periodically runs the data purge process based on the 30-day policy.
+        """
+        logger.info(f"Starting periodic data purge task (interval: {interval_seconds} seconds).")
+        while True:
+            try:
+                await asyncio.sleep(interval_seconds) # Wait for the interval
+                logger.info("Initiating 30-day data purge process for KnowledgeFragments...")
+
+                # --- Identify Outdated KnowledgeFragments ---
+                thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+                outdated_record_count = 0
+                try:
+                    async with self.session_maker() as session:
+                        # Count outdated records first
+                        count_stmt = select(func.count(KnowledgeFragment.id)).where(KnowledgeFragment.last_accessed_ts < thirty_days_ago)
+                        count_result = await session.execute(count_stmt)
+                        outdated_record_count = count_result.scalar_one_or_none() or 0
+                except Exception as count_err:
+                    logger.error(f"Error counting outdated KnowledgeFragments: {count_err}", exc_info=True)
+                    continue # Skip this cycle if counting fails
+
+                if outdated_record_count > 0:
+                    logger.info(f"Identified {outdated_record_count} KnowledgeFragments older than 30 days.")
+
+                    # --- Safeguard/Confirmation (Optional but Recommended) ---
+                    # TODO: Implement safeguards if needed (e.g., check count threshold)
+                    logger.warning("Placeholder: Data purge safeguard logic not implemented.")
+                    proceed_with_deletion = True # Placeholder
+
+                    # --- Perform Deletion ---
+                    if proceed_with_deletion:
+                        deleted_count = 0
+                        try:
+                            async with self.session_maker() as session:
+                                delete_stmt = delete(KnowledgeFragment).where(KnowledgeFragment.last_accessed_ts < thirty_days_ago)
+                                result = await session.execute(delete_stmt)
+                                await session.commit()
+                                deleted_count = result.rowcount # Get the number of rows deleted
+                                logger.info(f"Successfully purged {deleted_count} outdated KnowledgeFragments.")
+                                if deleted_count > 0:
+                                     await self.send_notification("Data Purge Completed", f"Purged {deleted_count} KnowledgeFragments older than 30 days.")
+                        except Exception as delete_err:
+                             logger.error(f"Error deleting outdated KnowledgeFragments: {delete_err}", exc_info=True)
+                             # Attempt rollback, though session context manager might handle it
+                             try:
+                                 await session.rollback()
+                             except Exception as rb_err:
+                                 logger.error(f"Error during rollback after deletion failure: {rb_err}")
+                             # Consider reporting this error
+                    else:
+                        logger.info("KnowledgeFragment purge deletion step skipped due to safeguards.")
+                else:
+                    logger.info("No outdated KnowledgeFragments found requiring purge.")
+
+            except asyncio.CancelledError:
+                 logger.info("Data purge task cancelled.")
+                 break # Exit loop if cancelled
+            except Exception as e:
+                logger.error(f"Data purge task failed: {e}", exc_info=True)
+                # await self.report_error("DataPurgeTask", str(e))
+                # Avoid rapid retries on persistent errors, wait longer before next cycle
+                await asyncio.sleep(3600) # Wait an hour before retrying after a failure
     async def start_testing_phase(self):
         try:
             async with self.session_maker() as session:
@@ -845,91 +1073,152 @@ class Orchestrator:
 
     @think_step("run")
     async def run(self):
+        logger.info("Orchestrator starting...")
+        background_tasks = set() # To keep track of background tasks
+        self.running = False # Ensure not running until setup is complete
+
         try:
+            # --- Initialization ---
+            logger.info("Performing initial setup...")
             await self.initialize_clients()
-            await self.initialize_database() # Ensures tables exist, including MigrationStatus
-            await self._run_encryption_migration_v2() # Run migration after DB init, before agents
-            # await self.initialize_primary_api_key() # Removed - Relied on direct key storage
-            await self.initialize_agents() # Agents initialized after migration & client init
-            
-            # Create initial OpenRouter accounts immediately (via BrowsingAgent -> Vault)
-            await self.create_openrouter_accounts(5)
-            
-            await self.start_testing_phase()
-            self.approved = True # Assuming testing phase implies approval for now
-            logger.info("Testing phase completed successfully. Agency approved for full operation.")
-            
-            boost_task = asyncio.create_task(self.adjust_concurrency())
-            monitor_task = asyncio.create_task(self.monitor_agents())
-            sandbox_task = asyncio.create_task(self.manage_sandbox())
-            cleanup_task = asyncio.create_task(self.cleanup_old_logs())
-            reset_task = asyncio.create_task(self.reset_api_key_availability())
-            feedback_task = asyncio.create_task(self.run_feedback_loop()) # Create feedback loop task
-            agent_tasks = [asyncio.create_task(agent.run()) for agent in self.agents.values()]
-            # Add feedback_task to gather
-            await asyncio.gather(*agent_tasks, boost_task, monitor_task, sandbox_task, cleanup_task, reset_task, feedback_task)
-        except Exception as e:
-            logger.error(f"Agency run failed: {e}")
-            await self.report_error("Orchestrator", str(e))
-            raise
+            await self.initialize_database()
+            await self._run_encryption_migration_v2()
+            await self.initialize_agents()
+            await self.create_openrouter_accounts(5) # Keep initial account creation
+            logger.info("Initial setup complete. Agents initialized.")
+            # Note: Testing phase and approval are now handled via API/external triggers, not blocking startup.
 
-    async def run_feedback_loop(self):
-        """Runs the periodic feedback collection and application loop."""
-        logger.info("Starting periodic feedback loop (daily).")
-        while True:
-            try:
-                # Wait initially before the first check
-                await asyncio.sleep(86400)  # Daily cycle
+            # --- Start Background Tasks ---
+            logger.info("Starting background tasks...")
+            background_tasks.add(asyncio.create_task(self.adjust_concurrency(), name="adjust_concurrency"))
+            background_tasks.add(asyncio.create_task(self.monitor_agents(), name="monitor_agents"))
+            background_tasks.add(asyncio.create_task(self.manage_sandbox(), name="manage_sandbox"))
+            background_tasks.add(asyncio.create_task(self.cleanup_old_logs(), name="cleanup_old_logs"))
+            background_tasks.add(asyncio.create_task(self._run_periodic_data_purge(), name="data_purge"))
 
-                feedback_data = {}
-                # Use self.agents directly if accessible
-                for agent_name, agent in self.agents.items():
-                    # Check if agent exists and has the method
-                    if agent and hasattr(agent, 'collect_insights') and callable(agent.collect_insights):
+            for agent_name, agent in self.agents.items():
+                 background_tasks.add(asyncio.create_task(agent.run(), name=f"agent_{agent_name}"))
+            logger.info(f"Started {len(background_tasks)} background tasks.")
+
+            # --- Main Orchestration Loop ---
+            logger.info("Orchestrator starting main loop.")
+            self.running = True # Set running flag to True
+            self.last_feedback_time = time.time() # Initialize last feedback time
+            self.last_purge_time = time.time() # Initialize last purge time
+            while self.running:
+                # --- TODO: Add core task delegation/processing logic here ---
+                # Example: Check a central task queue, assign tasks to agents, etc.
+                # For now, just sleep to prevent busy-waiting.
+                try:
+                    await asyncio.sleep(1) # Prevent busy-waiting, allows other tasks to run
+                except asyncio.CancelledError:
+                     logger.info("Main loop sleep interrupted, likely shutting down.")
+                     break # Exit loop if cancelled
+
+                # --- Periodic Feedback Collection ---
+                # Check running flag again in case it changed during sleep
+                if not self.running: break
+
+                current_time = time.time()
+                if current_time - self.last_feedback_time >= self.feedback_interval_seconds:
+                    logger.info("Initiating periodic feedback collection...")
+                    all_insights = {}
+                    # Create a list of agents to iterate over to avoid issues if self.agents changes mid-iteration
+                    current_agents = list(self.agents.items())
+                    for agent_name, agent_instance in current_agents:
+                        # Check if agent exists and has the method
+                        if agent_instance and hasattr(agent_instance, 'collect_insights') and callable(agent_instance.collect_insights):
+                            try:
+                                logger.debug(f"Collecting insights from {agent_name}...")
+                                insights = await agent_instance.collect_insights()
+                                if insights: # Only add if insights were returned
+                                    all_insights[agent_name] = insights
+                                    logger.debug(f"Received insights from {agent_name}: {insights}")
+                                else:
+                                    logger.debug(f"No insights returned from {agent_name}.")
+                            except asyncio.CancelledError:
+                                logger.warning(f"Insight collection cancelled for {agent_name}.")
+                                # Decide how to handle cancellation during collection
+                            except Exception as e:
+                                logger.error(f"Error collecting insights from {agent_name}: {e}", exc_info=True)
+                                # Optionally report this error as an insight itself?
+                                all_insights[agent_name] = {"error": f"Failed to collect insights: {e}"}
+                        # else: # Log if agent doesn't have the method (can be noisy)
+                        #     logger.debug(f"Agent {agent_name} does not have collect_insights method.")
+
+                    if all_insights:
+                        logger.info(f"Collected insights from {len(all_insights)} agents. Triggering feedback handler.")
+                        # NOTE: Assuming self.handle_feedback_trigger exists or will be added.
                         try:
-                            feedback_data[agent_name] = await agent.collect_insights()
-                        except Exception as insight_err:
-                            logger.error(f"Error collecting insights from {agent_name}: {insight_err}")
-                    # else: logger.debug(f"Agent {agent_name} missing or lacks collect_insights method.") # Optional debug
-
-                if feedback_data:
-                    # Ensure think agent exists and has the method
-                    think_agent = self.agents.get('think')
-                    if think_agent and hasattr(think_agent, 'process_feedback') and callable(think_agent.process_feedback):
-                        try:
-                            validated_feedback = await think_agent.process_feedback(feedback_data)
-                            applied_count = 0
-                            for agent_name, feedback in validated_feedback.items():
-                                target_agent = self.agents.get(agent_name)
-                                # Check if target agent exists and has the method
-                                if target_agent and feedback and hasattr(target_agent, 'apply_insights') and callable(target_agent.apply_insights):
-                                    try:
-                                        await target_agent.apply_insights(feedback)
-                                        applied_count += 1
-                                    except Exception as apply_err:
-                                        logger.error(f"Error applying insights to {agent_name}: {apply_err}")
-                            logger.info(f"Feedback distributed to {applied_count} agents.")
-                            if hasattr(self, 'send_notification'): # Check if send_notification exists
-                                await self.send_notification(
-                                    "Feedback Cycle Complete",
-                                    f"Distributed feedback to {applied_count} agents."
-                                )
-                        except Exception as process_err:
-                            logger.error(f"Error processing feedback with ThinkTool: {process_err}")
+                            await self.handle_feedback_trigger(all_insights) # Pass collected insights
+                        except AttributeError:
+                             logger.error("Orchestrator.handle_feedback_trigger method not found!")
+                        except asyncio.CancelledError:
+                             logger.warning("Feedback trigger handling cancelled.")
+                        except Exception as fb_err:
+                             logger.error(f"Error calling handle_feedback_trigger: {fb_err}", exc_info=True)
                     else:
-                        logger.warning("ThinkTool agent or process_feedback method not available for feedback loop.")
-                else:
-                    logger.info("No feedback data collected in this cycle.")
+                        logger.info("No insights collected in this cycle.")
 
-            except asyncio.CancelledError:
-                 logger.info("Feedback loop cancelled.")
-                 break # Exit loop if cancelled
-            except Exception as e:
-                logger.error(f"Feedback loop failed: {e}")
-                if hasattr(self, 'report_error'): # Check if report_error exists
-                    await self.report_error("FeedbackLoop", str(e))
-                # Avoid rapid retries on persistent errors
-                await asyncio.sleep(3600) # Wait an hour before retrying after a failure
+                    self.last_feedback_time = current_time # Update timestamp
+                # --- End Periodic Feedback Collection ---
+
+                # --- Periodic Data Purge (via ThinkTool) ---
+                # Re-check current_time or use the one from feedback check if close enough
+                current_time_purge_check = time.time()
+                if current_time_purge_check - self.last_purge_time >= self.purge_interval_seconds:
+                    logger.info("Initiating periodic data purge via ThinkTool...")
+                    think_tool_agent = self.agents.get("think") # Key is 'think' based on initialization
+                    if think_tool_agent and hasattr(think_tool_agent, 'purge_old_knowledge') and callable(think_tool_agent.purge_old_knowledge):
+                        try:
+                            await think_tool_agent.purge_old_knowledge()
+                            logger.info("ThinkTool.purge_old_knowledge() executed successfully.")
+                        except asyncio.CancelledError:
+                             logger.warning("ThinkTool.purge_old_knowledge() cancelled.")
+                        except Exception as e:
+                            logger.error(f"Error calling ThinkTool.purge_old_knowledge(): {e}", exc_info=True)
+                            # Optionally report this error
+                            # await self.report_error("Orchestrator", f"Failed periodic purge via ThinkTool: {e}")
+                    else:
+                        logger.warning("ThinkTool agent not found or missing 'purge_old_knowledge' method. Skipping data purge.")
+
+                    self.last_purge_time = current_time_purge_check # Update timestamp
+
+                # --- End Periodic Data Purge ---
+            logger.info("Orchestrator main loop finished.")
+
+        except asyncio.CancelledError:
+            logger.info("Orchestrator run task cancelled during setup or loop.")
+        except Exception as e:
+            logger.critical(f"CRITICAL ERROR in Orchestrator run setup or loop: {e}", exc_info=True)
+            self.running = False # Ensure running is false on critical error
+            # Attempt to report critical failure if possible
+            try:
+                # Check if notification system is likely available
+                if 'email' in self.agents or hasattr(self, 'send_notification'):
+                     await self.send_notification("CRITICAL Orchestrator Failure", f"Orchestrator main run failed: {e}")
+                else:
+                     logger.error("Notification system likely unavailable, cannot send critical failure report.")
+            except Exception as report_err:
+                logger.error(f"Failed to send notification about critical orchestrator failure: {report_err}")
+            # Optionally re-raise or handle shutdown
+        finally:
+            logger.info("Orchestrator shutting down. Cancelling background tasks...")
+            self.running = False # Ensure flag is false
+            cancelled_tasks = []
+            for task in background_tasks:
+                if task and not task.done():
+                    task.cancel()
+                    cancelled_tasks.append(task)
+            if cancelled_tasks:
+                 logger.info(f"Waiting for {len(cancelled_tasks)} background tasks to cancel...")
+                 # Wait for tasks to cancel (with a timeout)
+                 await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+                 logger.info("Background tasks cancellation complete.")
+            else:
+                 logger.info("No active background tasks needed cancellation.")
+            logger.info("Orchestrator shutdown complete.")
+
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()

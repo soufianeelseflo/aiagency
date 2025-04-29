@@ -18,6 +18,15 @@ from typing import Optional, Dict, Any # Added for type hints
 from models import Client, EmailLog, Lead, PromptTemplate # Add others if needed
 from utils.database import encrypt_data, decrypt_data # For email body if needed, though maybe not encrypting content itself
 from config.settings import settings
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import ssl
+import json # Already imported, ensure it stays
+from typing import Optional, Dict, Any, List, Union # Ensure List, Union are added/present
+import hashlib # For caching in _call_llm_with_retry
+import time # For caching TTL in _call_llm_with_retry
+from openai import AsyncOpenAI as AsyncLLMClient # Assuming this is how LLM client is accessed via orchestrator
 # Assume Orchestrator provides access to ThinkTool, Vault, etc.
 # from orchestrator import Orchestrator # Conceptual import
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -301,6 +310,244 @@ class EmailAgent(GeniusAgentBase): # Renamed and inherited
         if country_code == 'GB': return "Use subtle British phrasing (e.g., 'reckon', 'keen')."
         if country_code == 'AU': return "Use subtle Australian phrasing (e.g., 'no worries', 'good onya')."
         return "Use standard US English phrasing."
+
+    # --- Standardized LLM Interaction (Copied from ThinkTool) ---
+    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=4, max=30), retry=retry_if_exception_type(Exception))
+    async def _call_llm_with_retry(self, prompt: str, model_preference: Optional[List[str]] = None, temperature: float = 0.5, max_tokens: int = 1024, is_json_output: bool = False) -> Optional[str]:
+        """
+        Centralized method for calling LLMs via the Orchestrator.
+        Handles client selection, retries, error reporting, and JSON formatting.
+        (Adapted from ThinkTool)
+
+        Args:
+            prompt: The prompt string for the LLM.
+            model_preference: Optional list of preferred model names/keys.
+            temperature: The sampling temperature for the LLM.
+            max_tokens: The maximum number of tokens to generate.
+            is_json_output: Whether to request JSON output format from the LLM.
+
+        Returns:
+            The LLM response content as a string, or None if all retries fail.
+        """
+        llm_client: Optional[AsyncLLMClient] = None
+        model_name: Optional[str] = None
+        api_key_identifier: str = "unknown_key" # For logging/reporting issues
+
+        try:
+            # --- Caching Logic: Check Cache First ---
+            prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+            # Determine model name early for cache key consistency
+            # Use a default model relevant for EmailAgent, or fetch from config
+            default_model = getattr(self.config, 'OPENROUTER_MODELS', {}).get('email', "google/gemini-pro") # Fallback model
+            # TODO: Refine model selection based on model_preference if provided and stable
+            model_name_for_cache = default_model # Use the determined model for the cache key
+
+            cache_key_parts = [
+                "llm_call",
+                prompt_hash,
+                model_name_for_cache, # Include model name
+                str(temperature),
+                str(max_tokens),
+                str(is_json_output),
+            ]
+            cache_key = ":".join(cache_key_parts)
+            cache_ttl = 3600 # Default 1 hour TTL for LLM calls
+
+            # Check cache first (assuming orchestrator provides caching)
+            if hasattr(self.orchestrator, 'get_from_cache'):
+                cached_result = self.orchestrator.get_from_cache(cache_key)
+                if cached_result is not None:
+                    self.logger.debug(f"LLM call cache hit for key: {cache_key[:20]}...{cache_key[-20:]}")
+                    return cached_result # Return cached value
+                else:
+                    self.logger.debug(f"LLM call cache miss for key: {cache_key[:20]}...{cache_key[-20:]}")
+            else:
+                self.logger.warning("Orchestrator does not have 'get_from_cache' method. Skipping cache check.")
+            # --- End Cache Check ---
+
+            # 1. Get available clients from Orchestrator
+            available_clients = await self.orchestrator.get_available_openrouter_clients()
+            if not available_clients:
+                self.logger.error("EmailAgent: No available LLM clients from Orchestrator.")
+                return None
+
+            # TODO: Implement smarter client/model selection
+            llm_client = random.choice(available_clients)
+            api_key_identifier = getattr(llm_client, 'api_key', 'unknown_key')[-6:] # Log last 6 chars
+
+            # 2. Determine model name
+            model_name = model_name_for_cache
+
+            # 3. Prepare request arguments
+            response_format = {"type": "json_object"} if is_json_output else None
+            messages = [{"role": "user", "content": prompt}]
+
+            self.logger.debug(f"EmailAgent LLM Call (Cache Miss): Model={model_name}, Temp={temperature}, MaxTokens={max_tokens}, JSON={is_json_output}, Key=...{api_key_identifier}")
+
+            # 4. Make the API call
+            response = await llm_client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                timeout=60 # Generous timeout
+            )
+
+            content = response.choices[0].message.content.strip()
+
+            # --- Token Tracking & Cost Estimation (Placeholder) ---
+            input_tokens_est = len(prompt) // 4
+            output_tokens = 0
+            try:
+                if response.usage and response.usage.completion_tokens:
+                    output_tokens = response.usage.completion_tokens
+                    if response.usage.prompt_tokens:
+                        input_tokens_est = response.usage.prompt_tokens
+                else:
+                     output_tokens = len(content) // 4
+            except AttributeError:
+                 output_tokens = len(content) // 4
+
+            total_tokens_est = input_tokens_est + output_tokens
+            estimated_cost = total_tokens_est * 0.000001 # Example cost
+            self.logger.debug(f"LLM Call Est. Tokens: ~{total_tokens_est}. Est. Cost: ${estimated_cost:.6f}")
+            # --- End Token Tracking ---
+
+            # --- Report Expense ---
+            if estimated_cost > 0 and hasattr(self.orchestrator, 'report_expense'):
+                try:
+                    await self.orchestrator.report_expense(
+                        agent_name=self.agent_name, # Use self.agent_name
+                        amount=estimated_cost,
+                        category="LLM",
+                        description=f"LLM call ({model_name or 'unknown_model'}). Estimated tokens: {total_tokens_est}."
+                    )
+                except Exception as report_err:
+                    self.logger.error(f"Failed to report LLM expense: {report_err}", exc_info=True)
+            # --- End Report Expense ---
+
+            # --- Caching Logic: Add to Cache on Success ---
+            if content and hasattr(self.orchestrator, 'add_to_cache'):
+                self.orchestrator.add_to_cache(cache_key, content, ttl_seconds=cache_ttl)
+                self.logger.debug(f"Added LLM result to cache for key: {cache_key[:20]}...{cache_key[-20:]}")
+            elif not hasattr(self.orchestrator, 'add_to_cache'):
+                self.logger.warning("Orchestrator does not have 'add_to_cache' method. Skipping caching result.")
+            # --- End Add to Cache ---
+
+            return content
+
+        except Exception as e:
+            error_str = str(e).lower()
+            issue_type = "llm_error"
+            if "rate limit" in error_str or "quota" in error_str: issue_type = "rate_limit"
+            elif "authentication" in error_str: issue_type = "auth_error"
+            elif "timeout" in error_str: issue_type = "timeout_error"
+
+            self.logger.warning(f"EmailAgent LLM call failed (attempt): Model={model_name}, Key=...{api_key_identifier}, ErrorType={issue_type}, Error={e}")
+
+            # Report issue back to orchestrator
+            if llm_client and hasattr(self.orchestrator, 'report_client_issue'):
+                 await self.orchestrator.report_client_issue(api_key_identifier, issue_type)
+
+            raise # Reraise exception for tenacity retry logic
+
+        self.logger.error(f"EmailAgent LLM call failed after all retries: Model={model_name}, Key=...{api_key_identifier}")
+        return None
+
+    # --- Core Email Sending Logic ---
+    async def send_email(self, to_address: str, subject: str, body: str, from_address: Optional[str] = None) -> Dict[str, Any]:
+        """Sends an email using configured SMTP settings with deliverability checks."""
+        self.logger.info(f"Preparing to send email to {to_address} with subject: {subject[:50]}...")
+        result = {"status": "failure", "message": "Email sending initialization failed."}
+
+        try:
+            # 1. Content Analysis (LLM Call Placeholder)
+            self.logger.debug("Analyzing email content for spam triggers...")
+            analysis_prompt = f"Analyze the following email subject and body for potential spam triggers. Suggest improvements if needed.\nSubject: {subject}\nBody:\n{body}\n\nOutput: Brief analysis and spam score (0-10)."
+            # Use the agent's own retry method
+            analysis_result = await self._call_llm_with_retry(analysis_prompt, max_tokens=300)
+            self.logger.info(f"Content analysis result: {analysis_result}")
+            # TODO: Potentially halt sending or refine content based on analysis (e.g., if score > 7)
+
+            # 2. Deliverability Checks (Placeholders)
+            self.logger.debug("Performing deliverability checks (placeholders)...")
+            # TODO: Check account warm-up status from internal state or config
+            # TODO: Check sending volume limits for the day/hour (use self.internal_state['daily_limits'])
+            # TODO: Check recipient against suppression list (if implemented, query DB/KB)
+            can_send = True # Assume checks pass for now
+
+            if not can_send:
+                 raise ValueError("Deliverability pre-checks failed.")
+
+            # 3. SMTP Connection & Sending
+            # Fetch SMTP settings from config (as per example) - ensure config/settings.py has SMTP_SETTINGS
+            smtp_config = getattr(self.config, 'SMTP_SETTINGS', {})
+            host = smtp_config.get('host')
+            port = smtp_config.get('port', 587) # Default TLS port
+            username = smtp_config.get('username')
+            # Fetch password securely - using the one passed during init for now
+            # In a real scenario, fetch from secure_storage if needed per send
+            password = self._smtp_password # Use password stored during init
+            sender = from_address or smtp_config.get('default_from', username) # Use default if not specified
+
+            if not all([host, port, username, password, sender]):
+                self.logger.error(f"SMTP configuration incomplete. Host: {host}, Port: {port}, User: {username}, Pass: {'Set' if password else 'Not Set'}, Sender: {sender}")
+                raise ValueError("SMTP configuration is incomplete.")
+
+            message = MIMEMultipart("alternative")
+            message["Subject"] = subject
+            message["From"] = f"{settings.SENDER_NAME} <{sender}>" # Use configured sender name
+            message["To"] = to_address
+            message['Date'] = smtplib.email.utils.formatdate(localtime=True)
+            message['Message-ID'] = smtplib.email.utils.make_msgid()
+
+            # Attach plain text and potentially HTML versions
+            # Assuming 'body' might be HTML, add plain text version too
+            # TODO: Add logic to generate plain text from HTML if body is HTML
+            plain_body = body # Placeholder: Use body as plain text for now
+            message.attach(MIMEText(plain_body, "plain"))
+            # If body is intended as HTML:
+            message.attach(MIMEText(body, "html"))
+
+            context = ssl.create_default_context()
+            self.logger.debug(f"Connecting to SMTP server: {host}:{port}")
+
+            # Use asyncio.to_thread for synchronous smtplib operations
+            def smtp_send():
+                with smtplib.SMTP(host, port, timeout=45) as server:
+                    server.ehlo()
+                    if port == 587: # Use STARTTLS for port 587
+                        server.starttls(context=context)
+                        server.ehlo() # Re-identify after TLS
+                    # Add logic for port 465 (SSL) if needed
+                    # elif port == 465:
+                    #     # Requires smtplib.SMTP_SSL() which needs separate handling
+                    #     pass
+                    server.login(username, password)
+                    self.logger.debug(f"Sending email from {sender} to {to_address}")
+                    server.sendmail(sender, to_address, message.as_string())
+
+            await asyncio.to_thread(smtp_send)
+
+            self.logger.info(f"Email successfully sent to {to_address}")
+            result = {"status": "success", "message": "Email sent successfully."}
+
+        except smtplib.SMTPException as smtp_err:
+             self.logger.error(f"SMTP error sending email to {to_address}: {smtp_err}", exc_info=True)
+             result["message"] = f"SMTP error: {smtp_err}"
+             # TODO: Potentially trigger circuit breaker or account cooldown logic here
+        except ValueError as ve:
+             self.logger.error(f"Configuration or pre-check error sending email to {to_address}: {ve}")
+             result["message"] = str(ve)
+        except Exception as e:
+            self.logger.error(f"Unexpected error sending email to {to_address}: {e}", exc_info=True)
+            result["message"] = f"Failed to send email due to unexpected error: {e}"
+
+        # TODO: Log the attempt (success or failure) using _log_email or similar
+        # await self._log_email(client_id, to_address, subject, body, result["status"], sender)
+
+        return result
 
     # --- Email Sending & Delivery ---
     async def send_email_task(self, client_id: int, campaign_id: Optional[int] = None):
@@ -662,25 +909,44 @@ class EmailAgent(GeniusAgentBase): # Renamed and inherited
                 await self.orchestrator.report_error("EmailAgent", f"Critical run loop error: {e}")
                 await asyncio.sleep(60) # Wait after critical error
 
-    # --- Abstract Method Implementations (Placeholders) ---
+    # --- Abstract Method Implementations ---
+    async def execute_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+        """Executes an email-related task, primarily sending."""
+        self.status = "working"
+        task_action = task_details.get('action', 'send') # Default to send
 
-    async def execute_task(self, task_details: Dict[str, Any]) -> Any:
-        """Core method to execute the agent's primary function for a given task."""
-        task_type = task_details.get('type')
-        if task_type == 'send_email':
-            client_id = task_details.get('client_id')
-            campaign_id = task_details.get('campaign_id')
-            if client_id:
-                self.logger.info(f"Executing send_email task for client {client_id}")
-                # Wrap existing logic, will be refactored further
-                await self.send_email_task(client_id, campaign_id)
-                return {"status": "completed"} # Or return actual result
+        result = {"status": "failure", "message": "Unknown email task action."}
+
+        if task_action == 'send':
+            to = task_details.get('to_address')
+            subject = task_details.get('subject')
+            body = task_details.get('body')
+            # Optional: client_id if needed for logging/context, though not strictly required by send_email
+            # client_id = task_details.get('client_id')
+
+            if not all([to, subject, body]):
+                 result["message"] = "Missing 'to_address', 'subject', or 'body' for send action."
+                 self.logger.error(f"EmailAgent execute_task failed: {result['message']}")
             else:
-                self.logger.error("execute_task: Missing client_id for send_email task")
-                return {"status": "failed", "reason": "Missing client_id"}
+                 # Call the new send_email method
+                 result = await self.send_email(to_address=to, subject=subject, body=body)
+        # TODO: Add other actions like 'generate_template', 'check_deliverability'
+        elif task_action == 'queue_email': # Keep existing queue logic if needed via execute_task
+             client_id = task_details.get('client_id')
+             campaign_id = task_details.get('campaign_id')
+             if client_id:
+                 queued = await self.queue_email_task(client_id, campaign_id)
+                 result = {"status": "success" if queued else "failure", "message": f"Task queued for client {client_id}." if queued else f"Failed to queue task for client {client_id}."}
+             else:
+                 result["message"] = "Missing 'client_id' for queue_email action."
+                 self.logger.error(f"EmailAgent execute_task failed: {result['message']}")
         else:
-            self.logger.warning(f"execute_task: Unknown task type '{task_type}'")
-            return {"status": "failed", "reason": f"Unknown task type '{task_type}'"}
+             self.logger.warning(f"execute_task: Unknown task action '{task_action}'")
+             result["message"] = f"Unknown email task action: {task_action}"
+
+
+        self.status = "idle"
+        return result
 
     async def learning_loop(self):
         """
@@ -755,7 +1021,7 @@ class EmailAgent(GeniusAgentBase): # Renamed and inherited
         self.logger.debug(f"Generating dynamic prompt for task context: {task_context.get('task')}")
 
         # 1. Start with the base meta-prompt defining the agent's persona and goals
-        prompt_parts = [EMAIL_AGENT_META_PROMPT]
+        prompt_parts = [EMAIL_AGENT_META_PROMPT_UPDATED] # Use updated prompt string
 
         # 2. Add specific task context
         prompt_parts.append("\n--- Current Task Context ---")

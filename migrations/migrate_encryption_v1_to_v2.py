@@ -1,7 +1,3 @@
-# migrations/migrate_encryption_v1_to_v2.py
-# Data migration script to update ExpenseLog.description encryption from fixed-salt to per-value salt.
-# WARNING: Run this script OFFLINE (application stopped) after backing up the database.
-
 import asyncio
 import os
 import sys

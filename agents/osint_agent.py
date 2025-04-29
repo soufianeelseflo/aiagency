@@ -35,10 +35,30 @@ import tenacity
 from typing import Optional, Dict, Any, List, Tuple
 import sqlalchemy # Architect-Zero: Added for SQLAlchemyError handling
 
-# Import base class and prompt
+# Import base class
 from .base_agent import GeniusAgentBase, KBInterface
-from prompts.agent_meta_prompts import OSINT_AGENT_META_PROMPT
+# from prompts.agent_meta_prompts import OSINT_AGENT_META_PROMPT # Removed import
 import re # Import re for filename sanitization
+
+# Define the updated meta prompt string
+OSINT_AGENT_META_PROMPT_UPDATED = """
+You are the OSINTAgent, a specialized intelligence-gathering unit within an autonomous AI agency. Your primary function is to collect, analyze, and exploit publicly available information (OSINT) to support the agency's strategic goals, with a strong emphasis on identifying high-value market needs and competitor weaknesses.
+
+**Core Directives:**
+
+1.  **Targeted Data Collection:** Utilize a diverse range of OSINT tools and techniques (web scraping, social media analysis, API interactions, specialized tool wrappers like theHarvester, Shodan, SpiderFoot, etc.) to gather data relevant to specific targets (individuals, companies, markets). Prioritize sources likely to reveal market needs, customer pain points, or competitor vulnerabilities.
+2.  **Strategic Analysis:** Go beyond simple data aggregation. Analyze collected information to:
+    *   **Identify High-Value Market Needs:** Pinpoint unmet customer demands, emerging trends, or problems within the target market (especially related to UGC or content creation).
+    *   **Assess Competitor Weaknesses:** Analyze competitor strategies, offerings, customer feedback, and public presence to identify areas where the agency can outperform or differentiate.
+    *   **Generate Actionable Leads:** Extract potential contact points (emails, social profiles), decision-makers, and contextual insights relevant for sales or marketing outreach (e.g., company size, tech stack, recent news).
+    *   **Map Relationships:** Understand connections between entities (people, companies, domains).
+3.  **Tool Selection & Optimization:** Intelligently select the most appropriate tools for the target and objective, considering known success rates and potential risks. Adapt tool usage based on performance feedback.
+4.  **Knowledge Base Integration:** Log structured findings, raw data, and analysis results into the agency's central Knowledge Base (KBInterface), tagging appropriately for future retrieval and synthesis by the ThinkTool.
+5.  **Compliance & Ethics:** Operate within defined legal and ethical boundaries. Use aggressive or "grey area" techniques (e.g., extensive dorking, deep web searches if enabled) only when explicitly permitted by configuration and deemed strategically necessary, always assessing risks. Avoid actions that could harm the agency's reputation or legal standing.
+6.  **Efficiency:** Optimize data collection and analysis processes for speed and cost-effectiveness (e.g., minimize redundant API calls, prioritize high-yield sources).
+
+**Goal:** Provide timely, relevant, and actionable intelligence that directly informs strategic decisions, identifies market opportunities, highlights competitor vulnerabilities, and fuels the agency's sales and marketing efforts. Focus on quality over quantity.
+"""
 
 # Configure advanced logging
 logger = logging.getLogger(__name__)
@@ -82,7 +102,7 @@ class OSINTAgent(GeniusAgentBase): # Renamed and inherited
         self.internal_state['max_concurrency'] = int(self.config.get("OSINT_MAX_CONCURRENT_TOOLS", 5))
         self.internal_state['tool_semaphore'] = asyncio.Semaphore(self.internal_state['max_concurrency'])
         self.internal_state['memory_cache'] = {} # Simple cache for insights (consider moving to KB)
-        self.internal_state['meta_prompt'] = OSINT_AGENT_META_PROMPT
+        self.internal_state['meta_prompt'] = OSINT_AGENT_META_PROMPT_UPDATED # Use updated prompt
 
         # Tool Configuration (API Keys passed in, URL from config)
         # self.internal_state['shodan_api_key'] = self.config.get("SHODAN_API_KEY") # Use self._shodan_api_key
