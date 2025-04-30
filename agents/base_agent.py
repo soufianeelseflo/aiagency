@@ -1,233 +1,513 @@
-# Filename: agents/base_agent.py
-# Description: Abstract Base Class for Genius Agents with core functionalities.
-# Version: 1.2
+# Filename: agents/base_agent_prod.py
+# Description: Production-Ready Abstract Base Class for Genius Agents.
+# Version: 2.1 (Production Hardening)
 
 import asyncio
 import logging
+import json
+import uuid
+import traceback # For detailed error logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List, Union # Added Union
-from datetime import datetime, timezone
+from typing import Dict, Any, Optional, List, Union, Tuple, AsyncGenerator, Type
+from datetime import datetime, timezone, timedelta
 
-# Configure a base logger for the module
-# Specific agent instances will get their own named logger in __init__
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-module_logger = logging.getLogger(__name__)
+# --- Type Hinting & Interfaces (Define expected structure) ---
 
-# Define KBInterface placeholder for type hinting if not centrally defined/imported
-# In a real setup, this might be imported from a shared types module
-class KBInterfacePlaceholder:
-    async def add_knowledge(self, *args, **kwargs): pass
-    async def get_knowledge(self, *args, **kwargs): return []
-    async def add_email_composition(self, *args, **kwargs): pass
-    async def log_learned_pattern(self, *args, **kwargs): pass
-    # Add other methods expected by agents if any
+class KBInterface:
+    """Defines the expected interface for interacting with the Knowledge Base."""
+    async def log_knowledge_fragment(self, *args, **kwargs) -> Optional[Any]: raise NotImplementedError
+    async def query_knowledge_base(self, *args, **kwargs) -> List[Any]: raise NotImplementedError
+    async def log_learned_pattern(self, *args, **kwargs) -> Optional[Any]: raise NotImplementedError
+    async def get_latest_patterns(self, *args, **kwargs) -> List[Any]: raise NotImplementedError
+    # Add other necessary KB interaction methods
 
-KBInterface = KBInterfacePlaceholder
+class OrchestratorInterface:
+    """Defines the expected interface for the Orchestrator."""
+    config: Any # Access to settings
+    agents: Dict[str, Any] # Access to other agents
+    async def report_error(self, agent_name: str, error_message: str): raise NotImplementedError
+    async def use_tool(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]: raise NotImplementedError
+    # Add other necessary Orchestrator interaction methods (e.g., delegate_task, get_proxy)
 
-class GeniusAgentBase(ABC):
+ConfigInterface = Any # Placeholder for actual config class/dict structure
+SessionMakerInterface = Any # Placeholder for async session maker type
+
+# --- Base Agent Class ---
+
+class GeniusAgentBase_ProdReady(ABC):
     """
-    Abstract base class for all specialized genius agents within the Synapse system.
-    Provides a common interface, shared utilities, internal reflection capability,
-    and a default run loop structure.
-    Version: 1.2
+    Production-Ready Abstract Base Class for Genius Agents (v2.1).
+    Provides a hardened foundation for agentic behavior: planning, reasoning,
+    robust execution, learning, and operational lifecycle management.
+    Designed to enable "First-Try Deployment" of derived agent implementations.
     """
-    def __init__(self, agent_name: str, orchestrator: Optional[Any] = None, config: Optional[Any] = None, kb_interface: Optional[KBInterface] = None, session_maker: Optional[Any] = None):
+    AGENT_NAME: str = "UnnamedGeniusAgent_ProdReady" # Subclasses MUST override
+
+    # Agent Status Constants
+    STATUS_INITIALIZING = "initializing"
+    STATUS_IDLE = "idle"
+    STATUS_PLANNING = "planning"
+    STATUS_EXECUTING = "executing"
+    STATUS_LEARNING = "learning" # If learning loop is active
+    STATUS_STOPPING = "stopping"
+    STATUS_STOPPED = "stopped"
+    STATUS_ERROR = "error"
+
+    def __init__(self,
+                 agent_name: str,
+                 orchestrator: OrchestratorInterface,
+                 session_maker: Optional[SessionMakerInterface] = None,
+                 kb_interface: Optional[KBInterface] = None,
+                 config: Optional[ConfigInterface] = None):
         """
-        Initializes the GeniusAgentBase.
+        Initializes the Production-Ready GeniusAgentBase.
 
         Args:
-            agent_name (str): The unique name of the agent instance.
-            orchestrator (Optional[Any]): Reference to the main Orchestrator instance.
-                                          Provides access to config, other agents, tools, etc.
-            config (Optional[Any]): Configuration object (often accessed via orchestrator).
-            kb_interface (Optional[KBInterface]): An interface object for interacting
-                                                  with the knowledge base (can be None).
-            session_maker (Optional[Any]): Async session maker for database access,
-                                           if needed directly by the agent.
+            agent_name (str): The unique name of the agent instance. MUST be overridden in subclass.
+            orchestrator (OrchestratorInterface): Reference to the main Orchestrator. REQUIRED.
+            session_maker (Optional[SessionMakerInterface]): Async session maker for DB access. Recommended.
+            kb_interface (Optional[KBInterface]): Interface for KB interaction. Recommended for advanced agents.
+            config (Optional[ConfigInterface]): Configuration object (usually accessed via orchestrator).
         """
-        if not agent_name:
-            raise ValueError("Agent name cannot be empty.")
+        if not agent_name or agent_name == "UnnamedGeniusAgent_ProdReady":
+            raise ValueError("Agent name must be set and unique in the subclass.")
+        if orchestrator is None:
+            raise ValueError("Orchestrator instance is required.")
 
         self.agent_name = agent_name
         self.orchestrator = orchestrator
-        # Prefer accessing config via orchestrator if available
+        self.session_maker = session_maker
+        self.kb_interface = kb_interface
         self.config = config if config is not None else getattr(orchestrator, 'config', None)
-        self.kb_interface = kb_interface # May be None
-        self.session_maker = session_maker # May be None
+        if self.config is None:
+             # Log is configured below, use print for critical init failure
+             print(f"CRITICAL WARNING: Agent '{self.agent_name}' initialized without configuration.")
 
-        self.status = "idle" # Common status attribute: idle, running, working, error, stopped
-        # Initialize internal state dictionary for subclasses
-        self.internal_state: Dict[str, Any] = {}
+        self._status = self.STATUS_INITIALIZING
+        self._run_lock = asyncio.Lock() # Prevent concurrent run calls
+        self._stop_event = asyncio.Event() # Signal for graceful shutdown
+        self._background_tasks = set() # Store background asyncio tasks
 
-        # Use a logger specific to the concrete agent class instance
-        self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}({self.agent_name})")
-        self.logger.info(f"Agent '{self.agent_name}' initialized.")
+        # Standardized Internal State
+        self.internal_state: Dict[str, Any] = {
+            "task_queue": asyncio.Queue(), # Default internal task queue
+            "current_task_id": None,
+            "current_plan": None,        # Plan for the current task
+            "errors_encountered_session": 0, # Errors since last start
+            "tasks_processed_session": 0,  # Tasks processed since last start
+            "last_error_ts": None,
+            "last_error_details": None,
+            "last_task_completion_ts": None,
+            "last_learning_cycle_ts": None,
+            "last_critique_ts": None,
+        }
+
+        # Agent-specific logger instance
+        self.logger = logging.getLogger(f"agent.{self.agent_name}") # Standardized naming
+        self.logger.info(f"Initializing (v2.1 Production Ready)...")
+
+        # Validate essential dependencies
+        if not hasattr(self.orchestrator, 'report_error'):
+            self.logger.warning("Orchestrator does not have 'report_error' method. Error reporting limited.")
+        if not hasattr(self.orchestrator, 'use_tool'):
+            self.logger.warning("Orchestrator does not have 'use_tool' method. Tool usage disabled.")
+
+        self._status = self.STATUS_IDLE
+        self.logger.info(f"Initialization complete. Status: {self._status}")
+
+    # --- Core Agent Lifecycle & Status ---
+
+    @property
+    def status(self) -> str:
+        """Gets the current agent status."""
+        return self._status
+
+    async def start(self):
+        """Starts the agent's main run loop if not already running."""
+        async with self._run_lock:
+            if self._status == self.STATUS_RUNNING:
+                self.logger.warning("Start requested but agent is already running.")
+                return
+            if self._status == self.STATUS_STOPPING:
+                self.logger.warning("Start requested but agent is currently stopping.")
+                return
+
+            self._status = self.STATUS_RUNNING
+            self._stop_event.clear()
+            self.internal_state["errors_encountered_session"] = 0
+            self.internal_state["tasks_processed_session"] = 0
+            self.internal_state["last_error_ts"] = None
+            self.internal_state["last_error_details"] = None
+
+            # Create and store the main run task
+            run_task = asyncio.create_task(self._run_main_loop(), name=f"{self.agent_name}_MainLoop")
+            self._background_tasks.add(run_task)
+            self.logger.info("Main run loop started.")
+            # Optionally wait for the task to finish if start() should be blocking
+            # await run_task
+
+    async def stop(self, timeout: float = 30.0):
+        """Requests graceful shutdown of the agent and waits for tasks to complete."""
+        if self._status in [self.STATUS_STOPPING, self.STATUS_STOPPED]:
+            self.logger.info(f"Stop requested but agent is already {self._status}.")
+            return
+
+        self.logger.info(f"Stop requested. Initiating graceful shutdown (timeout: {timeout}s)...")
+        self._status = self.STATUS_STOPPING
+        self._stop_event.set() # Signal loops to stop
+
+        # Wait for background tasks to finish
+        tasks_to_await = list(self._background_tasks)
+        if tasks_to_await:
+            self.logger.debug(f"Waiting for {len(tasks_to_await)} background tasks to complete...")
+            done, pending = await asyncio.wait(tasks_to_await, timeout=timeout, return_when=asyncio.ALL_COMPLETED)
+
+            if pending:
+                self.logger.warning(f"{len(pending)} background tasks did not finish within timeout:")
+                for task in pending:
+                    self.logger.warning(f"  - Task '{task.get_name()}' still pending. Cancelling.")
+                    task.cancel()
+                # Optionally wait a short extra time for cancellations
+                await asyncio.sleep(1)
+        else:
+            self.logger.info("No active background tasks to wait for.")
+
+        self._status = self.STATUS_STOPPED
+        self._background_tasks.clear() # Clear tracked tasks
+        self.logger.info("Shutdown complete.")
+
+    # --- Core Abstract Methods (Subclasses MUST Implement) ---
 
     @abstractmethod
-    async def execute_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+    async def plan_task(self, task_details: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         """
-        Abstract method for executing a specific task assigned by the Orchestrator.
-        This is the primary entry point for reactive task execution.
+        **REQUIRED:** Analyzes task details and generates a structured execution plan.
+        This embodies the agent's reasoning about *how* to achieve the goal.
+        Return None if the task is simple and requires no plan (handle in execute_task).
+        """
+        pass
 
-        Args:
-            task_details (dict): Contains task description, parameters, target, etc.
-
-        Returns:
-            dict: Contains execution status ('success'/'failure'), message, and results/artifacts.
+    @abstractmethod
+    async def execute_step(self, step: Dict[str, Any], task_context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        **REQUIRED:** Executes a single step from the plan.
+        Handles tool execution via orchestrator, state updates, and error checking for the step.
+        Must return a dictionary with at least {'status': 'success'|'failure', 'message': str}.
         """
         pass
 
     @abstractmethod
     async def learning_loop(self):
         """
-        Abstract method for the agent's autonomous learning and adaptation cycle.
-        Implementations should contain the core logic for periodic analysis,
-        strategy refinement, KB interaction, etc., and handle their own timing/sleep.
-        This loop runs in the background, managed by the `run` method.
+        **REQUIRED:** Autonomous learning/adaptation cycle.
+        Analyzes performance, updates strategies, interacts with KB. Handles own timing.
+        Must check `self._stop_event.is_set()` periodically for graceful shutdown.
         """
-        self.logger.warning(f"learning_loop not implemented for agent '{self.agent_name}'.")
-        # Default behavior: do nothing periodically to prevent blocking if called
-        while True:
-            await asyncio.sleep(3600) # Sleep for an hour if not implemented
+        pass
 
     @abstractmethod
     async def self_critique(self) -> Dict[str, Any]:
         """
-        Abstract method for the agent to evaluate its own performance, strategy,
-        or recent actions based on internal metrics, KB data, or directives.
-
-        Returns:
-            Dict[str, Any]: Critique summary, identified issues, suggested improvements.
+        **REQUIRED:** Evaluates own performance and strategy.
+        Leverages internal metrics, KB data, potentially LLM analysis.
+        Returns structured critique: {'status': 'ok'|'warning'|'error', 'feedback': str, 'metrics': {...}}
         """
-        self.logger.warning(f"self_critique not implemented for agent '{self.agent_name}'.")
-        return {"status": "warning", "feedback": "Self-critique not implemented."}
+        pass
 
     @abstractmethod
     async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
         """
-        Abstract method to construct context-rich prompts for LLM calls,
-        incorporating agent state, KB insights, and task specifics.
-
-        Args:
-            task_context (Dict[str, Any]): Data relevant to the specific LLM call needed.
-
-        Returns:
-            str: The fully constructed prompt string.
+        **REQUIRED:** Constructs context-rich prompts for LLM calls.
+        Incorporates agent state, KB insights, task specifics, strategic directives.
         """
-        self.logger.warning(f"generate_dynamic_prompt not implemented for agent '{self.agent_name}'. Returning basic prompt.")
-        return f"Task Context: {json.dumps(task_context)}. Please process."
+        pass
 
-    # --- Internal Reflection Method ---
-    async def _internal_think(self, thought: str):
+    @abstractmethod
+    async def collect_insights(self) -> Dict[str, Any]:
         """
-        Logs an internal thought or reflection point during task execution.
-        This simulates the "think" tool concept from the article - a dedicated
-        step for structured thinking/verification without external effects.
+        **REQUIRED:** Collects key operational insights for monitoring/feedback.
+        Returns structured data (success rates, queue size, resource usage, etc.).
+        """
+        pass
 
-        Args:
-            thought (str): A description of the internal thought process,
-                           checklist verification, or reflection point.
-                           Should be concise but informative.
-        """
-        # Use the agent's specific logger instance for this internal thought process
-        # Log at INFO level to ensure visibility in standard logs.
-        self.logger.info(f"[Internal Reflection] {thought.strip()}")
-        # Intentionally does not perform external actions or change state beyond logging.
+    # --- Core Agentic Workflow (Handles Planning & Execution Flow) ---
 
-    # --- Default Run Loop ---
-    async def run(self):
+    async def handle_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Default main run loop for an agent. Starts background learning loop (if implemented)
-        and processes an internal task queue (if present in self.internal_state).
-        Can be overridden by subclasses for different operational models.
+        Primary reactive task handler: Plans, Executes Plan, Handles Results.
+        Triggered by the task queue processor or directly by Orchestrator.
         """
-        if self.status == "running":
-            self.logger.warning(f"Agent '{self.agent_name}' run() called while already running.")
-            return
-
-        self.logger.info(f"Agent '{self.agent_name}' run loop starting.")
-        self.status = "running"
-        learning_task = None
+        task_id = task_details.get('id', str(uuid.uuid4()))
+        task_desc = task_details.get('description', 'Unnamed Task')
+        self.internal_state['current_task_id'] = task_id
+        self.logger.info(f"Handling task: {task_id} - {task_desc}")
+        final_result = {"status": "failure", "message": "Task handling failed.", "task_id": task_id}
+        plan = None
 
         try:
-            # Start the learning loop as a background task if implemented
+            # 1. Planning Phase
+            self._status = self.STATUS_PLANNING
+            await self._internal_think(f"Initiating planning for task {task_id}: {task_desc}")
+            plan = await self.plan_task(task_details)
+            self.internal_state['current_plan'] = plan # Store for visibility
+
+            # Validate plan structure (basic check)
+            if plan is not None and not isinstance(plan, list):
+                 self.logger.error(f"Task {task_id}: plan_task returned invalid type ({type(plan)}), expected list or None.")
+                 raise TypeError(f"Invalid plan format returned for task {task_id}.")
+
+            if plan:
+                self.logger.info(f"Task {task_id}: Plan generated with {len(plan)} steps.")
+            else:
+                # If plan is None, assume it's a simple task handled directly by execute_step
+                # or that planning failed and an error should be raised by plan_task.
+                # We proceed assuming execute_step can handle a 'None' plan or a single implicit step.
+                self.logger.info(f"Task {task_id}: No explicit plan generated. Proceeding with direct execution logic if implemented.")
+                # Create a dummy single step if needed by execute_step logic
+                plan = [{"step": 1, "action": "Direct Execution", "tool": "agent_internal", "params": task_details}]
+
+
+            # 2. Execution Phase
+            self._status = self.STATUS_EXECUTING
+            execution_summary = []
+            all_steps_successful = True
+
+            for step in plan:
+                if self._stop_event.is_set():
+                    self.logger.warning(f"Task {task_id}: Execution cancelled during step {step.get('step', '?')} due to stop signal.")
+                    final_result["message"] = "Task execution cancelled."
+                    final_result["status"] = "cancelled"
+                    all_steps_successful = False
+                    break # Exit loop if agent is stopping
+
+                step_num = step.get("step", "?")
+                step_action = step.get("action", "Unknown Step")
+                self.logger.debug(f"Task {task_id}: Executing step {step_num} - {step_action}")
+
+                await self._internal_think(f"Pre-execution check for step {step_num}: {step_action}.")
+                step_result = await self.execute_step(step, task_details) # Delegate step execution
+                execution_summary.append({"step": step_num, "action": step_action, "result": step_result})
+
+                if not isinstance(step_result, dict) or 'status' not in step_result:
+                     self.logger.error(f"Task {task_id}: Step {step_num} returned invalid result format: {step_result}")
+                     step_result = {'status': 'failure', 'message': 'Invalid step result format'} # Standardize error
+
+                if step_result.get("status") != "success":
+                    self.logger.error(f"Task {task_id}: Step {step_num} failed: {step_result.get('message', 'Unknown step error')}")
+                    all_steps_successful = False
+                    final_result["message"] = f"Task failed at step {step_num}: {step_result.get('message', 'Unknown step error')}"
+                    # Default: Stop plan execution on first failure
+                    break
+
+            # 3. Finalize Result
+            if self._stop_event.is_set() and final_result["status"] != "cancelled":
+                 final_result["status"] = "cancelled"
+                 final_result["message"] = "Task cancelled during execution."
+            elif all_steps_successful:
+                final_result["status"] = "success"
+                final_result["message"] = f"Task {task_id} completed successfully."
+                # Capture final output if provided by the last step
+                if execution_summary: final_result["final_output"] = execution_summary[-1].get("result", {}).get("result_data") # Example key
+            # else: message already set during step failure
+
+            self.internal_state["tasks_processed_session"] += 1
+            self.internal_state["last_task_completion_ts"] = datetime.now(timezone.utc)
+
+        except Exception as e:
+            self.logger.error(f"Critical error during task {task_id} handling: {e}", exc_info=True)
+            self._status = self.STATUS_ERROR # Set agent status to error
+            self.internal_state["errors_encountered_session"] += 1
+            self.internal_state["last_error_ts"] = datetime.now(timezone.utc)
+            self.internal_state["last_error_details"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            final_result["status"] = "error"
+            final_result["message"] = f"Critical error handling task {task_id}: {e}"
+            await self._report_error(f"Critical task handling error: {e}", task_id) # Report to orchestrator
+        finally:
+            # Reset status to idle only if not in error or stopping
+            if self._status not in [self.STATUS_ERROR, self.STATUS_STOPPING, self.STATUS_STOPPED]:
+                 self._status = self.STATUS_IDLE
+            self.internal_state['current_task_id'] = None
+            self.internal_state['current_plan'] = None # Clear plan
+            self.logger.info(f"Finished handling task: {task_id}. Final Status: {final_result['status']}")
+
+        return final_result
+
+    # --- Internal Helper Methods ---
+
+    async def _internal_think(self, thought: str, details: Optional[Dict] = None):
+        """Logs internal reasoning steps for clarity and traceability."""
+        log_message = f"[Internal Reflection] {thought.strip()}"
+        if details:
+            try:
+                details_str = json.dumps(details, indent=2, default=str)
+                log_message += f"\n--- Details ---\n{details_str}\n---------------"
+            except Exception: log_message += f" | Details: {str(details)}"
+        self.logger.info(log_message)
+        # Potential future enhancement: Log thoughts to KB for meta-analysis
+        # if self.kb_interface:
+        #     await self.kb_interface.log_knowledge_fragment(...)
+
+    async def _report_error(self, error_message: str, task_id: Optional[str] = None):
+        """Standardized internal error reporting to Orchestrator."""
+        self.internal_state["errors_encountered_session"] += 1
+        self.internal_state["last_error_ts"] = datetime.now(timezone.utc)
+        self.internal_state["last_error_details"] = error_message # Store raw message
+        log_msg = f"ERROR reported: {error_message}"
+        if task_id: log_msg += f" (Task: {task_id})"
+        self.logger.error(log_msg)
+
+        if hasattr(self.orchestrator, 'report_error'):
+            try:
+                await self.orchestrator.report_error(self.agent_name, error_message)
+            except Exception as report_err:
+                self.logger.error(f"Failed to report error to orchestrator: {report_err}")
+        else:
+            self.logger.warning("Orchestrator unavailable or lacks report_error method.")
+
+    async def _execute_tool(self, tool_name: str, params: Dict[str, Any], step_num: Optional[int] = None) -> Dict[str, Any]:
+        """Safely executes a tool via the orchestrator."""
+        step_id = f"Step {step_num}" if step_num else "Tool Execution"
+        if not hasattr(self.orchestrator, 'use_tool'):
+            err_msg = f"{step_id}: Orchestrator tool execution unavailable."
+            self.logger.error(err_msg)
+            return {"status": "failure", "message": err_msg}
+        try:
+            await self._internal_think(f"{step_id}: Executing tool '{tool_name}'", details=params)
+            result = await self.orchestrator.use_tool(tool_name, params)
+            if not isinstance(result, dict) or 'status' not in result:
+                 self.logger.error(f"{step_id}: Tool '{tool_name}' returned invalid result format: {result}")
+                 return {"status": "failure", "message": "Invalid tool result format"}
+            self.logger.debug(f"{step_id}: Tool '{tool_name}' result status: {result.get('status')}")
+            return result
+        except Exception as e:
+            self.logger.error(f"{step_id}: Exception during tool '{tool_name}' execution: {e}", exc_info=True)
+            await self._report_error(f"Exception executing tool '{tool_name}': {e}")
+            return {"status": "failure", "message": f"Exception executing tool '{tool_name}': {e}"}
+
+    # --- Main Run Loop (Handles Background Tasks & Task Queue) ---
+
+    async def _run_main_loop(self):
+        """The core asynchronous loop managing background tasks and the internal queue."""
+        self.logger.info("Main run loop entered.")
+        learning_task = None
+        queue_processor_task = None
+
+        try:
+            # --- Start Background Learning Loop ---
             if hasattr(self, 'learning_loop') and callable(self.learning_loop):
-                 learning_task = asyncio.create_task(self.learning_loop(), name=f"{self.agent_name}_LearningLoop")
-                 self.logger.info(f"Started background learning loop for {self.agent_name}.")
+                 learning_task = asyncio.create_task(self._learning_loop_wrapper(), name=f"{self.agent_name}_LearningLoop")
+                 self._background_tasks.add(learning_task)
+                 self.logger.info("Started background learning loop.")
             else:
-                 self.logger.info(f"No learning_loop method implemented for {self.agent_name}. Skipping background learning.")
+                 self.logger.info("No learning_loop method implemented. Skipping background learning.")
 
-            # Check for and process an internal task queue if the agent uses one
-            if 'task_queue' in self.internal_state and isinstance(self.internal_state['task_queue'], asyncio.PriorityQueue):
-                task_queue = self.internal_state['task_queue']
-                self.logger.info(f"Agent '{self.agent_name}' now processing internal task queue.")
-                while self.status == "running": # Continue while agent is supposed to be running
-                    try:
-                        # Wait for a task indefinitely until queue is non-empty or loop is cancelled
-                        priority, task_data = await task_queue.get()
-                        self.logger.info(f"{self.agent_name} dequeued internal task with priority {priority:.3f}: {task_data.get('type', 'Unknown')}")
-                        # Execute the task in the background to keep the loop responsive
-                        # Use task_details structure expected by execute_task
-                        asyncio.create_task(self.execute_task(task_data), name=f"{self.agent_name}_Task_{task_data.get('id', random.randint(1000,9999))}")
-                        task_queue.task_done() # Mark task done after spawning handler
-                    except asyncio.QueueEmpty:
-                        # Should not happen with await task_queue.get() unless queue is closed elsewhere
-                        self.logger.debug(f"Agent '{self.agent_name}' task queue empty, waiting.")
-                        await asyncio.sleep(1) # Short sleep before checking again
-                    except Exception as task_e:
-                         self.logger.error(f"Error processing task from internal queue for {self.agent_name}: {task_e}", exc_info=True)
-                         # Avoid tight loop on persistent queue errors
-                         await asyncio.sleep(5)
-
+            # --- Start Task Queue Processor ---
+            task_queue = self.internal_state.get('task_queue')
+            if isinstance(task_queue, asyncio.Queue):
+                queue_processor_task = asyncio.create_task(self._process_task_queue(task_queue), name=f"{self.agent_name}_QueueProcessor")
+                self._background_tasks.add(queue_processor_task)
+                self.logger.info("Started internal task queue processor.")
             else:
-                # If no task queue, just keep agent alive and running (e.g., for background learning)
-                self.logger.info(f"Agent '{self.agent_name}' entering idle monitoring state (no internal task queue).")
-                while self.status == "running":
-                    await asyncio.sleep(60) # Check status periodically
+                self.logger.info("No internal task queue found. Agent will rely on direct calls or learning loop.")
+
+            # --- Keep Loop Alive & Monitor Stop Event ---
+            while not self._stop_event.is_set():
+                # Check status of background tasks (optional, for restarting failed tasks)
+                # Monitor external signals or perform periodic checks if needed
+                await asyncio.sleep(1) # Check stop event periodically
+
+            self.logger.info("Stop event received, exiting main loop.")
 
         except asyncio.CancelledError:
-            self.logger.info(f"Agent '{self.agent_name}' run loop cancelled.")
+            self.logger.info("Main run loop cancelled.")
         except Exception as e:
-            self.logger.error(f"Agent '{self.agent_name}' run loop encountered critical error: {e}", exc_info=True)
-            self.status = "error"
-            # Report critical error to orchestrator if possible
-            if self.orchestrator and hasattr(self.orchestrator, 'report_error'):
-                try:
-                    await self.orchestrator.report_error(self.agent_name, f"Critical run loop error: {e}")
-                except Exception as report_err:
-                    self.logger.error(f"Failed to report run loop error to orchestrator: {report_err}")
+            self.logger.critical(f"CRITICAL error in main run loop: {e}", exc_info=True)
+            self._status = self.STATUS_ERROR
+            await self._report_error(f"Critical run loop error: {e}")
         finally:
-            self.status = "stopped"
-            if learning_task and not learning_task.done():
-                learning_task.cancel()
-                self.logger.info(f"Cancelled background learning loop for {self.agent_name}.")
-            self.logger.info(f"Agent '{self.agent_name}' run loop finished.")
+            self.logger.info("Main run loop exiting.")
+            # Status is set in the stop() method or if an error occurred
 
-    def get_status(self) -> dict:
-        """Returns the current status and basic info of the agent."""
-        queue_size = -1 # Indicate N/A
-        if 'task_queue' in self.internal_state and isinstance(self.internal_state['task_queue'], asyncio.PriorityQueue):
-            queue_size = self.internal_state['task_queue'].qsize()
+    async def _learning_loop_wrapper(self):
+        """Wraps the learning loop to handle errors and stop signals."""
+        self.logger.info("Learning loop wrapper started.")
+        try:
+            while not self._stop_event.is_set():
+                # Check if agent is in error state, maybe pause learning?
+                if self._status == self.STATUS_ERROR:
+                    self.logger.warning("Agent in error state, pausing learning loop.")
+                    await asyncio.sleep(60) # Wait before checking again
+                    continue
+
+                self._status = self.STATUS_LEARNING
+                await self.learning_loop() # Call the subclass implementation
+                # learning_loop should handle its own sleep/timing
+                if self._status == self.STATUS_LEARNING: # Reset status if learning loop didn't change it
+                    self._status = self.STATUS_RUNNING
+        except asyncio.CancelledError:
+            self.logger.info("Learning loop cancelled.")
+        except Exception as e:
+            self.logger.error(f"Error in learning loop: {e}", exc_info=True)
+            self._status = self.STATUS_ERROR
+            await self._report_error(f"Error in learning loop: {e}")
+        finally:
+            self.logger.info("Learning loop wrapper finished.")
+            if self._status == self.STATUS_LEARNING: self._status = self.STATUS_RUNNING # Ensure status reset if loop exits unexpectedly
+
+    async def _process_task_queue(self, task_queue: asyncio.Queue):
+        """Continuously processes tasks from the internal queue."""
+        self.logger.info("Internal task queue processor started.")
+        while not self._stop_event.is_set():
+            try:
+                # Wait for a task, but check stop event periodically
+                task_data = await asyncio.wait_for(task_queue.get(), timeout=5.0)
+
+                # Check stop event again after getting a task
+                if self._stop_event.is_set():
+                    self.logger.info("Stop event received while task pending, requeueing task.")
+                    # Requeue the task if stopping gracefully
+                    await task_queue.put(task_data)
+                    break
+
+                task_id = task_data.get('id', 'N/A')
+                self.logger.info(f"Dequeued internal task {task_id}: {task_data.get('action', 'Unknown Action')}")
+
+                # Execute task safely in the background (don't block queue processing)
+                # The handle_task method contains its own robust error handling.
+                asyncio.create_task(self.handle_task(task_data), name=f"{self.agent_name}_Task_{task_id}")
+                # task_queue.task_done() # Only needed for JoinableQueue
+
+            except asyncio.TimeoutError:
+                continue # No task received, loop and check stop event
+            except asyncio.CancelledError:
+                self.logger.info("Task queue processor cancelled.")
+                break
+            except Exception as e:
+                 # This catches errors in the queue logic itself (e.g., getting from queue)
+                 self.logger.error(f"Error in task queue processor: {e}", exc_info=True)
+                 self._status = self.STATUS_ERROR
+                 await self._report_error(f"Error in task queue processor: {e}")
+                 await asyncio.sleep(5) # Avoid tight loop on queue errors
+        self.logger.info("Internal task queue processor stopped.")
+
+    # --- Standard Utility Methods ---
+
+    def get_status_summary(self) -> dict:
+        """Returns a standardized status summary dictionary."""
+        queue_size = -1
+        task_queue = self.internal_state.get('task_queue')
+        if isinstance(task_queue, asyncio.Queue):
+            queue_size = task_queue.qsize()
 
         return {
             "agent": self.agent_name,
             "status": self.status,
-            "internal_queue_size": queue_size
-            }
-
-    async def collect_insights(self) -> Dict[str, Any]:
-        """
-        Provides a structured placeholder for agent insights.
-        Subclasses MUST override this to provide meaningful operational data.
-        """
-        self.logger.debug(f"Agent '{self.agent_name}' collect_insights called (base placeholder).")
-        return {
-            "agent_name": self.agent_name,
-            "status": self.status,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "key_observations": ["Base agent insight collection - override in subclass."],
-            "errors_encountered_count": 0, # Example metric subclasses should populate
-            "tasks_processed_count": 0 # Example metric
+            "current_task_id": self.internal_state.get("current_task_id"),
+            "queue_size": queue_size,
+            "tasks_processed_session": self.internal_state.get("tasks_processed_session", 0),
+            "errors_encountered_session": self.internal_state.get("errors_encountered_session", 0),
+            "last_error_ts": self.internal_state.get("last_error_ts"),
         }
 
-# --- End of agents/base_agent.py ---
+# --- End of agents/base_agent_prod.py ---
