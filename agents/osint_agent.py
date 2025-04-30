@@ -673,7 +673,6 @@
             # --- Other Tool Placeholders ---
             async def run_Photon(self, target_url: str) -> Dict: return {"error": "Photon not implemented"}
             async def run_Maltego(self, target: str) -> Dict: return {"error": "Maltego not implemented"}
-            async def run_DarkPoolSearch(self, target: str) -> Dict: return {"error": "Dark Pool Search not implemented/disabled"}
             async def run_WebcamSearch(self, target: str) -> Dict: return {"error": "Webcam Search not implemented/disabled"}
 
             # --- Analysis & Integration ---
