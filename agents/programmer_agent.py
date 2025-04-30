@@ -1,458 +1,492 @@
+Filename: agents/programmer_agent.py
+Description: Agent responsible for developing, maintaining, and refactoring codebase.
+Version: 1.1 (Implemented Core Logic, Planning, Execution)
+import asyncio
 import logging
-import os
 import json
-import asyncio # Added
-import random # Added
-import hashlib # Added
-import time # Added
-from datetime import datetime, timedelta, timezone # Added
-from typing import Dict, Any, Optional, List # Added List
-
-from agents.base_agent import BaseAgent
-# Using adaptable name for flexibility, assuming OpenAI compatible interface
-from openai import AsyncOpenAI as AsyncLLMClient # Added
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type # Added
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
+import os
+import shlex # For safe command splitting/quoting
+import hashlib
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union
+Assuming utils/database.py and models.py exist as provided
+from models import KnowledgeFragment # Add other models if needed
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.future import select
+from sqlalchemy import update, desc, func
+from sqlalchemy.exc import SQLAlchemyError
+Base Agent and LLM Client imports
+try:
+from .base_agent import GeniusAgentBase, KBInterface # Use relative import if applicable
+except ImportError:
+from base_agent import GeniusAgentBase, KBInterface # Fallback
+from openai import AsyncOpenAI as AsyncLLMClient # Standardized name
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+Configure logging
+logger = logging.getLogger(name)
+if not logger.hasHandlers():
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 PROGRAMMER_AGENT_META_PROMPT = """
 You are the ProgrammerAgent within the Synapse Genius Agentic AI System.
 Your Core Mandate: Develop, maintain, refactor, and adapt the agency's codebase with genius-level proficiency, efficiency, and foresight.
 Key Responsibilities:
-- Implement new agents and features based on specifications from ThinkTool/Orchestrator.
-- Refactor existing code for modularity, efficiency, robustness, and maintainability (e.g., BrowsingAgent).
-- Modify sandboxed agency instances for testing new business models (adding/removing/altering code).
-- Adhere to the highest coding standards (clean, testable, well-documented).
-- Plan your coding tasks meticulously (e.g., using a dedicated plan file or updates to Master_Plan.md).
-- Implement efficient coding techniques and caching strategies where applicable during development.
-- Ensure code quality and robustness through testing and validation.
-- Operate with Extreme Agentic Behavior: Anticipate coding needs, suggest architectural improvements, optimize performance proactively, and solve problems creatively.
-- Collaborate with other agents, especially ThinkTool for requirements and Orchestrator for tasking.
-- Save all code to files before execution via execute_command.
+Implement new agents and features based on specifications from ThinkTool/Orchestrator.
+Refactor existing code for modularity, efficiency, robustness, and maintainability.
+Modify sandboxed agency instances for testing new business models.
+Adhere to the highest coding standards (clean, testable, well-documented).
+Plan your coding tasks meticulously (e.g., using a dedicated plan file or updates to Master_Plan.md). Generate structured, step-by-step plans using available tools (read_file, apply_diff, execute_command, etc.).
+Implement efficient coding techniques and caching strategies where applicable.
+Ensure code quality and robustness through testing and validation (e.g., running linters/tests via execute_command).
+Operate with Extreme Agentic Behavior: Anticipate coding needs, suggest architectural improvements, optimize performance proactively, and solve problems creatively.
+Collaborate with other agents, especially ThinkTool for requirements and Orchestrator for tasking and tool execution.
+Save all code to files before execution via execute_command. Handle tool installation requests.
 """
+class ProgrammerAgent(GeniusAgentBase):
+"""
+Agent responsible for developing, maintaining, and refactoring the codebase.
+Embodies Genius Agentic AI principles for programming tasks.
+Version: 1.1
+"""
+AGENT_NAME = "ProgrammerAgent"
+def __init__(self, orchestrator: Any, session_maker: Optional[async_sessionmaker[AsyncSession]] = None):
+    """Initializes the ProgrammerAgent."""
+    super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, session_maker=session_maker)
+    # ProgrammerAgent might not directly need KB interface, relies on ThinkTool/Orchestrator
+    self.state = {"current_task_details": None, "coding_plan": None, "status": "idle"}
+    self.logger.info("ProgrammerAgent initialized.")
 
-class ProgrammerAgent(BaseAgent):
+async def execute_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Agent responsible for developing, maintaining, and refactoring the codebase.
-    Embodies Genius Agentic AI principles for programming tasks.
+    Executes a programming-related task by analyzing, planning, and using tools.
+    Handles standard coding tasks and specific 'install_tool' actions.
     """
-    def __init__(self, orchestrator):
-        super().__init__(orchestrator)
-        self.state = {"current_task": None, "plan": None, "status": "idle"}
-        self.logger = logger # Use module-level logger
-        self.logger.info("ProgrammerAgent initialized.")
-        # Potentially load or initialize planning file/mechanism here
+    task_description = task_details.get('description', 'No description provided.')
+    action = task_details.get('action', 'generic_code_task') # Default action
+    self.logger.info(f"ProgrammerAgent received task: {action} - {task_description}")
+    self.state["status"] = "working"
+    self.state["current_task_details"] = task_details
+    self.state["coding_plan"] = None # Reset plan for new task
+    result = {"status": "failure", "message": "Task initialization failed."}
 
-    async def execute_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Executes a programming-related task based on the provided details using LLM calls.
-        """
-        task_description = task_details.get('description', 'No description provided.')
-        self.logger.info(f"ProgrammerAgent received task: {task_description}")
-        self.state["status"] = "working"
-        result = {"status": "failure", "message": "Task initialization failed."}
-        file_path = task_details.get('file_path')
+    # --- Structured Thinking: Initial Task Assessment ---
+    initial_thought = f"""
+    Structured Thinking: Assess Task '{action}'
+    1. Goal: Fulfill programming task: {task_description}.
+    2. Context: Task details: {json.dumps(task_details)}. Current project state via Orchestrator context (files, etc.).
+    3. Constraints: Use Orchestrator tools. Adhere to coding standards. Generate plan first. Handle 'install_tool' specifically.
+    4. Information Needed: Potentially file contents, existing code structure.
+    5. Plan:
+        a. If action=='install_tool', execute installation directly.
+        b. Otherwise, analyze request via LLM.
+        c. Get necessary file context via Orchestrator 'read_file'.
+        d. Generate detailed coding plan via _create_coding_plan (LLM).
+        e. Execute plan via _execute_coding_plan (Orchestrator tools).
+        f. Return execution result.
+    """
+    await self._internal_think(initial_thought)
+    # --- End Structured Thinking ---
 
-        try:
-            # 1. Analyze Request & Get Context
+    try:
+        if action == 'install_tool':
+            # Handle tool installation directly
+            result = await self._handle_tool_installation(task_details)
+        else:
+            # --- Standard Coding Task Flow ---
+            # 1. Analyze Request & Get Context (using LLM via helper)
             self.logger.debug("Analyzing programming task request...")
-            analysis_prompt = f"Analyze this programming task: {json.dumps(task_details)}. Identify target file(s), relevant code sections, and clarify requirements. If a file_path is provided, what context is needed?"
-            analysis_result_str = await self._call_llm_with_retry(analysis_prompt, max_tokens=500)
-            # TODO: Parse analysis_result_str to guide next steps (e.g., identify specific lines needed)
+            analysis_prompt = f"Analyze this programming task: {json.dumps(task_details)}. Identify target file(s), relevant code sections, dependencies, and clarify requirements. What context (specific files/lines) is needed to proceed?"
+            analysis_result_str = await self._call_llm_with_retry(analysis_prompt, max_tokens=500, temperature=0.2)
+            # TODO: Parse analysis_result_str to intelligently fetch context if needed
+            self.logger.info(f"Task Analysis Result: {analysis_result_str}")
 
+            # 2. Get File Context (Example - refine based on analysis)
+            file_path = task_details.get('file_path') # Example: if a primary file is specified
             file_content = None
-            if file_path and hasattr(self.orchestrator, 'read_file'):
+            if file_path and self.orchestrator and hasattr(self.orchestrator, 'use_tool'):
                  try:
                      self.logger.debug(f"Reading file context: {file_path}")
-                     # TODO: Potentially use analysis_result_str to read only specific lines if needed
-                     file_content_result = await self.orchestrator.use_tool('read_file', {'path': file_path})
-                     if file_content_result and file_content_result.get('status') == 'success':
-                         file_content = file_content_result.get('content')
+                     # Use orchestrator's tool mechanism
+                     read_result = await self.orchestrator.use_tool('read_file', {'path': file_path}) # Assuming use_tool exists
+                     if read_result and read_result.get('status') == 'success':
+                         file_content = read_result.get('content')
                          self.logger.info(f"Successfully read content from: {file_path}")
-                     else:
-                         read_err_msg = file_content_result.get('message', 'Unknown read error')
-                         self.logger.warning(f"Could not read file {file_path}: {read_err_msg}")
-                         # Decide if task can proceed without file content
-                 except Exception as read_err:
-                     self.logger.warning(f"Exception during file read {file_path}: {read_err}", exc_info=True)
-                     # Decide if task can proceed without file content
+                     else: self.logger.warning(f"Could not read file {file_path}: {read_result.get('message')}")
+                 except Exception as read_err: self.logger.warning(f"Exception during file read {file_path}: {read_err}", exc_info=True)
 
-            # 2. Plan Changes
-            self.logger.debug("Planning code modifications...")
-            planning_prompt = f"Based on task '{task_description}' and analysis '{analysis_result_str}', create a plan to modify file '{file_path}'. Context:\n{file_content or 'N/A'}"
-            plan_result_str = await self._call_llm_with_retry(planning_prompt, max_tokens=500)
-            # TODO: Parse plan_result_str into actionable steps if needed, or use directly in diff prompt
+            # 3. Create Plan (using LLM via helper)
+            self.state["coding_plan"] = await self._create_coding_plan(task_details, analysis_result_str, file_content)
 
-            # 3. Generate Code Diff
-            self.logger.debug("Generating code diff via LLM...")
-            diff_prompt = f"""
-            {PROGRAMMER_AGENT_META_PROMPT}
-            **Task:** Generate code modifications in unified diff format for file '{file_path}' based on the plan: {plan_result_str}.
-            **Request:** {task_description}
-            **Current File Context:**
-            ```
-            {file_content or 'File content not available.'}
-            ```
-            **Output:** Provide ONLY the diff block starting with '--- a/' or '+++ b/' or similar, enclosed in ```diff ... ```. Ensure correct line numbers (:start_line:) are included if modifying existing code. If creating a new file, provide the full file content instead of a diff.
-            """
-            # Use lower temperature for more deterministic code generation
-            generated_diff_str = await self._call_llm_with_retry(diff_prompt, max_tokens=2048, temperature=0.3)
-
-            if not generated_diff_str:
-                 raise ValueError("LLM did not generate any output for the diff.")
-
-            diff_content = None
-            # Extract diff content (simple extraction, might need refinement)
-            if '```diff' in generated_diff_str:
-                diff_content = generated_diff_str.split('```diff')[1].split('```')[0].strip()
-                # Basic format check/correction
-                if not diff_content.startswith(('--- a/', '+++ b/')):
-                    diff_start_index = diff_content.find('--- a/')
-                    if diff_start_index != -1:
-                        diff_content = diff_content[diff_start_index:]
-                    else:
-                        # Maybe it's just adding lines? Check for '+++ b/'
-                        diff_start_index_add = diff_content.find('+++ b/')
-                        if diff_start_index_add != -1:
-                             diff_content = diff_content[diff_start_index_add:]
-                        else:
-                             # If it doesn't look like a diff, maybe it's full content for a new file?
-                             # Or maybe the LLM failed the format. Log warning and proceed cautiously.
-                             self.logger.warning("Generated content doesn't strictly follow diff format. Assuming full content or malformed diff.")
-                             # Keep diff_content as is for now, apply_diff might handle it or fail.
-            elif file_path and not os.path.exists(file_path): # Check if file exists (needs os import)
-                 # If file doesn't exist and output isn't a diff, assume it's full content for new file
-                 self.logger.info(f"Target file {file_path} doesn't exist. Assuming LLM generated full content.")
-                 diff_content = generated_diff_str # Use the whole output
-                 # TODO: Consider using write_to_file tool instead of apply_diff for new files
+            # 4. Execute Plan (using Orchestrator tools via helper)
+            if self.state["coding_plan"]:
+                result = await self._execute_coding_plan()
             else:
-                 # No diff block found, and file exists or path not specified
-                 raise ValueError("LLM did not generate a valid diff block (```diff ... ```).")
+                result = {"status": "failure", "message": "Failed to create a coding plan."}
 
+    except Exception as e:
+        self.logger.error(f"Error executing programming task '{task_description}': {e}", exc_info=True)
+        result = {"status": "failure", "message": f"Failed to execute task: {e}"}
 
-            # 4. Apply Changes
-            files_modified = []
-            apply_success = False
-            if file_path and diff_content and hasattr(self.orchestrator, 'use_tool'):
-                self.logger.info(f"Attempting to apply diff to {file_path}")
-                try:
-                    # Use orchestrator's tool mechanism
-                    apply_result = await self.orchestrator.use_tool(
-                        'apply_diff',
-                        {'path': file_path, 'diff': diff_content}
-                    )
+    finally:
+        self.state["status"] = "idle"
+        self.state["current_task_details"] = None
+        # Don't clear plan, might be useful for insights
+        self.logger.info(f"ProgrammerAgent finished task: {task_description}. Status: {result.get('status', 'failure')}")
+        # Log task outcome to KB
+        await self.log_knowledge_fragment(
+            agent_source=self.AGENT_NAME,
+            data_type="task_outcome",
+            content={"task": task_description, "action": action, "result": result},
+            tags=["task_execution", result.get('status', 'failure')],
+            relevance_score=0.8 if result.get('status') == 'success' else 0.6
+        )
+    return result
 
-                    if apply_result and apply_result.get('status') == 'success':
-                        apply_success = True
-                        files_modified.append(file_path)
-                        self.logger.info(f"Successfully applied diff to {file_path}")
-                        # Store the applied diff in the result
-                        result["diff_applied"] = diff_content
-                    else:
-                        error_msg = apply_result.get('message', 'Unknown apply_diff error')
-                        self.logger.error(f"Failed to apply diff to {file_path}: {error_msg}")
-                        result["message"] = f"Generated diff but failed to apply: {error_msg}"
-                        # Include the generated diff in the error message for debugging
-                        result["generated_diff_for_error"] = diff_content
+async def _handle_tool_installation(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+    """Handles the specific task of installing a tool."""
+    tool_name = task_details.get('tool_name')
+    package_manager = task_details.get('package_manager', 'apt')
+    package_name = task_details.get('package_name')
+    git_repo = task_details.get('git_repo')
+    self.logger.info(f"Handling installation request for tool: {tool_name}")
 
-                except Exception as apply_err:
-                    self.logger.error(f"Exception during apply_diff call for {file_path}: {apply_err}", exc_info=True)
-                    result["message"] = f"Generated diff but failed to apply (exception): {apply_err}"
-                    result["generated_diff_for_error"] = diff_content
-                    # Keep apply_success as False
-            elif not file_path:
-                 result["message"] = "Cannot apply diff: file_path not provided."
-            elif not diff_content:
-                 result["message"] = "Cannot apply diff: No valid diff content generated or extracted."
-            else:
-                 result["message"] = "Cannot apply diff: Orchestrator missing use_tool method."
+    if not tool_name or not (package_name or git_repo):
+        return {"status": "failure", "message": "Missing tool name, package name, or git repo for installation."}
 
+    command = None
+    if git_repo:
+        # Assumes standard python setup.py install for git repos
+        # TODO: Make this more robust based on repo structure if possible
+        clone_dir = f"/tmp/{tool_name}_{uuid.uuid4().hex[:6]}"
+        command = f"git clone {shlex.quote(git_repo)} {shlex.quote(clone_dir)} && cd {shlex.quote(clone_dir)} && python3 setup.py install && cd / && rm -rf {shlex.quote(clone_dir)}"
+    elif package_manager == 'apt':
+        command = f"sudo apt-get update && sudo apt-get install -y {shlex.quote(package_name)}"
+    elif package_manager == 'pip':
+        command = f"pip3 install --user {shlex.quote(package_name)}" # Install to user site-packages
+    else:
+        return {"status": "failure", "message": f"Unsupported package manager: {package_manager}"}
 
-            # 5. Verification (Placeholder)
-            if apply_success:
-                self.logger.debug("Skipping code verification (placeholder).")
-                # TODO: Implement Linting/Testing via self.orchestrator.use_tool('execute_command', ...)
-
-                result = {
-                    "status": "success",
-                    "message": f"Successfully applied generated changes for task: {task_description}",
-                    "files_modified": files_modified,
-                    "diff_applied": result.get("diff_applied", diff_content) # Ensure diff is included
-                }
-            # else: result message already set in apply_diff error handling or initial value
-
-        except Exception as e:
-            self.logger.error(f"Error executing programming task '{task_description}': {e}", exc_info=True)
-            result["status"] = "failure"
-            # Avoid overwriting more specific error messages if already set
-            if result.get("message") == "Task initialization failed.":
-                 result["message"] = f"Failed to execute task: {e}"
-
-        finally:
-            self.state["status"] = "idle"
-            self.logger.info(f"ProgrammerAgent finished task: {task_description}. Status: {result['status']}")
-            return result
-
-    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=4, max=30), retry=retry_if_exception_type(Exception))
-    async def _call_llm_with_retry(self, prompt: str, model_preference: Optional[List[str]] = None, temperature: float = 0.5, max_tokens: int = 1024, is_json_output: bool = False) -> Optional[str]:
+    if command and self.orchestrator and hasattr(self.orchestrator, 'use_tool'):
+        self.logger.info(f"Executing installation command: {command}")
+        # --- Structured Thinking Step ---
+        install_thought = f"""
+        Structured Thinking: Execute Tool Installation
+        1. Goal: Install tool '{tool_name}' using {package_manager}.
+        2. Context: Command generated: '{command}'.
+        3. Constraints: Use Orchestrator's execute_command tool. Handle potential errors.
+        4. Information Needed: None additional.
+        5. Plan: Call use_tool('execute_command'). Check result status. Return success/failure.
         """
-        Centralized method for calling LLMs via the Orchestrator.
-        Handles client selection, retries, error reporting, and JSON formatting.
-        Adapted from ThinkTool.
-        """
-        llm_client: Optional[AsyncLLMClient] = None
-        model_name: Optional[str] = None
-        api_key_identifier: str = "unknown_key" # For logging/reporting issues
-
+        await self._internal_think(install_thought)
+        # --- End Structured Thinking Step ---
         try:
-            # --- Caching Logic: Check Cache First ---
-            prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-            # Determine model name early for cache key consistency
-            # TODO: Get default model from orchestrator config if possible
-            default_model = "google/gemini-pro" # Placeholder default for programmer
-            # TODO: Refine model selection based on model_preference if provided and stable
-            model_name_for_cache = default_model # Use the determined model for the cache key
-
-            cache_key_parts = [
-                "llm_call",
-                prompt_hash,
-                model_name_for_cache, # Include model name
-                str(temperature),
-                str(max_tokens),
-                str(is_json_output),
-            ]
-            cache_key = ":".join(cache_key_parts)
-            cache_ttl = 3600 # Default 1 hour TTL for LLM calls
-
-            # Check cache first
-            if hasattr(self.orchestrator, 'get_from_cache'):
-                cached_result = self.orchestrator.get_from_cache(cache_key)
-                if cached_result is not None:
-                    self.logger.debug(f"LLM call cache hit for key: {cache_key[:20]}...{cache_key[-20:]}")
-                    return cached_result # Return cached value
-                else:
-                    self.logger.debug(f"LLM call cache miss for key: {cache_key[:20]}...{cache_key[-20:]}")
+            exec_result = await self.orchestrator.use_tool('execute_command', {'command': command})
+            if exec_result and exec_result.get('status') == 'success':
+                self.logger.info(f"Successfully executed installation command for {tool_name}.")
+                return {"status": "success", "message": f"Installation command for {tool_name} executed."}
             else:
-                self.logger.warning("Orchestrator does not have 'get_from_cache' method. Skipping cache check.")
-            # --- End Cache Check ---
+                error_msg = exec_result.get('message', exec_result.get('stderr', 'Unknown execution error'))
+                self.logger.error(f"Installation command failed for {tool_name}: {error_msg}")
+                return {"status": "failure", "message": f"Installation command failed: {error_msg}"}
+        except Exception as exec_err:
+            self.logger.error(f"Exception during installation command execution for {tool_name}: {exec_err}", exc_info=True)
+            return {"status": "failure", "message": f"Exception during installation: {exec_err}"}
+    else:
+        return {"status": "failure", "message": "Orchestrator tool execution unavailable."}
 
-            # 1. Get available clients from Orchestrator
-            available_clients = await self.orchestrator.get_available_openrouter_clients()
-            if not available_clients:
-                self.logger.error("ProgrammerAgent: No available LLM clients from Orchestrator.")
-                return None
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
+async def _call_llm_with_retry(self, prompt: str, model_preference: Optional[List[str]] = None, temperature: float = 0.5, max_tokens: int = 1024, is_json_output: bool = False) -> Optional[str]:
+    """Centralized method for calling LLMs via the Orchestrator."""
+    if not self.orchestrator or not hasattr(self.orchestrator, 'call_llm'):
+        self.logger.error("Orchestrator or its call_llm method is unavailable.")
+        return None
+    try:
+        # Delegate the call to the orchestrator
+        response_content = await self.orchestrator.call_llm(
+            agent_name=self.AGENT_NAME, prompt=prompt, temperature=temperature,
+            max_tokens=max_tokens, is_json_output=is_json_output, model_preference=model_preference
+        )
+        return response_content
+    except Exception as e:
+        self.logger.error(f"Error occurred calling LLM via orchestrator: {e}", exc_info=True)
+        raise # Re-raise for tenacity
 
-            # TODO: Implement smarter client/model selection
-            llm_client = random.choice(available_clients)
-            api_key_identifier = getattr(llm_client, 'api_key', 'unknown_key')[-6:] # Log last 6 chars
+async def _create_coding_plan(self, task_details: Dict[str, Any], analysis_result_str: Optional[str], file_content: Optional[str]) -> Optional[List[Dict]]:
+    """Creates a detailed step-by-step coding plan using an LLM."""
+    self.logger.info("Generating coding plan via LLM...")
+    # --- Structured Thinking Step ---
+    plan_gen_thought = f"""
+    Structured Thinking: Create Coding Plan
+    1. Goal: Generate a detailed, sequential plan (list of tool calls) to fulfill the programming task.
+    2. Context: Task details, LLM analysis of task, relevant file content (if provided). Available tools: read_file, apply_diff, write_to_file, insert_content, search_and_replace, execute_command, search_files, list_files.
+    3. Constraints: Plan must be a JSON list of steps. Each step needs 'action', 'tool', 'params'. Steps must be logical and sequential.
+    4. Information Needed: Task requirements, analysis insights, code context.
+    5. Plan: Formulate LLM prompt asking for the JSON plan. Call LLM. Parse JSON response. Return plan or None on failure.
+    """
+    await self._internal_think(plan_gen_thought)
+    # --- End Structured Thinking Step ---
 
-            # 2. Determine model name
-            model_name = model_name_for_cache
+    planning_prompt = f"""
+    {PROGRAMMER_AGENT_META_PROMPT[:500]}... # Include meta prompt context
 
-            # 3. Prepare request arguments
-            response_format = {"type": "json_object"} if is_json_output else None
-            messages = [{"role": "user", "content": prompt}]
+    **Task:** Create a detailed, step-by-step execution plan to accomplish the following programming task.
 
-            self.logger.debug(f"ProgrammerAgent LLM Call (Cache Miss): Model={model_name}, Temp={temperature}, MaxTokens={max_tokens}, JSON={is_json_output}, Key=...{api_key_identifier}")
+    **Programming Task Details:**
+    {json.dumps(task_details, indent=2)}
 
-            # 4. Make the API call
-            response = await llm_client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format=response_format,
-                timeout=120 # Increased timeout for potentially longer code generation
-            )
+    **Initial Analysis:**
+    {analysis_result_str or 'N/A'}
 
-            content = response.choices[0].message.content.strip()
+    **Relevant File Context (if available):**
+    ```
+    {file_content or 'N/A'}
+    ```
 
-            # --- Token Tracking & Cost Estimation (Placeholder) ---
-            input_tokens_est = len(prompt) // 4 # Rough estimate
-            output_tokens = 0
-            try:
-                if response.usage and response.usage.completion_tokens:
-                    output_tokens = response.usage.completion_tokens
-                    if response.usage.prompt_tokens:
-                        input_tokens_est = response.usage.prompt_tokens
-                else:
-                     output_tokens = len(content) // 4
-            except AttributeError:
-                 output_tokens = len(content) // 4
+    **Available Tools:** read_file, apply_diff, write_to_file, insert_content, search_and_replace, execute_command, search_files, list_files.
 
-            total_tokens_est = input_tokens_est + output_tokens
-            estimated_cost = total_tokens_est * 0.000001 # Placeholder cost
-            self.logger.debug(f"LLM Call Est. Tokens: ~{total_tokens_est} (In: {input_tokens_est}, Out: {output_tokens}). Est. Cost: ${estimated_cost:.6f}")
-            # --- End Token Tracking ---
+    **Instructions:**
+    Generate a plan as a JSON list of dictionaries. Each dictionary represents a step and MUST contain:
+    - "step" (int): Sequential step number starting from 1.
+    - "action" (str): A brief description of what the step does (e.g., "Read main function", "Apply refactoring diff", "Run unit tests").
+    - "tool" (str): The exact name of the Orchestrator tool to use for this step (e.g., "read_file", "apply_diff", "execute_command").
+    - "params" (dict): A dictionary of parameters required by the specified tool (e.g., {{"path": "/path/to/file.py", "diff": "..."}}, {{"command": "pytest"}}).
 
-            # --- Report Expense ---
-            if estimated_cost > 0 and hasattr(self.orchestrator, 'report_expense'):
-                try:
-                    await self.orchestrator.report_expense(
-                        agent_name="ProgrammerAgent",
-                        amount=estimated_cost,
-                        category="LLM",
-                        description=f"LLM call ({model_name or 'unknown_model'}). Estimated tokens: {total_tokens_est}."
-                    )
-                except Exception as report_err:
-                    self.logger.error(f"Failed to report LLM expense: {report_err}", exc_info=True)
-            # --- End Report Expense ---
+    The plan should be logical, sequential, and cover all necessary actions including context gathering, code modification, and verification (if applicable). Ensure parameters like file paths are correct relative to the project structure.
 
-            # --- Caching Logic: Add to Cache on Success ---
-            if content and hasattr(self.orchestrator, 'add_to_cache'):
-                self.orchestrator.add_to_cache(cache_key, content, ttl_seconds=cache_ttl)
-                self.logger.debug(f"Added LLM result to cache for key: {cache_key[:20]}...{cache_key[-20:]}")
-            elif not hasattr(self.orchestrator, 'add_to_cache'):
-                self.logger.warning("Orchestrator does not have 'add_to_cache' method. Skipping caching result.")
-            # --- End Add to Cache ---
+    **Output:** Respond ONLY with the valid JSON list representing the plan. Do not include any other text, preamble, or explanation.
+    ```json
+    [
+      {{ "step": 1, "action": "...", "tool": "...", "params": {{...}} }},
+      {{ "step": 2, "action": "...", "tool": "...", "params": {{...}} }}
+    ]
+    ```
+    """
+    plan_json_str = await self._call_llm_with_retry(planning_prompt, max_tokens=1500, temperature=0.2, is_json_output=True)
 
-            return content
-
-        except Exception as e:
-            error_str = str(e).lower()
-            issue_type = "llm_error"
-            if "rate limit" in error_str or "quota" in error_str: issue_type = "rate_limit"
-            elif "authentication" in error_str: issue_type = "auth_error"
-            elif "timeout" in error_str: issue_type = "timeout_error"
-
-            self.logger.warning(f"ProgrammerAgent LLM call failed (attempt): Model={model_name}, Key=...{api_key_identifier}, ErrorType={issue_type}, Error={e}")
-
-            # Report issue back to orchestrator
-            if llm_client and hasattr(self.orchestrator, 'report_client_issue'):
-                 await self.orchestrator.report_client_issue(api_key_identifier, issue_type)
-
-            raise # Reraise exception for tenacity retry logic
-
-        # Fallback
-        self.logger.error(f"ProgrammerAgent LLM call failed after all retries: Model={model_name}, Key=...{api_key_identifier}")
+    if plan_json_str:
+        try:
+            # Find JSON array if nested
+            json_start = plan_json_str.find('[')
+            json_end = plan_json_str.rfind(']') + 1
+            if json_start != -1 and json_end != -1:
+                 plan_list = json.loads(plan_json_str[json_start:json_end])
+                 if isinstance(plan_list, list) and all(isinstance(step, dict) and 'step' in step and 'action' in step and 'tool' in step and 'params' in step for step in plan_list):
+                     # Add status to each step
+                     for step in plan_list: step['status'] = 'pending'
+                     self.logger.info(f"Successfully generated coding plan with {len(plan_list)} steps.")
+                     return plan_list
+                 else:
+                      raise ValueError("LLM response is not a valid list of step dictionaries.")
+            else:
+                 raise ValueError("Could not find JSON array in LLM response.")
+        except (json.JSONDecodeError, ValueError) as e:
+            self.logger.error(f"Failed to parse LLM coding plan: {e}. Response: {plan_json_str[:500]}...")
+            return None
+    else:
+        self.logger.error("LLM failed to generate a coding plan.")
         return None
 
-    def _create_coding_plan(self, task_details):
-        """
-        Analyzes the task and creates a detailed step-by-step plan.
-        Placeholder implementation. Should involve LLM call with context.
-        """
-        # --- LLM-Based Planning ---
-        logger.info("Intending to use LLM for detailed coding plan generation.")
-        # 1. Formulate the prompt for the planning LLM.
-        #    This should include:
-        #    - PROGRAMMER_AGENT_META_PROMPT
-        #    - task_details (description, requirements, constraints)
-        #    - Relevant code context (e.g., read relevant files using orchestrator.use_tool('read_file', ...))
-        #    - Instructions to output a structured plan (e.g., JSON list of steps with 'action', 'tool', 'params', 'file_path', etc.)
-        # Example prompt formulation (conceptual):
-        # planning_prompt = f"{PROGRAMMER_AGENT_META_PROMPT}\n\nTask: {task_details}\n\nRelevant Code:\n{code_context}\n\nGenerate a step-by-step plan..."
+async def _execute_coding_plan(self) -> Dict[str, Any]:
+    """Executes the steps defined in the coding plan using Orchestrator tools."""
+    self.logger.info("Starting execution of the coding plan.")
+    if not self.state["coding_plan"] or not isinstance(self.state["coding_plan"], list):
+        self.logger.error("Execution attempted without a valid coding plan.")
+        return {"status": "failure", "message": "No valid coding plan available."}
 
-        # 2. (Simulated) Call the LLM via Orchestrator or a dedicated service.
-        #    llm_response = await self.orchestrator.call_llm(model="planning_model", prompt=planning_prompt)
-        #    parsed_plan = self._parse_llm_plan(llm_response) # Function to parse JSON/structured text
+    execution_results = []
+    all_steps_successful = True
+    plan_halted = False
+    last_tool_output = None # Store output for potential verification steps
 
-        # 3. Use a placeholder plan for now, simulating the LLM output structure.
-        logger.warning("Using placeholder plan instead of actual LLM call for _create_coding_plan")
-        plan = [
-            {"step": 1, "action": "Read relevant file", "tool": "read_file", "params": {"path": "agents/example_agent.py"}, "status": "pending"},
-            {"step": 2, "action": "Apply specific code change", "tool": "apply_diff", "params": {"path": "agents/example_agent.py", "diff": "<diff_content>"}, "status": "pending"},
-            {"step": 3, "action": "Search for usage examples", "tool": "search_files", "params": {"path": "./", "regex": "ExampleClass\\(", "file_pattern": "*.py"}, "status": "pending"},
-            {"step": 4, "action": "Run tests", "tool": "execute_command", "params": {"command": "pytest tests/test_example_agent.py"}, "status": "pending"},
-            {"step": 5, "action": "Write updated file content", "tool": "write_to_file", "params": {"path": "agents/new_module.py", "content": "# New content...", "line_count": 10}, "status": "pending"},
-        ]
-        # TODO: Replace placeholder with actual LLM interaction and parsing.
-        return plan
+    for step in self.state["coding_plan"]:
+        if plan_halted:
+            step["status"] = "skipped"
+            continue
 
-    async def _execute_coding_plan(self):
-        """
-        Executes the steps defined in the coding plan using available tools.
-        Placeholder implementation.
-        """
-        logger.info("Starting execution of the coding plan.")
-        if not self.state["plan"]:
-            logger.error("Execution attempted without a plan.")
-            raise ValueError("No coding plan available to execute.")
+        if step.get("status") == "pending":
+            step_num = step.get("step", "?")
+            action_desc = step.get("action", "Unknown action")
+            tool_name = step.get("tool")
+            tool_params = step.get("params", {})
 
-        execution_results = []
-        all_steps_successful = True
+            if not tool_name:
+                self.logger.warning(f"Step {step_num} ('{action_desc}') does not specify a tool. Skipping.")
+                step["status"] = "skipped"
+                execution_results.append({"step": step_num, "status": "skipped", "details": "No tool specified."})
+                continue
 
-        for step in self.state["plan"]:
-            if step["status"] == "pending":
-                logger.info(f"Executing Step {step['step']}: {step['action']} using tool '{step.get('tool', 'N/A')}'")
-                try:
-                    # --- Tool Selection Logic ---
-                    # The plan should ideally specify the tool and parameters directly.
-                    tool_name = step.get("tool")
-                    tool_params = step.get("params", {})
+            # --- Structured Thinking Step (Before Tool Call) ---
+            pre_tool_thought = f"""
+            Structured Thinking: Execute Plan Step {step_num}
+            1. Goal: Execute action '{action_desc}' using tool '{tool_name}'.
+            2. Context: Parameters: {tool_params}. Previous step output (if any): {str(last_tool_output)[:100]}...
+            3. Constraints: Must use Orchestrator.use_tool. Handle potential errors.
+            4. Information Needed: Tool parameters are provided in the plan.
+            5. Plan: Call orchestrator.use_tool('{tool_name}', {tool_params}). Process result. Update step status. Check for verification needs.
+            """
+            await self._internal_think(pre_tool_thought)
+            # --- End Structured Thinking Step ---
 
-                    if not tool_name:
-                        logger.warning(f"Step {step['step']} does not specify a tool. Skipping.")
-                        step["status"] = "skipped"
-                        continue
+            self.logger.info(f"Executing Step {step_num}: {action_desc} using tool '{tool_name}'")
+            observation = None # Reset observation
+            try:
+                if not self.orchestrator or not hasattr(self.orchestrator, 'use_tool'):
+                     raise RuntimeError("Orchestrator tool execution is unavailable.")
 
-                    # --- Simulated Tool Call ---
-                    logger.debug(f"Simulating call to tool '{tool_name}' with params: {tool_params}")
-                    # observation = await self.orchestrator.use_tool(tool_name, tool_params)
-                    # logger.debug(f"Simulated Observation received: {observation}") # Placeholder for actual result
+                observation = await self.orchestrator.use_tool(tool_name, tool_params)
+                last_tool_output = observation # Store for next step's context/verification
+                self.logger.debug(f"Tool '{tool_name}' observation received: {str(observation)[:200]}...")
 
-                    # --- Process Observation (Simulated) ---
-                    # Check observation for errors or extract necessary data for subsequent steps.
-                    # Example: If observation indicates failure:
-                    # if observation.get("status") == "error":
-                    #     raise ToolExecutionError(f"Tool '{tool_name}' failed: {observation.get('details')}")
-                    # Example: If reading a file, store content:
-                    # if tool_name == 'read_file':
-                    #     self.state['last_read_content'] = observation.get('content')
-
-                    # --- Update Step Status ---
+                # Process Observation
+                if observation and observation.get("status") == "success":
                     step["status"] = "done"
-                    execution_results.append({"step": step['step'], "status": "success"})
-                    await self.orchestrator.notify_user(f"ProgrammerAgent: Completed step {step['step']}: {step['action']}")
+                    execution_results.append({"step": step_num, "status": "success", "output_preview": str(observation.get('content', observation.get('stdout', 'OK')))[:100]})
+                    self.logger.info(f"Step {step_num} completed successfully.")
+                    # Optional: Log successful output as KB fragment if significant
+                    # await self.log_knowledge_fragment(...)
 
-                except Exception as e: # Simulate catching tool execution errors
-                    logger.error(f"Error executing step {step['step']}: {step['action']}. Error: {e}", exc_info=True)
-                    step["status"] = "error"
-                    all_steps_successful = False
-                    execution_results.append({"step": step['step'], "status": "error", "details": str(e)})
-                    # Decide on error handling: stop execution, try alternative, or notify orchestrator?
-                    # For now, we'll log and continue, but mark the overall execution as failed.
-                    await self.orchestrator.notify_user(f"ProgrammerAgent: Failed step {step['step']}: {step['action']}. Error: {e}")
-                    # break # Optionally stop execution on first error
+                    # --- Code Verification Logic ---
+                    if tool_name == 'execute_command' and ('pytest' in tool_params.get('command', '') or 'eslint' in tool_params.get('command', '') or 'flake8' in tool_params.get('command', '')):
+                         return_code = observation.get('returncode', 0)
+                         stdout = observation.get('stdout', '')
+                         stderr = observation.get('stderr', '')
+                         if return_code != 0:
+                              verification_failed_msg = f"Verification failed (Step {step_num}): Command '{tool_params.get('command')}' exited with code {return_code}. Stderr: {stderr[:500]}"
+                              self.logger.error(verification_failed_msg)
+                              step["status"] = "verification_failed" # Special status
+                              execution_results[-1]["status"] = "verification_failed" # Update last result
+                              execution_results[-1]["details"] = verification_failed_msg
+                              all_steps_successful = False
+                              plan_halted = True # Stop execution after verification failure
+                              # TODO: Trigger self-correction? For now, just halt.
+                              # await self.orchestrator.report_error(self.AGENT_NAME, verification_failed_msg)
+                         else:
+                              self.logger.info(f"Verification successful (Step {step_num}): Command '{tool_params.get('command')}' passed.")
+                    # --- End Code Verification ---
 
-            elif step["status"] == "done":
-                logger.debug(f"Step {step['step']} already done.")
-            else:
-                logger.warning(f"Step {step['step']} has unexpected status: {step['status']}")
+                else: # Tool execution failed
+                    error_details = observation.get('message', observation.get('stderr', 'Unknown tool error'))
+                    raise RuntimeError(f"Tool '{tool_name}' failed: {error_details}")
 
-        # --- Final Result ---
-        final_status = "success" if all_steps_successful else "error"
-        logger.info(f"Coding plan execution finished with status: {final_status}")
-        # Collect artifacts (e.g., paths of modified/created files) based on successful steps
-        artifacts = [p['params']['path'] for p in self.state['plan'] if p.get('tool') in ['apply_diff', 'write_to_file'] and p['status'] == 'done'] # Example artifact collection
+            except Exception as e:
+                self.logger.error(f"Error executing step {step_num}: {action_desc}. Error: {e}", exc_info=True)
+                step["status"] = "error"
+                all_steps_successful = False
+                plan_halted = True # Stop execution on error
+                error_detail_str = str(e)
+                execution_results.append({"step": step_num, "status": "error", "details": error_detail_str})
+                # Report error to orchestrator
+                if self.orchestrator: await self.orchestrator.report_error(self.AGENT_NAME, f"Error in coding plan step {step_num} ({action_desc}): {error_detail_str}")
+                # break # Stop plan execution on first error
 
-        return {"status": final_status, "details": execution_results, "artifacts": artifacts}
+        elif step.get("status") == "done":
+            self.logger.debug(f"Step {step['step']} already done.")
+        elif step.get("status") == "skipped":
+             self.logger.debug(f"Step {step['step']} was skipped.")
+        elif step.get("status") == "verification_failed":
+             self.logger.warning(f"Step {step['step']} previously failed verification.")
+             plan_halted = True # Ensure plan stops if resuming after verification failure
+        else:
+            self.logger.warning(f"Step {step.get('step', '?')} has unexpected status: {step.get('status')}")
 
-    def get_status(self):
-        """Returns the current status of the agent."""
-        return self.state
+    # --- Final Result ---
+    final_status = "success" if all_steps_successful else ("verification_failed" if any(s.get('status') == 'verification_failed' for s in self.state["coding_plan"]) else "error")
+    self.logger.info(f"Coding plan execution finished with overall status: {final_status}")
+    # Collect artifacts (paths of modified/created files from successful steps)
+    artifacts = [
+        step['params']['path'] for step in self.state["coding_plan"]
+        if step.get('tool') in ['apply_diff', 'write_to_file', 'insert_content', 'search_and_replace']
+        and step.get('status') == 'done'
+        and 'path' in step.get('params', {})
+    ]
 
-    async def collect_insights(self) -> Dict[str, Any]:
-        """
-        Placeholder implementation for collecting insights from ProgrammerAgent.
-        (Required by BaseAgent).
+    return {"status": final_status, "message": f"Plan execution finished with status: {final_status}", "details": execution_results, "artifacts": sorted(list(set(artifacts)))}
 
-        Returns:
-            Dict[str, Any]: A dictionary containing placeholder insights.
-        """
-        # TODO: Implement actual insight collection logic.
-        # This could include: recent task outcomes, common errors, code quality metrics, etc.
-        self.logger.debug("ProgrammerAgent collect_insights called (placeholder).")
-        return {
-            "agent_name": "ProgrammerAgent",
-            "status": "placeholder",
-            "recent_tasks_count": 0,
-            "errors_encountered": [],
-            "key_observations": ["Placeholder insight collection."]
-        }
-# Example usage (within Orchestrator or main loop):
-# programmer = ProgrammerAgent(orchestrator_instance)
-# task = {"description": "Refactor agents/browsing_agent.py", "details": {...}}
-# result = await programmer.execute_task(task)
+async def collect_insights(self) -> Dict[str, Any]:
+    """Reports on recent task outcomes and common errors."""
+    self.logger.debug("ProgrammerAgent collect_insights called.")
+    insights = {
+        "agent_name": self.AGENT_NAME,
+        "status": self.status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "recent_tasks_count": 0,
+        "success_rate_pct": 0.0,
+        "common_error_types": [],
+        "refactoring_opportunities_identified": 0, # Placeholder
+        "key_observations": []
+    }
+    try:
+        # Query recent task outcomes logged by this agent
+        time_window = timedelta(hours=24)
+        fragments = await self.query_knowledge_base(
+            agent_source=self.AGENT_NAME,
+            data_types=["task_outcome"],
+            time_window=time_window,
+            limit=50
+        )
+
+        if fragments:
+            insights["recent_tasks_count"] = len(fragments)
+            success_count = 0
+            error_types = Counter()
+            for frag in fragments:
+                try:
+                    outcome_data = json.loads(frag.content)
+                    if outcome_data.get("result", {}).get("status") == "success":
+                        success_count += 1
+                    else:
+                        # Try to extract error type/message
+                        error_msg = outcome_data.get("result", {}).get("message", "Unknown Error")
+                        # Basic error type categorization (can be improved)
+                        if "Tool" in error_msg and "failed" in error_msg: error_types["ToolExecutionError"] += 1
+                        elif "LLM" in error_msg: error_types["LLMError"] += 1
+                        elif "Verification failed" in error_msg: error_types["VerificationError"] += 1
+                        elif "Exception" in error_msg: error_types["PythonException"] += 1
+                        else: error_types["UnknownTaskError"] += 1
+                except (json.JSONDecodeError, TypeError):
+                    error_types["LoggingFormatError"] += 1
+
+            if insights["recent_tasks_count"] > 0:
+                insights["success_rate_pct"] = round((success_count / insights["recent_tasks_count"]) * 100, 1)
+            insights["common_error_types"] = dict(error_types.most_common(3))
+            insights["key_observations"].append(f"Analyzed {insights['recent_tasks_count']} task outcomes from last 24h.")
+        else:
+             insights["key_observations"].append("No recent task outcome data found.")
+
+    except Exception as e:
+        self.logger.error(f"Error collecting insights: {e}", exc_info=True)
+        insights["key_observations"].append(f"Error collecting insights: {e}")
+
+    return insights
+
+# --- Abstract Method Stubs ---
+# ProgrammerAgent focuses on execution, learning/critique might be less frequent
+# or handled primarily by ThinkTool analyzing its outputs/logs.
+
+async def learning_loop(self):
+    self.logger.debug(f"{self.AGENT_NAME} learning_loop: No specific periodic learning implemented. Learning occurs via task analysis and potential self-correction.")
+    await asyncio.sleep(3600 * 24) # Sleep long, not primary focus
+
+async def self_critique(self) -> Dict[str, Any]:
+    self.logger.debug(f"{self.AGENT_NAME} self_critique: Performing basic critique based on recent insights.")
+    insights = await self.collect_insights()
+    feedback = f"Critique based on last 24h: {insights.get('recent_tasks_count', 0)} tasks processed with {insights.get('success_rate_pct', 0)}% success. Common errors: {insights.get('common_error_types', {})}"
+    status = "ok"
+    if insights.get('success_rate_pct', 100) < 75 and insights.get('recent_tasks_count', 0) > 5:
+         status = "warning"
+         feedback += " Success rate below threshold, investigate common errors."
+
+    return {"status": status, "feedback": feedback}
+
+async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
+    """Generates prompts for internal LLM calls (analysis, planning, diff gen)."""
+    # This method is effectively called by execute_task and _create_coding_plan
+    # We return a placeholder here as the actual prompt generation happens within those methods.
+    self.logger.warning(f"{self.AGENT_NAME} generate_dynamic_prompt called directly - prompt generation is handled within execute_task/_create_coding_plan.")
+    return f"Context: {json.dumps(task_context)}. Please perform the required programming action."
+Use code with caution.
+--- End of agents/programmer_agent.py ---

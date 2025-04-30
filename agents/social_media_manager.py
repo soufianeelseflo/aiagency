@@ -1,382 +1,623 @@
+# Filename: agents/social_media_manager.py
+# Description: Agent for managing social media presence, content, and campaigns.
+# Version: 1.1 (Implemented Core Logic, Planning, Execution, Account Management)
+
+import asyncio
 import logging
-import os
-from agents.base_agent import BaseAgent
-from typing import Dict, Any, Optional, List, Union # Added List, Union
 import json
+import random
 import time
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type # Added tenacity imports
-# Import other necessary utilities: BrowsingAgent (for account access/API interaction),
-# ThinkTool (for strategy), OSINTAgent (for trends/examples), secure_storage, etc.
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional, List, Union
+
+# Assuming utils/database.py and models.py exist as provided
+from models import Account, KnowledgeFragment # Add other models if needed
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.future import select
+from sqlalchemy.exc import SQLAlchemyError
+
+# Base Agent and LLM Client imports
+try:
+    from .base_agent import GeniusAgentBase, KBInterface # Use relative import if applicable
+except ImportError:
+    from base_agent import GeniusAgentBase, KBInterface # Fallback
+from openai import AsyncOpenAI as AsyncLLMClient # Standardized name
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+if not logger.hasHandlers():
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 SOCIAL_MEDIA_MANAGER_META_PROMPT = """
 You are the SocialMediaManager within the Synapse Genius Agentic AI System.
 Your Core Mandate: Manage and grow social media presence across multiple platforms for various business models, employing advanced, unconventional, and highly effective engagement and traffic generation strategies, while strictly adhering to anti-ban protocols. Operate with Genius Agentic AI principles.
 Key Responsibilities:
-- Manage multiple accounts per platform (e.g., 10 FB, 10 TikTok, 10 IG per model) for specific business goals.
-- Implement sophisticated strategies: 9-to-1 traffic funnels, multi-account ad management (redundancy, specialization), strategic interaction between owned accounts.
-- Generate engaging, human-like AI content (text, image, video - potentially ethical deepfakes) adapted to each platform and audience. Learn from examples (e.g., x.com/apollonator3000, Tai Lopez).
-- CRITICAL: Implement and rigorously follow robust anti-ban strategies: unique proxy per account (via BrowsingAgent/proxy manager), behavioral variance, content policy awareness, account backups.
-- Utilize platform APIs (via BrowsingAgent or direct libraries) for posting, interaction, and data gathering.
-- Understand and adapt to platform algorithms proactively.
-- Analyze performance data to optimize strategies continuously.
+- Manage multiple accounts per platform (e.g., 10 FB, 10 TikTok, 10 IG per model) for specific business goals. Load account details securely.
+- Implement sophisticated strategies: 9-to-1 traffic funnels, multi-account ad management, strategic interaction between owned accounts. Plan campaigns meticulously.
+- Generate engaging, human-like AI content (text, image, video) adapted to each platform and audience. Learn from examples and performance data.
+- CRITICAL: Implement and rigorously follow robust anti-ban strategies: unique proxy per account/action (via Orchestrator.get_proxy), behavioral variance (random delays), content policy awareness, account backups (managed externally).
+- Utilize platform APIs (via BrowsingAgent or direct libraries) for posting, interaction, and data gathering. Delegate actions clearly to BrowsingAgent.
+- Understand and adapt to platform algorithms proactively (analyze performance).
+- Analyze performance data (via OSINT/BrowsingAgent delegation) to optimize strategies continuously.
 - Operate with Extreme Agentic Behavior: Devise novel social media strategies, analyze trends, adapt tactics rapidly, understand nuances of online social dynamics, sub-task complex campaigns.
 - Collaborate with ThinkTool (strategy), OSINTAgent (trends/inspiration), BrowsingAgent (account access/API interaction), LegalAgent (content compliance).
 """
 
-class SocialMediaManager(BaseAgent):
+class SocialMediaManager(GeniusAgentBase):
     """
     Agent responsible for managing social media presence, content creation,
     engagement strategies, and anti-ban protocols across multiple platforms.
-    Embodies Genius Agentic AI principles for social media operations.
+    Version: 1.1
     """
-    def __init__(self, orchestrator):
-        super().__init__(orchestrator)
-        self.state = {"current_campaign": None, "accounts": {}, "plan": None, "status": "idle"}
-        logger.info("SocialMediaManager initialized.")
-        # TODO: Load managed account details securely (from secure_storage via orchestrator?)
+    AGENT_NAME = "SocialMediaManager"
+
+    def __init__(self, orchestrator: Any, session_maker: Optional[async_sessionmaker[AsyncSession]] = None):
+        """Initializes the SocialMediaManager."""
+        super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, session_maker=session_maker)
+        # Get dependencies from orchestrator
+        self.think_tool = orchestrator.agents.get('think')
+        self.browsing_agent = orchestrator.agents.get('browsing')
+        self.osint_agent = orchestrator.agents.get('osint')
+        self.secure_storage = getattr(orchestrator, 'secure_storage', None)
+
+        self.state = {
+            "current_campaign_plan": None, # Stores the plan generated by _create_campaign_plan
+            "managed_accounts": {}, # Dict[platform, List[AccountDetails]] - Loaded by _load_managed_accounts
+            "status": "idle"
+        }
+        self.logger.info("SocialMediaManager initialized.")
+        # Load managed accounts in the background
+        asyncio.create_task(self._load_managed_accounts())
+
+    async def _load_managed_accounts(self):
+        """Loads account details for managed platforms from the database/secure storage."""
+        self.logger.info("Loading managed social media account details...")
+        platforms_to_manage = ["facebook", "tiktok", "instagram", "twitter"] # Example, make configurable
+        loaded_accounts = {p: [] for p in platforms_to_manage}
+        accounts_loaded_count = 0
+        if not self.session_maker or not self.secure_storage:
+             self.logger.error("Database session maker or secure storage unavailable. Cannot load accounts.")
+             return
+
+        try:
+            async with self.session_maker() as session:
+                stmt = select(Account.id, Account.service, Account.email, Account.username, Account.vault_path).where(
+                    Account.service.in_(platforms_to_manage),
+                    Account.is_available == True # Only load available accounts
+                )
+                result = await session.execute(stmt)
+                accounts = result.mappings().all()
+
+                for acc in accounts:
+                    platform = acc.service
+                    # Fetch credentials securely using vault_path
+                    credentials = {} # Store fetched creds like password, cookies
+                    try:
+                        # Example: Fetch password, adapt based on how creds are stored in Vault
+                        password = await self.secure_storage.get_secret(f"{acc.vault_path}/password")
+                        if password: credentials['password'] = password
+                        # Fetch cookies if stored
+                        cookies_json = await self.secure_storage.get_secret(f"{acc.vault_path}/cookies")
+                        if cookies_json: credentials['cookies'] = json.loads(cookies_json)
+
+                    except VaultError as ve:
+                         self.logger.warning(f"Failed to load credentials from Vault path {acc.vault_path} for account {acc.id} ({acc.email or acc.username}): {ve}")
+                         continue # Skip account if essential creds missing
+                    except json.JSONDecodeError:
+                         self.logger.warning(f"Failed to parse cookies JSON from Vault path {acc.vault_path} for account {acc.id}.")
+                         # Continue without cookies if parsing fails
+
+                    account_details = {
+                        "id": acc.id,
+                        "email": acc.email,
+                        "username": acc.username,
+                        "vault_path": acc.vault_path,
+                        "credentials": credentials # Store fetched credentials
+                    }
+                    if platform in loaded_accounts:
+                        loaded_accounts[platform].append(account_details)
+                        accounts_loaded_count += 1
+
+            self.state["managed_accounts"] = loaded_accounts
+            self.logger.info(f"Loaded {accounts_loaded_count} managed social media accounts across {len(platforms_to_manage)} platforms.")
+            for p, acc_list in loaded_accounts.items():
+                 self.logger.info(f"- {p}: {len(acc_list)} accounts")
+
+        except SQLAlchemyError as db_err:
+            self.logger.error(f"DB Error loading managed accounts: {db_err}", exc_info=True)
+        except Exception as e:
+            self.logger.error(f"Unexpected error loading managed accounts: {e}", exc_info=True)
+
+    async def _get_account_for_platform(self, platform: str) -> Optional[Dict[str, Any]]:
+        """Selects an available account for a given platform (simple round-robin for now)."""
+        platform_lower = platform.lower()
+        accounts = self.state["managed_accounts"].get(platform_lower, [])
+        if not accounts:
+            self.logger.warning(f"No managed accounts available for platform: {platform_lower}")
+            return None
+
+        # Simple selection - rotate through available accounts
+        # TODO: Implement smarter selection (e.g., least recently used, health status)
+        current_index = self.internal_state.get(f"{platform_lower}_account_index", 0)
+        selected_account = accounts[current_index % len(accounts)]
+        self.internal_state[f"{platform_lower}_account_index"] = (current_index + 1) % len(accounts)
+
+        self.logger.debug(f"Selected account for {platform_lower}: {selected_account.get('username') or selected_account.get('email')}")
+        return selected_account
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
+    async def _call_llm_with_retry(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1024, is_json_output: bool = False) -> Optional[str]:
+        """Calls LLM via Orchestrator with retry logic."""
+        if not self.orchestrator or not hasattr(self.orchestrator, 'call_llm'):
+            self.logger.error("Orchestrator or its call_llm method is unavailable.")
+            return None
+        try:
+            response_content = await self.orchestrator.call_llm(
+                agent_name=self.AGENT_NAME, prompt=prompt, temperature=temperature,
+                max_tokens=max_tokens, is_json_output=is_json_output,
+                model_preference=["google/gemini-1.5-pro-latest"] # Prefer capable model for content/strategy
+            )
+            return response_content
+        except Exception as e:
+            self.logger.error(f"Error occurred calling LLM via orchestrator: {e}", exc_info=True)
+            raise
+
+    def _get_platform_config(self, platform: str) -> Dict[str, Any]:
+        """Retrieves platform-specific configurations (URLs, selectors)."""
+        # This should load from a more robust config source in production
+        self.logger.debug(f"Retrieving configuration for platform: {platform}")
+        # WARNING: Selectors are illustrative and need verification/maintenance
+        config = {
+            "twitter": {"post_url": "https://x.com/", "selectors": {"post_textarea": 'div[data-testid="tweetTextarea_0"]', "submit_button": 'button[data-testid="tweetButton"]'}},
+            "facebook": {"post_url": "https://www.facebook.com/", "selectors": {"post_trigger": 'div[aria-label*="Create a post"]', "post_textarea": 'div[aria-label*="What\'s on your mind"]', "submit_button": 'button[aria-label="Post"]'}},
+            "instagram": {"post_url": "https://www.instagram.com/", "selectors": {"create_button": 'svg[aria-label="New post"]', /* ... more complex selectors ... */}},
+            "tiktok": {"post_url": "https://www.tiktok.com/upload", "selectors": {"upload_input": 'input[type="file"]', "caption_input": 'div.DraftEditor-editorContainer > div', "post_button": 'button:contains("Post")'}}
+        }
+        platform_key = platform.lower().replace(".com", "") # Normalize key
+        return config.get(platform_key, {"post_url": f"https://{platform}.com/", "selectors": {}})
+
 
     async def execute_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Executes a social media-related task based on the provided details.
-
-        Args:
-            task_details (Dict[str, Any]): A dictionary containing task specifics, e.g.,
-                {'action': 'post', 'platform': 'twitter', 'content': '...', 'goal': 'engagement'}
-                {'action': 'analyze', 'platform': 'instagram', 'metric': 'reach'}
-
-        Returns:
-            Dict[str, Any]: A dictionary containing the result, e.g.,
-                {'status': 'success'/'failure', 'message': '...', 'post_id': '...', 'analysis_summary': '...'}
-        """
+        """Executes a social media task: post, analyze, run_campaign."""
         task_action = task_details.get('action', 'No action specified.')
         platform = task_details.get('platform', 'unknown')
         self.logger.info(f"SocialMediaManager received task: {task_action} on {platform}")
         self.status = "working"
-        result = {"status": "failure", "message": "Task execution not fully implemented."}
+        result = {"status": "failure", "message": "Task execution failed or action not implemented."}
+
+        # --- Structured Thinking: Task Assessment ---
+        initial_thought = f"""
+        Structured Thinking: Assess Social Media Task '{task_action}'
+        1. Goal: Execute '{task_action}' for platform '{platform}'.
+        2. Context: Task details: {json.dumps(task_details)}. Managed accounts: {list(self.state['managed_accounts'].get(platform.lower(), []))}.
+        3. Constraints: Use Orchestrator tools/delegation. Adhere to anti-ban protocols. Use LLM for content/analysis.
+        4. Information Needed: Specific content/metrics, target account (if applicable), platform config (selectors/URLs).
+        5. Plan:
+            a. If 'post': Refine content via LLM, select account, get proxy, delegate 'interact_and_post' to BrowsingAgent.
+            b. If 'analyze': Define fetch task, delegate data fetch (OSINT/Browsing), analyze results via LLM.
+            c. If 'run_campaign': Create plan via _create_campaign_plan, execute via _execute_campaign_plan.
+            d. Handle errors and return result.
+        """
+        await self._internal_think(initial_thought)
+        # --- End Structured Thinking ---
 
         try:
             if task_action == 'post':
                 original_content = task_details.get('content', '')
                 goal = task_details.get('goal', 'engagement')
+                target_account_id = task_details.get('account_id') # Optional: specify account
 
-                # 1. Refine Content via LLM
+                if not original_content: raise ValueError("Missing 'content' for post action.")
+
+                # 1. Refine Content
                 self.logger.debug("Refining content via LLM...")
-                refinement_prompt = f"Adapt the following content for a {platform} post aiming for {goal}:\n\n{original_content}\n\nOutput ONLY the refined content."
-                # Use the newly added _call_llm_with_retry method
-                refined_content = await self._call_llm_with_retry(refinement_prompt, max_tokens=1024)
-                if not refined_content:
-                    self.logger.warning("LLM refinement failed or returned empty. Falling back to original content.")
-                    refined_content = original_content # Fallback
+                refinement_prompt = f"Adapt the following content for a {platform} post aiming for {goal}. Ensure it sounds human and engaging. Optimize for platform algorithm if known patterns exist:\n\n{original_content}\n\nOutput ONLY the refined content."
+                refined_content = await self._call_llm_with_retry(refinement_prompt, max_tokens=1024, temperature=0.7)
+                if not refined_content: refined_content = original_content; self.logger.warning("LLM refinement failed. Using original content.")
 
-                # 2. Delegate Posting to BrowsingAgent
-                self.logger.info(f"Delegating post task to BrowsingAgent for platform: {platform}")
-                # TODO: Determine correct URL and interaction steps for BrowsingAgent based on platform
-                # These URLs and selectors are highly platform-dependent and need proper configuration/discovery.
-                platform_config = self._get_platform_config(platform) # Hypothetical method to get URLs/selectors
+                # 2. Select Account & Get Proxy
+                selected_account = None
+                if target_account_id:
+                     # Find specific account (implementation needed if managing multiple)
+                     pass # Placeholder: find account by ID
+                if not selected_account:
+                     selected_account = self._get_account_for_platform(platform)
 
-                browsing_task = {
-                    "description": f"Post content to {platform}",
-                    "agent_name": "browsing_agent", # Target agent
-                    "sub_task_details": {
-                        "action": "interact_and_post", # Define a suitable action for BrowsingAgent
-                        "target_url": platform_config.get("post_url", f"https://{platform}.com/"), # Use specific post URL if known
-                        "post_content": refined_content,
-                        "platform_selectors": platform_config.get("selectors", {}), # Get platform-specific selectors
-                        # Potentially add account credentials/session info securely if needed by BrowsingAgent
-                        # "account_id": task_details.get("account_id"), # Example
-                    }
+                if not selected_account: raise ValueError(f"No available account found for platform {platform}.")
+
+                proxy_info = None
+                if self.orchestrator and hasattr(self.orchestrator, 'get_proxy'):
+                     proxy_info = await self.orchestrator.get_proxy(purpose=f"social_post_{platform}", target_url=f"https://{platform}.com") # Request proxy
+
+                # 3. Delegate Posting to BrowsingAgent
+                self.logger.info(f"Delegating post task to BrowsingAgent for platform: {platform}, account: {selected_account.get('username') or selected_account.get('email')}")
+                platform_config = self._get_platform_config(platform)
+                browsing_task_details = {
+                    "action": "interact_and_post", # Define this action in BrowsingAgent
+                    "target_url": platform_config.get("post_url", f"https://{platform}.com/"),
+                    "post_content": refined_content,
+                    "platform_selectors": platform_config.get("selectors", {}),
+                    "account_details": selected_account, # Pass account info including fetched credentials
+                    "proxy_info": proxy_info # Pass proxy URL string if obtained
                 }
-                if hasattr(self.orchestrator, 'delegate_task'):
-                     # Assuming delegate_task returns the result from the sub-agent
-                     post_result = await self.orchestrator.delegate_task(browsing_task)
-                     if post_result and post_result.get("status") == "success":
-                         result = {
-                             "status": "success",
-                             "message": f"Successfully delegated post to {platform} via BrowsingAgent.",
-                             "platform": platform,
-                             "post_id": post_result.get("post_id", "N/A"), # If BrowsingAgent can return it
-                             "posted_content": refined_content
-                         }
-                     else:
-                          error_msg = post_result.get('message', 'Unknown error') if post_result else 'No result from BrowsingAgent'
-                          result["message"] = f"BrowsingAgent failed to post: {error_msg}"
-                          result["status"] = "failure" # Ensure status is failure
-                else:
-                     result["message"] = "Orchestrator missing delegate_task capability."
-                     result["status"] = "failure"
+                # Use delegate_task for clarity
+                post_result = await self.orchestrator.delegate_task("browsing", browsing_task_details)
 
+                if post_result and post_result.get("status") == "success":
+                    result = { "status": "success", "message": f"Successfully delegated post to {platform}.", "platform": platform, "post_id": post_result.get("post_id", "N/A"), "posted_content": refined_content }
+                else:
+                    error_msg = post_result.get('message', 'Unknown error') if post_result else 'No result from BrowsingAgent'
+                    raise RuntimeError(f"BrowsingAgent failed to post: {error_msg}")
 
             elif task_action == 'analyze':
                 metric = task_details.get('metric', 'engagement')
-                self.logger.debug(f"Defining metrics for analysis: {metric} on {platform}")
+                target_profile_url = task_details.get('target_profile_url') # For public analysis
+                account_id_for_metrics = task_details.get('account_id') # For private analysis
 
-                # 1. Delegate Data Fetch (e.g., to OSINTAgent or BrowsingAgent)
-                # Choose agent based on data needed (public vs private/account-specific)
-                # For general metrics, OSINT might work. For account-specific, BrowsingAgent might be needed.
-                fetch_agent = "osint_agent" # Default, adjust as needed
-                self.logger.info(f"Delegating data fetch to {fetch_agent} for platform: {platform}")
-                # TODO: Define data fetching task details more robustly
-                fetch_task = {
-                     "description": f"Fetch {metric} data for {platform}",
-                     "agent_name": fetch_agent,
-                     "sub_task_details": {
-                         "action": "fetch_social_media_data", # Define a suitable action
-                         "platform": platform,
-                         "metrics_required": [metric],
-                         # Add account info or target profile if needed by the agent
-                         # "target_profile_url": task_details.get("target_profile_url"), # Example
-                         # "account_id": task_details.get("account_id"), # Example
-                     }
+                # Decide which agent to use for fetching
+                fetch_agent_name = "osint" if target_profile_url else "browsing" # Default logic
+                fetch_action = "fetch_public_social_metrics" if fetch_agent_name == "osint" else "fetch_private_social_metrics"
+
+                self.logger.info(f"Delegating data fetch to {fetch_agent_name} for platform: {platform}, metric: {metric}")
+                fetch_task_details = {
+                    "action": fetch_action, # Define suitable actions in target agents
+                    "platform": platform,
+                    "metrics_required": [metric],
+                    "target_identifier": target_profile_url or account_id_for_metrics # Pass relevant identifier
+                    # Add account details if delegating to BrowsingAgent for private metrics
                 }
-                fetched_data = None
-                if hasattr(self.orchestrator, 'delegate_task'):
-                     fetch_result = await self.orchestrator.delegate_task(fetch_task)
-                     if fetch_result and fetch_result.get("status") == "success":
-                         fetched_data = fetch_result.get("data") # Assuming data is returned here
-                         if not fetched_data:
-                              result["message"] = f"Data fetch successful but no data returned by {fetch_agent}."
-                              result["status"] = "failure" # Treat no data as failure for analysis
-                         else:
-                              self.logger.info(f"Successfully fetched data from {fetch_agent}.")
-                     else:
-                         error_msg = fetch_result.get('message', 'Unknown error') if fetch_result else f'No result from {fetch_agent}'
-                         result["message"] = f"Data fetch failed: {error_msg}"
-                         result["status"] = "failure"
-                else:
-                     result["message"] = "Orchestrator missing delegate_task capability."
-                     result["status"] = "failure"
+                fetch_result = await self.orchestrator.delegate_task(fetch_agent_name, fetch_task_details)
 
+                if fetch_result and fetch_result.get("status") == "success":
+                    fetched_data = fetch_result.get("data")
+                    if not fetched_data: raise ValueError(f"Data fetch successful but no data returned by {fetch_agent_name}.")
+                    self.logger.info(f"Successfully fetched data from {fetch_agent_name}.")
 
-                # 2. Analyze Data via LLM (if data fetched)
-                if fetched_data:
+                    # Analyze Data via LLM
                     self.logger.debug("Analyzing fetched data via LLM...")
-                    try:
-                        # Ensure fetched_data is serializable (e.g., convert complex objects)
-                        data_str = json.dumps(fetched_data, default=str)
-                    except TypeError:
-                        self.logger.error("Fetched data is not JSON serializable for LLM analysis.")
-                        data_str = str(fetched_data) # Fallback to string representation
-
-                    analysis_prompt = f"Analyze the following social media data for {platform} focusing on {metric}:\n\n{data_str}\n\nOutput a brief summary of the key findings regarding {metric}."
-                    analysis_summary = await self._call_llm_with_retry(analysis_prompt, max_tokens=500)
+                    try: data_str = json.dumps(fetched_data, default=str, indent=2)
+                    except TypeError: data_str = str(fetched_data)
+                    analysis_prompt = f"Analyze the following social media data for {platform} focusing on {metric}:\n\n{data_str[:3000]}\n\nOutput a brief summary of the key findings regarding {metric}."
+                    analysis_summary = await self._call_llm_with_retry(analysis_prompt, max_tokens=500, temperature=0.3)
 
                     if analysis_summary:
-                        result = {
-                            "status": "success",
-                            "message": f"Successfully analyzed {metric} for {platform}.",
-                            "platform": platform,
-                            "metric": metric,
-                            "analysis_summary": analysis_summary,
-                            "raw_data": fetched_data # Return the original fetched data
-                        }
-                    else:
-                        result["message"] = "Data fetched, but LLM analysis failed or returned empty."
-                        result["status"] = "failure"
-                # else: result message already set during fetch failure or no data condition
+                        result = { "status": "success", "message": f"Successfully analyzed {metric} for {platform}.", "platform": platform, "metric": metric, "analysis_summary": analysis_summary, "raw_data": fetched_data }
+                    else: raise RuntimeError("LLM analysis failed or returned empty.")
+                else:
+                    error_msg = fetch_result.get('message', 'Unknown error') if fetch_result else f'No result from {fetch_agent_name}'
+                    raise RuntimeError(f"Data fetch failed: {error_msg}")
+
+            elif task_action == 'run_campaign':
+                 # Create and execute a campaign plan
+                 self.state['current_campaign_plan'] = await self._create_campaign_plan(task_details)
+                 if self.state['current_campaign_plan']:
+                      campaign_result = await self._execute_campaign_plan()
+                      result = campaign_result # Use result from execution
+                 else:
+                      raise RuntimeError("Failed to create campaign plan.")
 
             else:
-                 result["message"] = f"Unsupported action: {task_action}"
-                 result["status"] = "failure"
-
+                 result = {"status": "failure", "message": f"Unsupported action: {task_action}"}
 
         except Exception as e:
             self.logger.error(f"Error executing social media task '{task_action}' on {platform}: {e}", exc_info=True)
-            result["message"] = f"Unexpected error during task execution: {e}"
-            result["status"] = "failure" # Ensure status is failure on exception
+            result = {"status": "error", "message": f"Unexpected error: {e}"}
 
         finally:
             self.status = "idle"
             self.logger.info(f"SocialMediaManager finished task: {task_action} on {platform}. Status: {result.get('status', 'failure')}")
-            return result
-
-    # --- Standardized LLM Interaction (Adapted from ThinkTool) ---
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
-    async def _call_llm_with_retry(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1024, is_json_output: bool = False) -> Optional[str]:
-        """
-        Calls the LLM via the Orchestrator with retry logic.
-        Assumes orchestrator handles client selection, caching, and cost tracking.
-        """
-        self.logger.debug(f"Calling LLM via Orchestrator. Temp={temperature}, MaxTokens={max_tokens}, JSON={is_json_output}")
-        try:
-            # Assume orchestrator has a method like 'call_llm' or similar
-            # that handles the underlying API call, client selection, etc.
-            if not hasattr(self.orchestrator, 'call_llm'):
-                 self.logger.error("Orchestrator does not have 'call_llm' method.")
-                 return None # Cannot proceed without orchestrator's LLM capability
-
-            response_content = await self.orchestrator.call_llm(
-                agent_name="SocialMediaManager", # Identify the caller
-                prompt=prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                is_json_output=is_json_output,
-                # Pass other relevant parameters if orchestrator supports them
+            # Log outcome
+            await self.log_knowledge_fragment(
+                agent_source=self.AGENT_NAME, data_type="task_outcome",
+                content={"task": task_action, "platform": platform, "result": result},
+                tags=["task_execution", platform, result.get('status', 'failure')], relevance_score=0.6
             )
+        return result
 
-            if response_content:
-                 # Orchestrator might return structured response, extract content
-                 if isinstance(response_content, dict):
-                     content = response_content.get('content')
-                 else:
-                     content = str(response_content) # Assume string content
-
-                 if content:
-                     return content.strip()
-                 else:
-                     self.logger.warning("LLM call via orchestrator returned empty content.")
-                     return None
-            else:
-                 self.logger.warning("LLM call via orchestrator returned None.")
-                 return None
-
-        except Exception as e:
-            self.logger.warning(f"LLM call failed (attempt): {e}")
-            # Report issue back to orchestrator? Maybe orchestrator handles this internally.
-            # await self.orchestrator.report_llm_issue(...)
-            raise # Reraise exception for tenacity retry logic
-
-        self.logger.error("LLM call failed after all retries.")
-        return None
-
-    def _get_platform_config(self, platform: str) -> Dict[str, Any]:
+    async def _create_campaign_plan(self, task_details: Dict[str, Any]) -> Optional[List[Dict]]:
+        """Creates a detailed step-by-step campaign plan using LLM."""
+        self.logger.info(f"Creating campaign plan for task: {task_details.get('description', 'N/A')}")
+        # --- Structured Thinking Step ---
+        plan_gen_thought = f"""
+        Structured Thinking: Create Social Media Campaign Plan
+        1. Goal: Generate structured plan (posts, interactions, schedule) for social media campaign.
+        2. Context: Task details ({task_details}), Meta Prompt, available accounts ({list(self.state['managed_accounts'].keys())}), potential insights from ThinkTool/OSINT (fetch if needed).
+        3. Constraints: Plan should be sequential, actionable steps. Use managed accounts. Incorporate anti-ban best practices implicitly (handled during execution). Output JSON list.
+        4. Information Needed: Campaign goals, target audience, platform(s), duration/frequency, content themes (from task_details or KB).
+        5. Plan:
+            a. Fetch relevant strategic insights from ThinkTool/KB (e.g., competitor analysis, trending topics).
+            b. Construct LLM prompt including meta-prompt, task details, account info, KB insights, and instructions for JSON plan output.
+            c. Call LLM for plan generation.
+            d. Parse and validate JSON plan.
+            e. Return plan or None.
         """
-        Placeholder method to retrieve platform-specific configurations
-        (e.g., URLs, CSS selectors for BrowsingAgent).
-        In a real system, this might load from a config file or database.
-        """
-        # WARNING: These are just illustrative examples and likely incorrect/incomplete.
-        # Robust selectors require inspection of the target websites.
-        self.logger.debug(f"Retrieving configuration for platform: {platform}")
-        config = {
-            "twitter": {
-                "post_url": "https://x.com/compose/tweet", # Example
-                "selectors": {
-                    "post_textarea": 'div[data-testid="tweetTextarea_0"]',
-                    "submit_button": 'button[data-testid="tweetButton"]',
-                    # Add login selectors if needed by BrowsingAgent workflow
-                }
-            },
-            "facebook": {
-                 "post_url": "https://www.facebook.com/", # Posting often done on main feed/page
-                 "selectors": {
-                     "post_trigger": 'div[aria-label*="Create a post"]', # Example selector to open post dialog
-                     "post_textarea": 'div[aria-label*="What\'s on your mind"]', # Example
-                     "submit_button": 'button[aria-label="Post"]', # Example
-                 }
-            },
-            "instagram": {
-                 "post_url": "https://www.instagram.com/", # Usually requires app or specific creator studio flow
-                 "selectors": {
-                     # Instagram web posting is limited; selectors might target Creator Studio or require mobile emulation
-                     "create_button": 'svg[aria-label="New post"]', # Example
-                     # ... more complex selectors for upload/caption/share ...
-                 }
-            },
-            "tiktok": {
-                 "post_url": "https://www.tiktok.com/upload", # Example upload URL
-                 "selectors": {
-                     # Selectors for video upload, caption, buttons etc.
-                     "upload_input": 'input[type="file"]', # Example
-                     "caption_input": 'div.DraftEditor-editorContainer > div', # Example
-                     "post_button": 'button:contains("Post")', # Example using text content
-                 }
-            }
-            # Add other platforms as needed
-        }
-        platform_key = platform.lower()
-        if platform_key in config:
-            return config[platform_key]
-        else:
-            self.logger.warning(f"No specific config found for platform '{platform}'. Using generic defaults.")
-            # Return generic structure or empty dict
-            return {
-                "post_url": f"https://{platform}.com/",
-                "selectors": {}
-            }
+        await self._internal_think(plan_gen_thought)
+        # --- End Structured Thinking Step ---
 
+        # Fetch context (e.g., from ThinkTool/KB) - Placeholder
+        kb_insights = "Placeholder: Competitor X is weak on TikTok engagement."
 
-    def _create_campaign_plan(self, task_details):
-        """
-        Analyzes the task and creates a detailed step-by-step campaign plan.
-        Placeholder implementation. Should involve LLM call with context.
-        """
-        # TODO: Implement detailed planning logic using LLM call
-        # Input: task_details, SOCIAL_MEDIA_MANAGER_META_PROMPT, platform knowledge, strategy context
-        # Output: Structured plan (e.g., list of posts with content/schedule, interaction tasks, analysis points)
-        logger.warning("Placeholder: SocialMediaManager._create_campaign_plan called")
-        plan = [
-            {"step": 1, "action": "Generate content batch for Platform X", "status": "pending"},
-            {"step": 2, "action": "Schedule posts for Account Group A (Traffic Gen)", "status": "pending"},
-            {"step": 3, "action": "Schedule post for Account B (Main)", "status": "pending"},
-            {"step": 4, "action": "Execute interaction strategy (likes/comments from Group A)", "status": "pending"},
-            {"step": 5, "action": "Monitor engagement metrics", "status": "pending"},
+        planning_prompt = f"""
+        {SOCIAL_MEDIA_MANAGER_META_PROMPT[:500]}...
+
+        **Task:** Create a detailed social media campaign plan based on the following:
+        {json.dumps(task_details, indent=2)}
+
+        **Available Platforms & Account Counts:** { {p: len(a) for p, a in self.state['managed_accounts'].items()} }
+        **Relevant Insights:** {kb_insights}
+
+        **Instructions:**
+        Generate a plan as a JSON list of dictionaries. Each step should include:
+        - "step" (int): Sequence number.
+        - "action" (str): Type of action (e.g., "generate_content", "post_content", "engage_users", "analyze_metrics").
+        - "platform" (str): Target platform (e.g., "tiktok", "facebook").
+        - "details" (str): Specific instructions (e.g., "Create 3 video ideas for UGC funnel step 1", "Post video A to accounts [acc1, acc2]", "Like 10 posts with #UGC hashtag from account X", "Fetch engagement rate for campaign posts").
+        - "schedule" (str, optional): Approximate timing (e.g., "Day 1, Morning", "Day 2, Afternoon").
+
+        The plan should cover content creation, posting schedule across multiple accounts (if applicable), engagement strategy (e.g., interactions between accounts, responding to comments), and points for metric analysis. Focus on achieving the campaign goal efficiently and safely (anti-ban).
+
+        **Output:** Respond ONLY with the valid JSON list representing the plan.
+        ```json
+        [
+          {{ "step": 1, "action": "...", "platform": "...", "details": "...", "schedule": "..." }},
+          ...
         ]
-        return plan
-
-    async def _execute_campaign_plan(self):
+        ```
         """
-        Executes the steps defined in the campaign plan using available tools.
-        Placeholder implementation.
+        plan_json_str = await self._call_llm_with_retry(planning_prompt, max_tokens=2000, temperature=0.5, is_json_output=True)
+
+        if plan_json_str:
+            try:
+                json_match = json.loads(plan_json_str[plan_json_str.find('['):plan_json_str.rfind(']')+1])
+                if isinstance(json_match, list) and all(isinstance(s, dict) and 'step' in s and 'action' in s for s in json_match):
+                    self.logger.info(f"Successfully generated campaign plan with {len(json_match)} steps.")
+                    return json_match
+                else: raise ValueError("Invalid plan structure received.")
+            except (json.JSONDecodeError, ValueError) as e:
+                self.logger.error(f"Failed to parse LLM campaign plan: {e}. Response: {plan_json_str[:500]}...")
+                return None
+        else:
+            self.logger.error("LLM failed to generate a campaign plan.")
+            return None
+
+    async def _execute_campaign_plan(self) -> Dict[str, Any]:
+        """Executes the steps defined in the campaign plan."""
+        plan = self.state.get("current_campaign_plan")
+        if not plan:
+            self.logger.error("Execution attempted without a campaign plan.")
+            return {"status": "failure", "message": "No campaign plan available."}
+
+        self.logger.info(f"Starting execution of campaign plan ({len(plan)} steps).")
+        execution_summary = []
+        all_steps_successful = True
+
+        for step in plan:
+            step_num = step.get("step", "?")
+            action = step.get("action", "Unknown")
+            platform = step.get("platform", "N/A")
+            details = step.get("details", "")
+            step_status = "pending"
+            step_result_msg = ""
+
+            # --- Structured Thinking Step (Before Each Step Execution) ---
+            step_thought = f"""
+            Structured Thinking: Execute Campaign Step {step_num}
+            1. Goal: Execute action '{action}' on {platform}. Details: {details[:100]}...
+            2. Context: Current plan step. Overall campaign goal. Available accounts/tools.
+            3. Constraints: Delegate actions appropriately (LLM, BrowsingAgent, OSINTAgent). Ensure anti-ban measures (proxy, delays) for platform interactions.
+            4. Information Needed: Content (if posting), target accounts/URLs, specific metrics (if analyzing).
+            5. Plan:
+                a. If 'generate_content': Call LLM.
+                b. If 'post_content'/'engage_users': Select account(s), get proxy, format task for BrowsingAgent, delegate.
+                c. If 'analyze_metrics': Format task for OSINT/BrowsingAgent, delegate fetch, call LLM for analysis.
+                d. Handle result/error. Update summary.
+            """
+            await self._internal_think(step_thought)
+            # --- End Structured Thinking Step ---
+
+            self.logger.info(f"Executing Campaign Step {step_num}: {action} on {platform} - {details}")
+            try:
+                if action == "generate_content":
+                    # Call LLM to generate content based on details
+                    gen_prompt = f"Generate social media content for {platform} based on this instruction: {details}. Output ONLY the content."
+                    content = await self._call_llm_with_retry(gen_prompt, max_tokens=500)
+                    if content: step_status = "success"; step_result_msg = f"Generated content snippet: {content[:100]}..."
+                    else: raise RuntimeError("LLM failed to generate content.")
+                    # TODO: Store generated content for later posting steps (e.g., in step dict or KB)
+
+                elif action in ["post_content", "engage_users"]:
+                    # Delegate to BrowsingAgent
+                    # Need to parse 'details' to extract target accounts, content reference, specific actions (like, comment, post)
+                    # Example delegation (needs robust parsing of 'details'):
+                    target_account = self._get_account_for_platform(platform) # Select one account
+                    if not target_account: raise ValueError(f"No account for {platform}")
+                    proxy_info = await self.orchestrator.get_proxy(purpose=f"social_{action}_{platform}", target_url=f"https://{platform}.com")
+
+                    browsing_action = "interact_and_post" if action == "post_content" else "perform_engagement" # Define actions in BrowsingAgent
+                    browsing_details = {
+                        "action": browsing_action,
+                        "target_url": f"https://{platform}.com/", # Adjust URL based on action
+                        "platform_selectors": self._get_platform_config(platform).get("selectors", {}),
+                        "account_details": target_account,
+                        "proxy_info": proxy_info,
+                        "action_details": details # Pass specific instructions (content to post, users to follow, posts to like etc.)
+                    }
+                    exec_result = await self.orchestrator.delegate_task("browsing", browsing_details)
+                    if exec_result and exec_result.get("status") == "success":
+                        step_status = "success"; step_result_msg = f"Action delegated successfully. Result: {exec_result.get('message', 'OK')}"
+                    else:
+                        raise RuntimeError(f"BrowsingAgent failed action '{action}': {exec_result.get('message', 'Unknown error')}")
+
+                elif action == "analyze_metrics":
+                    # Delegate data fetching and analysis
+                    # Parse 'details' to find specific metric needed
+                    metric_to_analyze = details # Simplified
+                    fetch_agent_name = "browsing" # Assume private metrics for campaign analysis
+                    fetch_task_details = { "action": "fetch_private_social_metrics", "platform": platform, "metrics_required": [metric_to_analyze], "account_id": "campaign_account_id" } # Need account context
+                    fetch_result = await self.orchestrator.delegate_task(fetch_agent_name, fetch_task_details)
+                    if fetch_result and fetch_result.get("status") == "success" and fetch_result.get("data"):
+                        data_str = json.dumps(fetch_result["data"], default=str)
+                        analysis_prompt = f"Analyze social media data for {platform} focusing on {metric_to_analyze}:\n\n{data_str[:1000]}\n\nOutput brief summary."
+                        analysis_summary = await self._call_llm_with_retry(analysis_prompt, max_tokens=300)
+                        if analysis_summary: step_status = "success"; step_result_msg = f"Analysis summary: {analysis_summary}"
+                        else: raise RuntimeError("LLM analysis failed.")
+                    else: raise RuntimeError(f"Data fetch failed for analysis: {fetch_result.get('message', 'No data')}")
+
+                else:
+                    step_status = "skipped"; step_result_msg = "Unknown action type."
+                    self.logger.warning(f"Skipping unknown action type in campaign plan: {action}")
+
+            except Exception as e:
+                self.logger.error(f"Error executing campaign step {step_num}: {e}", exc_info=True)
+                step_status = "error"
+                step_result_msg = str(e)
+                all_steps_successful = False
+                # Optionally break execution on error?
+                # break
+
+            execution_summary.append({"step": step_num, "action": action, "status": step_status, "result": step_result_msg})
+            # Update plan status in self.state (optional)
+            step['status'] = step_status # Mark step status in the plan itself
+
+        final_status = "success" if all_steps_successful else "partial_success" if execution_summary else "failure"
+        self.logger.info(f"Campaign plan execution finished with status: {final_status}")
+        return {"status": final_status, "execution_summary": execution_summary}
+
+    # --- Base Class Method Implementations ---
+
+    async def learning_loop(self):
+        """Analyzes campaign performance to refine strategies."""
+        while self.status == "running":
+            try:
+                await asyncio.sleep(3600 * 4) # Run every 4 hours
+                self.logger.info("SocialMediaManager Learning Loop: Starting analysis cycle.")
+                # --- Structured Thinking Step ---
+                thinking_process = f"""
+                Structured Thinking: Social Media Learning Loop
+                1. Goal: Analyze performance of recent posts/campaigns to refine content/engagement strategies.
+                2. Context: Campaign stats (internal state), performance data logged as KB fragments (e.g., 'social_post_performance').
+                3. Constraints: Query KB. Identify high/low performing content/tactics. Update internal state or generate directives for ThinkTool.
+                4. Information Needed: Recent performance fragments from KB.
+                5. Plan:
+                    a. Query KB for 'social_post_performance' fragments (last 7 days).
+                    b. Aggregate metrics (likes, shares, clicks) by platform, content type, or campaign tag.
+                    c. Identify top/bottom performers using LLM analysis or simple heuristics.
+                    d. Log learned patterns (e.g., "Video posts on TikTok get higher engagement").
+                    e. (Future) Update internal strategy parameters or generate directives.
+                """
+                await self._internal_think(thinking_process)
+                # --- End Structured Thinking Step ---
+
+                if not self.kb_interface: self.logger.warning("Learning Loop: KB Interface unavailable."); continue
+
+                perf_fragments = await self.kb_interface.get_knowledge(
+                    data_types=['social_post_performance'], # Assuming performance is logged this way
+                    time_window=timedelta(days=7), limit=100
+                )
+
+                if not perf_fragments: self.logger.info("Learning Loop: No recent performance data found."); continue
+
+                # TODO: Implement aggregation and analysis logic here
+                # Example: Find highest engagement post type
+                self.logger.info(f"Learning Loop: Found {len(perf_fragments)} performance fragments. Analysis logic placeholder.")
+                # analysis_prompt = f"Analyze these social media performance fragments: {json.dumps([f.content for f in perf_fragments])}. Identify best performing content types/platforms."
+                # analysis_result = await self._call_llm_with_retry(analysis_prompt)
+                # if analysis_result: await self.log_learned_pattern(...)
+
+            except asyncio.CancelledError: self.logger.info("SocialMediaManager learning loop cancelled."); break
+            except Exception as e: self.logger.error(f"Error during SocialMediaManager learning loop: {e}", exc_info=True); await asyncio.sleep(3600) # Wait longer after error
+
+    async def self_critique(self) -> Dict[str, Any]:
+        """Evaluates social media management performance."""
+        self.logger.info("SocialMediaManager: Performing self-critique.")
+        critique = {"status": "ok", "feedback": "Critique pending analysis."}
+        # --- Structured Thinking Step ---
+        thinking_process = f"""
+        Structured Thinking: Self-Critique SocialMediaManager
+        1. Goal: Evaluate overall social media performance, account health, strategy effectiveness.
+        2. Context: Internal state (account counts), performance metrics from KB/insights.
+        3. Constraints: Query KB/insights. Analyze against goals. Output structured critique.
+        4. Information Needed: Aggregated performance metrics (engagement, reach), account status/ban rates (if tracked), campaign success rates.
+        5. Plan:
+            a. Fetch aggregated performance metrics from KB or self.collect_insights().
+            b. Analyze trends (growth/decline).
+            c. Check account health (requires tracking bans/warnings - currently not implemented).
+            d. Formulate critique summary.
+            e. Return critique dictionary.
         """
-        # TODO: Implement iterative execution loop using self.orchestrator.use_tool(...)
-        # This will involve:
-        # - Generating content (potentially calling ThinkTool or a dedicated content generation service/agent)
-        # - Interacting with platform APIs/BrowsingAgent for posting, liking, commenting, fetching data.
-        # - Adhering strictly to anti-ban protocols (proxy rotation per action/account via BrowsingAgent).
-        # - Analyzing results (potentially calling ThinkTool or data analysis utilities).
-        logger.warning("Placeholder: SocialMediaManager._execute_campaign_plan called")
-        if not self.state["plan"]:
-            raise ValueError("No campaign plan available to execute.")
+        await self._internal_think(thinking_process)
+        # --- End Structured Thinking Step ---
+        try:
+            insights = await self.collect_insights() # Get current stats
+            feedback_points = [f"Managing accounts on {list(insights.get('managed_accounts', {}).keys())}."]
+            # TODO: Add analysis of actual performance metrics once logging is implemented
+            critique['feedback'] = " ".join(feedback_points) + " Performance metric analysis not yet implemented."
+        except Exception as e:
+            self.logger.error(f"Error during social media self-critique: {e}", exc_info=True)
+            critique['status'] = 'error'; critique['feedback'] = f"Critique failed: {e}"
+        return critique
 
-        for step in self.state["plan"]:
-            if step["status"] == "pending":
-                logger.info(f"Executing step {step['step']}: {step['action']}")
-                # --- Tool Selection & Execution ---
-                # Example: Post content to Account X on Facebook
-                # 1. Get content for the post (from plan or generate)
-                # 2. Get credentials/proxy for Account X (secure_storage, proxy manager)
-                # 3. Call BrowsingAgent or specific API wrapper:
-                #    await self.orchestrator.use_tool('browsing_agent_post', {
-                #        'platform': 'facebook',
-                #        'account_id': 'account_x_id',
-                #        'content': '...',
-                #        'proxy_info': {...} # Critical for anti-ban
-                #    })
-                # --- Update Step Status ---
-                step["status"] = "done" # Or 'error'
-                await self.orchestrator.notify_user(f"SocialMediaManager: Completed step {step['step']}: {step['action']}")
+    async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
+        """Constructs prompts for LLM calls (content refinement, analysis)."""
+        self.logger.debug(f"Generating dynamic prompt for Social Media task: {task_context.get('task')}")
+        # --- Structured Thinking Step ---
+        thinking_process = f"""
+        Structured Thinking: Generate Dynamic Prompt (Social Media)
+        1. Goal: Create effective LLM prompt for the specified social media task.
+        2. Context: Task details ({task_context}), Meta Prompt.
+        3. Constraints: Incorporate platform specifics, goals. Instruct for desired output format.
+        4. Information Needed: Task type, platform, content/data, goal. Relevant KB insights (placeholder).
+        5. Plan:
+            a. Start with meta prompt.
+            b. Append task context details.
+            c. Add platform-specific instructions/constraints.
+            d. Add instructions for desired output format (text, JSON).
+            e. Return final prompt string.
+        """
+        await self._internal_think(thinking_process)
+        # --- End Structured Thinking Step ---
 
-        # Placeholder result
-        return {"status": "success", "metrics": {"engagement_increase": 0.15}} # Example metrics
+        prompt_parts = [SOCIAL_MEDIA_MANAGER_META_PROMPT]
+        prompt_parts.append("\n--- Current Task Context ---")
+        prompt_parts.append(f"Task: {task_context.get('task', 'N/A')}")
+        if task_context.get('platform'): prompt_parts.append(f"Platform: {task_context['platform']}")
+        if task_context.get('goal'): prompt_parts.append(f"Goal: {task_context['goal']}")
+        if task_context.get('content'): prompt_parts.append(f"Original Content: {task_context['content'][:500]}...")
+        if task_context.get('data_to_analyze'): prompt_parts.append(f"Data to Analyze: {str(task_context['data_to_analyze'])[:500]}...")
+        if task_context.get('metric'): prompt_parts.append(f"Metric Focus: {task_context['metric']}")
 
-    def get_status(self):
-        """Returns the current status of the agent."""
-        return self.state
+        # Add Specific Instructions based on task
+        prompt_parts.append("\n--- Instructions ---")
+        if task_context.get('task') == 'refine_content':
+             prompt_parts.append(f"Refine the provided content for {task_context.get('platform', 'target platform')} aiming for {task_context.get('goal', 'engagement')}. Ensure it sounds human, matches platform style, and uses relevant hashtags/keywords. Output ONLY the refined content text.")
+        elif task_context.get('task') == 'analyze_data':
+             prompt_parts.append(f"Analyze the provided social media data for {task_context.get('platform', 'target platform')}, focusing on the metric: {task_context.get('metric', 'engagement')}. Provide a concise summary of key findings and actionable insights.")
+        elif task_context.get('task') == 'create_campaign_plan':
+             prompt_parts.append(f"Generate a detailed campaign plan based on the provided task details. Output ONLY the plan as a valid JSON list of step dictionaries.")
+        else:
+             prompt_parts.append("Perform the requested social media action based on the provided context.")
+
+        final_prompt = "\n".join(prompt_parts)
+        self.logger.debug(f"Generated dynamic prompt for SocialMediaManager (length: {len(final_prompt)} chars)")
+        return final_prompt
 
     async def collect_insights(self) -> Dict[str, Any]:
-        """
-        Placeholder implementation for collecting insights from SocialMediaManager.
-        (Required by BaseAgent).
-
-        Returns:
-            Dict[str, Any]: A dictionary containing placeholder insights.
-        """
-        # TODO: Implement actual insight collection logic.
-        # This could include: recent post performance, engagement metrics, campaign status, etc.
-        self.logger.debug("SocialMediaManager collect_insights called (placeholder).")
+        """Provides insights about managed accounts and campaign status."""
+        self.logger.debug("SocialMediaManager collect_insights called.")
+        # TODO: Fetch real campaign stats/performance summaries from DB/KB
+        active_campaign = self.state.get("current_campaign_plan") is not None
         return {
-            "agent_name": "SocialMediaManager",
-            "status": "placeholder",
-            "recent_posts_count": 0,
-            "engagement_metrics": {},
-            "key_observations": ["Placeholder insight collection."]
+            "agent_name": self.AGENT_NAME,
+            "status": self.status,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "managed_accounts_summary": {p: len(a) for p, a in self.state.get("managed_accounts", {}).items()},
+            "active_campaign": active_campaign,
+            "key_observations": ["Basic account counts provided. Campaign performance tracking needed."]
         }
 
-# Example usage (within Orchestrator or main loop):
-# social_manager = SocialMediaManager(orchestrator_instance)
-# task = {"description": "Launch 9-to-1 traffic campaign for Product Y on TikTok", "details": {...}}
-# result = await social_manager.execute_task(task)
+# --- End of agents/social_media_manager.py ---
