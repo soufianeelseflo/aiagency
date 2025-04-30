@@ -1007,4 +1007,3 @@ class VoiceSalesAgent(GeniusAgentBase):
             self.logger.info(f"Learned Pattern (Not logged to KB): Desc='{pattern_description}', Conf={confidence_score:.2f}, Impl='{implications}'")
 
 
-# --- End of agents/voice_sales_agent.py ---

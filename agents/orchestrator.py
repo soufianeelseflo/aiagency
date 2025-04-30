@@ -35,7 +35,6 @@ from agents.base_agent import GeniusAgentBase, KBInterface # Import base and KB 
 from agents.think_tool import ThinkTool
 from agents.browsing_agent import BrowsingAgent
 from agents.email_agent import EmailAgent
-from agents.legal_compliance_agent import LegalComplianceAgent # Assuming this is the primary compliance agent
 from agents.osint_agent import OSINTAgent
 from agents.scoring_agent import ScoringAgent
 from agents.voice_sales_agent import VoiceSalesAgent
@@ -392,9 +391,7 @@ class Orchestrator:
                 smtp_password=required_secrets['hostinger-smtp-pass'],
                 imap_password=required_secrets['hostinger-imap-pass']
             )
-            self.agents['legal_compliance'] = LegalComplianceAgent( # Use distinct key
-                self.session_maker, self, kb_interface
-            )
+            
             self.agents['osint'] = OSINTAgent(
                 self.session_maker, self, kb_interface,
                 shodan_api_key=required_secrets['shodan-api-key'],
