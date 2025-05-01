@@ -275,7 +275,7 @@ class ProgrammerAgent(GeniusAgentBase):
         else: # Fallback heuristic
              tool_lower = tool_name.lower()
              if tool_lower in ["theharvester", "recon-ng", "exiftool", "nmap", "sqlmap", "jq"]: return f"sudo apt-get update && sudo apt-get install -y {tool_lower}"
-             elif tool_lower in ["sherlock", "photon", "requests", "beautifulsoup4", "playwright", "pytest", "flake8", "numpy", "scikit-learn", "spacy", "pybreaker", "pytz", "sqlalchemy", "asyncpg", "psutil", "reportlab", "openai", "google-generativeai", "tenacity", "prometheus-client", "stable-baselines3", "gymnasium", "aiohttp", "faker", "deepgram-sdk", "websockets", "python-dotenv", "aiokafka", "hcp-vault-secrets", "cryptography"]:
+             elif tool_lower in ["photon", "requests", "beautifulsoup4", "playwright", "pytest", "flake8", "numpy", "scikit-learn", "spacy", "pybreaker", "pytz", "sqlalchemy", "asyncpg", "psutil", "reportlab", "openai", "google-generativeai", "tenacity", "prometheus-client", "stable-baselines3", "gymnasium", "aiohttp", "faker", "deepgram-sdk", "websockets", "python-dotenv", "aiokafka", "hcp-vault-secrets", "cryptography"]:
                  pip_command = f"pip3 install --user {tool_lower}"
                  if tool_lower == "playwright": pip_command += " && python3 -m playwright install --with-deps"
                  if tool_lower == "spacy": pip_command += " && python3 -m spacy download en_core_web_sm" # Add model download
@@ -754,6 +754,25 @@ class ProgrammerAgent(GeniusAgentBase):
     async def query_knowledge_base(self, *args, **kwargs):
         """Queries the knowledge base using the best available method."""
         if self.kb_interface and hasattr(self.kb_interface, 'query_knowledge_base'):
+            return await self.kb_interface.query_knowledge_base(*args, **kwargs)
+        elif self.think_tool and hasattr(self.think_tool, 'query_knowledge_base'):
+            return await self.think_tool.query_knowledge_base(*args, **kwargs)
+        else: # Fallback: Direct DB interaction if session_maker is available
+             if self.session_maker:
+                  try:
+                      async with self.session_maker() as session:
+                           # Reconstruct query logic here based on args/kwargs
+                           stmt = select(KnowledgeFragment) # Basic example
+                           # Add filtering based on kwargs...
+                           result = await session.execute(stmt.limit(kwargs.get('limit', 10)))
+                           return result.scalars().all()
+                  except Exception as e:
+                       self.logger.error(f"Direct DB query failed for KnowledgeBase: {e}")
+             else:
+                  self.logger.error("No mechanism available to query knowledge base.")
+             return []
+
+# --- End of agents/programmer_agent.py ---
             return await self.kb_interface.query_knowledge_base(*args, **kwargs)
         elif self.think_tool and hasattr(self.think_tool, 'query_knowledge_base'):
             return await self.think_tool.query_knowledge_base(*args, **kwargs)
