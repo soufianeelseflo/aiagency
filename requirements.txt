@@ -1,34 +1,54 @@
+# Filename: requirements.txt
+# Description: Final Python dependencies for the Genius AI Sales System.
+# Version: 3.0
+
+# --- Core Framework & Web ---
 quart==0.19.6
 sqlalchemy==2.0.35
-asyncpg==0.30.0
-psutil==6.0.0
-reportlab==4.2.2
-openai==1.51.0
-google-generativeai==0.8.3
-tenacity==9.0.0
-prometheus-client==0.21.0
-stable-baselines3==2.3.2
-numpy==1.26.4
-scikit-learn==1.5.2
-spacy==3.8.2
-pybreaker==1.2.0
-twilio==9.3.3
+asyncpg==0.30.0 # <--- Added for Postgres
+psutil==6.0.0 # For system monitoring (e.g., OptimizationAgent logic if kept, or general health checks)
+aiohttp==3.10.10 # For direct API calls (Clay.com, etc.)
+
+# --- AI & LLMs ---
+openai==1.51.0 # For interacting with OpenRouter (OpenAI compatible)
+# google-generativeai==0.8.3 # Only needed if calling Gemini API directly, likely not needed if using OpenRouter
+
+# --- Web Interaction & Scraping ---
 playwright==1.47.0
-aiohttp==3.10.10
-faker==30.8.2
-deepgram-sdk==3.7.2
-websockets==13.1
-python-dotenv==1.0.1
-aiokafka==0.8.0
 beautifulsoup4==4.12.3
-requests==2.32.3
-hcp-vault-secrets
-pytz # Added for timezone support in models.py
-cryptography # For database.py encryption
-gymnasium # Or gym, required by stable-baselines3 spaces
-fake-useragent # For OSINTAgent stealth requests
-# OSINT Tool Specific (Add if features are intended to be used)
-# maltego-trx # Requires Maltego client installation/setup
-python-exiftool # Wrapper for exiftool executable
-shodan # For Shodan API access
-# Note: theHarvester, photon, sherlock, recon-ng, spiderfoot might require separate installation/setup beyond pip.
+fake-useragent==1.5.1 # Updated version
+
+# --- External Services ---
+twilio==9.3.3
+deepgram-sdk==3.7.2 # Ensure correct version for SDK used in VoiceSalesAgent
+websockets==13.1 # For Deepgram streaming
+
+# --- Utilities ---
+tenacity==9.0.0 # For retries
+pybreaker==1.2.0 # For circuit breakers
+python-dotenv==1.0.1
+pytz==2024.1 # For timezone handling
+cryptography==43.0.0 # For database encryption
+requests==2.32.3 # General HTTP requests (might be replaceable by aiohttp)
+
+# --- Monitoring ---
+prometheus-client==0.21.0
+
+# --- Data Handling & Analysis ---
+numpy==1.26.4 # Often a dependency for ML/data libs, keep for now
+
+# --- OSINT Tools (Keep if BrowsingAgent uses CLI wrappers) ---
+shodan==2.1.0 # If Shodan API is used directly or via wrapper
+# python-exiftool # Keep if ExifTool wrapper is used
+# Note: theHarvester, recon-ng, sherlock require installation via Dockerfile/system
+
+# --- Optional (Remove if not used) ---
+# reportlab==4.2.2 # Only if generating PDFs internally
+# spacy==3.8.2 # Only if doing NLP directly within agents
+# scikit-learn==1.5.2 # Only if doing ML directly within agents
+# aiokafka==0.8.0 # Only if using Kafka
+
+# --- Removed ---
+# hcp-vault-secrets (Using environment variables now)
+# stable-baselines3 (OptimizationAgent logic consolidated)
+# gymnasium / gym (Dependency of stable-baselines3)

@@ -1,37 +1,37 @@
 # Filename: main.py
 # Description: AI Agency Main Entry Point.
-# Version: 2.1 (Production Ready - Robust Init & Shutdown)
+# Version: 3.0 (Genius Agentic - Production Ready)
 
 import asyncio
 import logging
 import os
 import sys
+import traceback # For detailed error logging
 from dotenv import load_dotenv
 
 # --- Environment Loading (Must be first) ---
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env.local')
 if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path=dotenv_path)
-    # Use print for immediate feedback before logging is fully configured
-    print(f"[INFO] main.py: Loaded environment variables from: {dotenv_path}")
+    print(f"[INFO] main.py: Loaded environment variables from: {dotenv_path}") # Use print before logging
 else:
     print(f"[INFO] main.py: .env.local file not found at {dotenv_path}. Relying on system environment variables.")
 
 # --- Basic Logging Setup (Configure early) ---
-# Ensure logs go to stdout/stderr for container visibility and to a file
 log_file_path = "agency.log"
 logging.basicConfig(
-    level=logging.INFO, # Default level, consider changing via ENV VAR for debug
+    level=logging.INFO, # Consider using os.getenv("LOG_LEVEL", "INFO").upper()
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
     handlers=[
-        logging.FileHandler(log_file_path, mode='a'), # Append to log file
-        logging.StreamHandler(sys.stdout) # Log to console
+        logging.FileHandler(log_file_path, mode='a'),
+        logging.StreamHandler(sys.stdout)
     ],
     datefmt='%Y-%m-%d %H:%M:%S'
 )
-# Optionally set higher level for noisy libraries
-# logging.getLogger("aiohttp").setLevel(logging.WARNING)
+# Silence noisy libraries if needed
 # logging.getLogger("asyncio").setLevel(logging.WARNING)
+# logging.getLogger("urllib3").setLevel(logging.WARNING)
+# logging.getLogger("playwright").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 logger.info("-------------------- Application Starting --------------------")
@@ -48,15 +48,16 @@ try:
     logger.info("Orchestrator class imported successfully.")
 except ImportError as e:
      logger.critical(f"Fatal Error: Failed to import core components: {e}. Check project structure and PYTHONPATH.", exc_info=True)
-     sys.exit(1) # Exit if core components cannot be imported
+     sys.exit(1)
 except ValueError as e:
-     logger.critical(f"Fatal Error: Configuration validation failed: {e}. Check environment variables defined in config/settings.py and your .env.local file.", exc_info=True)
-     sys.exit(1) # Exit if configuration is invalid
+     # Catches errors from settings validation
+     logger.critical(f"Fatal Error: Configuration validation failed: {e}. Check environment variables.", exc_info=True)
+     sys.exit(1)
 except Exception as e:
      logger.critical(f"Fatal Error: Unexpected error during initial imports: {e}", exc_info=True)
      sys.exit(1)
 
-# Global Orchestrator instance (consider dependency injection for larger apps)
+# Global Orchestrator instance
 orchestrator_instance: Optional[Orchestrator] = None
 
 async def start_agency():
@@ -64,24 +65,22 @@ async def start_agency():
     global orchestrator_instance
     logger.info("Initializing AI Agency Orchestrator...")
     try:
-        # Schema can be default 'public' or configured if needed via settings
-        orchestrator_instance = Orchestrator(schema='public') # Settings accessed via self.config inside
+        # Pass the validated settings object to the orchestrator if needed,
+        # but current design reads from imported settings object directly.
+        orchestrator_instance = Orchestrator(schema='public') # Assuming default schema
         logger.info("Orchestrator instance created. Starting main execution loop...")
 
         # The run method contains the main async loop for the agency's background tasks
         # It handles internal initialization (DB, clients, agents)
         await orchestrator_instance.run()
 
-        # This line might only be reached if orchestrator.run() finishes normally (e.g., receives a stop signal internally)
+        # This line might only be reached if orchestrator.run() finishes normally
         logger.info("Orchestrator run loop finished normally.")
 
     except ValueError as e:
-         # Catch potential ValueErrors during Orchestrator init if settings validation missed something
          logger.critical(f"Fatal Error: Orchestrator initialization failed: {e}", exc_info=True)
-         # No orchestrator instance to stop, just exit
          sys.exit(1)
     except RuntimeError as e:
-         # Catch RuntimeErrors raised during orchestrator's internal init (e.g., DB/Agent init failure)
          logger.critical(f"Fatal Error: Orchestrator internal initialization failed: {e}", exc_info=True)
          sys.exit(1)
     except Exception as e:
@@ -96,48 +95,77 @@ async def main():
     """Main entry point with graceful shutdown handling."""
     global orchestrator_instance
     main_task = None
+    # Get the Quart app instance from the orchestrator
+    # We need to initialize orchestrator first to get the app
+    temp_orchestrator = None
     try:
-        logger.info("Starting AI Agency main task...")
-        main_task = asyncio.create_task(start_agency(), name="AgencyMainTask")
-        await main_task
-    except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received. Initiating graceful shutdown...")
-        if main_task and not main_task.done():
-            main_task.cancel() # Cancel the main agency task
+        temp_orchestrator = Orchestrator(schema='public')
+        app = temp_orchestrator.app # Get the Quart app instance
+    except Exception as init_err:
+        logger.critical(f"Fatal: Could not initialize Orchestrator to get Quart app: {init_err}", exc_info=True)
+        sys.exit(1)
+
+    # Configure Quart server task
+    from hypercorn.config import Config as HypercornConfig
+    from hypercorn.asyncio import serve as hypercorn_serve
+
+    hypercorn_config = HypercornConfig()
+    hypercorn_config.bind = ["0.0.0.0:5000"] # Bind to all interfaces on port 5000
+    hypercorn_config.accesslog = '-' # Log access to stdout
+    hypercorn_config.errorlog = '-' # Log errors to stderr
+
+    # Create tasks for the agency logic and the web server
+    agency_task = asyncio.create_task(start_agency(), name="AgencyMainTask")
+    server_task = asyncio.create_task(hypercorn_serve(app, hypercorn_config), name="WebServerTask")
+
+    # Wait for either task to complete (or fail)
+    done, pending = await asyncio.wait(
+        [agency_task, server_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    # Handle completion/failure
+    for task in done:
+        try:
+            task.result() # Raise exception if task failed
+            logger.info(f"Task {task.get_name()} completed normally.")
+        except asyncio.CancelledError:
+             logger.info(f"Task {task.get_name()} was cancelled.")
+        except Exception as e:
+            logger.critical(f"Task {task.get_name()} failed critically: {e}", exc_info=True)
+            # If one task fails, we likely want to stop the other
+            for p_task in pending:
+                if not p_task.done():
+                    p_task.cancel()
+
+    # Ensure pending tasks are cancelled if loop exits
+    for task in pending:
+        if not task.done():
+            task.cancel()
             try:
-                await main_task # Allow cancellation to propagate
+                await task # Allow cancellation to process
             except asyncio.CancelledError:
-                logger.info("Main agency task successfully cancelled.")
-        # Ensure orchestrator stop is called if instance exists
-        if orchestrator_instance and hasattr(orchestrator_instance, 'stop'):
-             logger.info("Calling orchestrator stop...")
-             await orchestrator_instance.stop() # Trigger agent/task shutdown
-        else:
-             logger.warning("Orchestrator instance not available for stop call during KeyboardInterrupt.")
-    except Exception as e:
-        # Catch any unexpected errors during asyncio execution itself
-        logger.critical(f"Fatal Error: Unhandled exception at main level: {e}", exc_info=True)
-    finally:
-        logger.info("-------------------- Application Stopping --------------------")
-        # Ensure all logs are flushed before exiting
-        logging.shutdown()
+                logger.info(f"Pending task {task.get_name()} cancelled during shutdown.")
+            except Exception as e:
+                 logger.error(f"Error during cancellation of pending task {task.get_name()}: {e}")
+
+    # Final orchestrator stop if needed (might be redundant if agency_task completed/failed)
+    if orchestrator_instance and orchestrator_instance.running:
+        logger.info("Ensuring orchestrator stop is called...")
+        await orchestrator_instance.stop()
 
 if __name__ == "__main__":
-    # Check Python version if needed
-    # if sys.version_info < (3, 8):
-    #     sys.exit("Python 3.8 or higher is required.")
-
-    # Run the main async function
+    logger.info("Starting AI Agency...")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        # This handles Ctrl+C if it happens *very* early before the main() loop starts
-        print("\n[INFO] main.py: Shutdown requested via KeyboardInterrupt (early).")
+        logger.info("Agency shutdown requested via KeyboardInterrupt (Ctrl+C).")
     except Exception as e:
-        # Catch errors during asyncio.run() setup itself
-        print(f"\n[CRITICAL] main.py: Fatal error during asyncio setup: {e}")
-        traceback.print_exc()
+        logger.critical(f"Fatal Error: Unhandled exception at top level: {e}", exc_info=True)
+        traceback.print_exc() # Print traceback directly for critical errors
     finally:
-        print("[INFO] main.py: Process stopped.")
+        logger.info("-------------------- Application Stopping --------------------")
+        logging.shutdown() # Ensure all logs are flushed before exiting
+        print("[INFO] main.py: Process stopped.") # Final print statement
 
 # --- End of main.py ---

@@ -1,5 +1,6 @@
-# utils/database.py
-# Genius-Level Implementation v1.1 - Secure Data Handling with Per-Value Salts & Migration Support
+# Filename: utils/database.py
+# Description: Secure Data Handling & Postgres Session Management.
+# Version: 2.0 (Genius Agentic - Postgres Focused, Per-Value Salts)
 
 import os
 import base64
@@ -11,7 +12,10 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidTag
 from typing import Optional, AsyncGenerator
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+# Import settings AFTER it's defined and validated
+from config.settings import settings
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -20,22 +24,31 @@ logger = logging.getLogger(__name__)
 NONCE_BYTES = 12
 KEY_BYTES = 32
 SALT_BYTES = 16 # Used for new per-value salts
-PBKDF2_ITERATIONS = 600000
+PBKDF2_ITERATIONS = 600000 # Increased iterations for better security
 
 class EncryptionError(Exception):
     """Custom exception for encryption/decryption errors."""
     pass
 
 # --- Core Key Derivation ---
+# Cache the master key bytes to avoid reading env var repeatedly
+_MASTER_KEY_CACHE: bytes | None = None
 
 def _get_master_key() -> bytes:
-    """Retrieves the database master key from environment variables."""
-    master_key_str = os.getenv("DATABASE_ENCRYPTION_KEY")
+    """Retrieves and caches the database master key."""
+    global _MASTER_KEY_CACHE
+    if _MASTER_KEY_CACHE is not None:
+        return _MASTER_KEY_CACHE
+
+    # ### Phase 1 Plan Ref: 2.1 (Use settings for key)
+    master_key_str = settings.DATABASE_ENCRYPTION_KEY
     if not master_key_str:
-        error_msg = "CRITICAL: DATABASE_ENCRYPTION_KEY environment variable not set."
+        error_msg = "CRITICAL: DATABASE_ENCRYPTION_KEY environment variable not set in settings."
         logger.critical(error_msg)
-        raise EncryptionError(error_msg)
-    return master_key_str.encode('utf-8')
+        raise EncryptionError(error_msg) # Fail hard if key is missing
+
+    _MASTER_KEY_CACHE = master_key_str.encode('utf-8')
+    return _MASTER_KEY_CACHE
 
 def _derive_key(salt: bytes) -> bytes:
     """Derives the encryption key using PBKDF2HMAC based on the provided salt."""
@@ -50,13 +63,14 @@ def _derive_key(salt: bytes) -> bytes:
     derived_key = kdf.derive(master_key)
     return derived_key
 
-# --- NEW Per-Value Salt Encryption/Decryption (Default Usage) ---
+# --- Per-Value Salt Encryption/Decryption ---
 
 def encrypt_data(data: Optional[str]) -> Optional[str]:
     """
-    Encrypts string data using AES-GCM with a unique salt and nonce per operation.
+    Encrypts string data using AES-GCM with a unique salt per operation.
     Returns Base64 encoded string: salt(16) + nonce(12) + ciphertext+tag.
     Returns None if input data is None.
+    ### Phase 1 Plan Ref: 2.2 (Verify encryption) - This is the verified implementation.
     """
     if data is None:
         return None
@@ -71,42 +85,47 @@ def encrypt_data(data: Optional[str]) -> Optional[str]:
         nonce = os.urandom(NONCE_BYTES) # Unique nonce per encryption
         data_bytes = data.encode('utf-8')
         encrypted_bytes = aesgcm.encrypt(nonce, data_bytes, None) # AAD is None
-        encrypted_payload = salt + nonce + encrypted_bytes # Prepend unique salt
+        # Prepend salt and nonce to the ciphertext
+        encrypted_payload = salt + nonce + encrypted_bytes
         encoded_payload = base64.urlsafe_b64encode(encrypted_payload).decode('utf-8')
         return encoded_payload
-    except EncryptionError: raise
+    except EncryptionError: raise # Re-raise critical key errors
     except Exception as e:
         logger.exception(f"Encryption failed unexpectedly: {e}")
         raise EncryptionError(f"Encryption failed: {e}")
 
 def decrypt_data(encrypted_data_b64: Optional[str]) -> Optional[str]:
     """
-    Decrypts data encrypted by the updated encrypt_data function (with per-value salt).
+    Decrypts data encrypted by encrypt_data (with per-value salt).
     Expects Base64 encoded input: salt(16) + nonce(12) + ciphertext+tag.
     Returns None if input is None or decryption fails.
+    ### Phase 1 Plan Ref: 2.2 (Verify decryption) - This is the verified implementation.
     """
     if encrypted_data_b64 is None:
         return None
     if not isinstance(encrypted_data_b64, str):
         logger.error(f"Invalid data type for decryption: {type(encrypted_data_b64)}")
-        # Return None instead of raising TypeError for potentially old data during transition?
-        # For now, keep raising TypeError for invalid input type.
         raise TypeError("Encrypted data must be a base64 encoded string.")
 
     try:
         encrypted_payload = base64.urlsafe_b64decode(encrypted_data_b64)
-        min_len = SALT_BYTES + NONCE_BYTES + 16 # salt + nonce + 16 bytes for AES-GCM tag
+        # Minimum length check: Salt + Nonce + 16 bytes for AES-GCM tag
+        min_len = SALT_BYTES + NONCE_BYTES + 16
         if len(encrypted_payload) < min_len:
-             logger.warning(f"Decryption failed: Payload too short ({len(encrypted_payload)} bytes) for salt+nonce+tag. Might be old format data.")
-             # Return None for short payloads, could be old format without salt.
-             return None
+             # This usually means the data wasn't encrypted with this method (or is corrupted)
+             logger.error(f"Decryption failed: Payload too short ({len(encrypted_payload)} bytes) for salt+nonce+tag. Data might be unencrypted or use old format.")
+             return None # Cannot decrypt
 
-        salt = encrypted_payload[:SALT_BYTES] # Extract the salt from the beginning
-        nonce = encrypted_payload[SALT_BYTES : SALT_BYTES + NONCE_BYTES] # Extract the nonce
-        ciphertext_with_tag = encrypted_payload[SALT_BYTES + NONCE_BYTES :] # Extract the rest
+        # Extract components
+        salt = encrypted_payload[:SALT_BYTES]
+        nonce = encrypted_payload[SALT_BYTES : SALT_BYTES + NONCE_BYTES]
+        ciphertext_with_tag = encrypted_payload[SALT_BYTES + NONCE_BYTES :]
 
-        derived_key = _derive_key(salt) # Derive key using the extracted salt
+        # Derive key using the extracted salt
+        derived_key = _derive_key(salt)
         aesgcm = AESGCM(derived_key)
+
+        # Decrypt
         decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, None) # No AAD
         decrypted_string = decrypted_bytes.decode('utf-8')
         return decrypted_string
@@ -114,94 +133,63 @@ def decrypt_data(encrypted_data_b64: Optional[str]) -> Optional[str]:
     except InvalidTag:
         logger.error("Decryption failed: Invalid authentication tag (data tampered or wrong key).")
         return None
-    except EncryptionError as ee:
-        logger.error(f"Decryption failed due to specific encryption error: {ee}")
+    except EncryptionError as ee: # Catch error from _derive_key
+        logger.error(f"Decryption failed due to key derivation error: {ee}")
         return None
     except (ValueError, TypeError, IndexError) as e:
+        # Catches potential base64 decoding errors, slicing errors, or utf-8 decoding errors
         logger.error(f"Decryption failed due to data format or decoding error: {e}")
         return None
     except Exception as e:
+        # Catch-all for any other unexpected errors during decryption
         logger.exception(f"Decryption failed unexpectedly: {e}")
         return None
 
-# --- OLD Fixed-Salt Decryption Logic (For Migration Only) ---
+# --- Database Session Management ---
+# ### Phase 1 Plan Ref: 2.1 (Postgres only connection)
+# ### Phase 1 Plan Ref: 2.4 (Remove KB helpers) - No DB interaction logic here beyond session.
 
-_OLD_FIXED_SALT: bytes | None = None
-_OLD_DERIVED_KEY_CACHE: bytes | None = None
+# Create the engine and session maker once when the module is imported
+try:
+    if not settings.DATABASE_URL:
+        raise ValueError("DATABASE_URL is not configured in settings.")
+    # Use pool_recycle to prevent stale connections, pre-ping to check connection validity
+    async_engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=False, # Set to True for debugging SQL
+        pool_pre_ping=True,
+        pool_recycle=3600 # Recycle connections older than 1 hour
+    )
+    # Session maker configured for async use
+    AsyncSessionMaker = async_sessionmaker(
+        bind=async_engine,
+        class_=AsyncSession,
+        expire_on_commit=False # Important for async usage
+    )
+    logger.info("Successfully created SQLAlchemy async engine and session maker for Postgres.")
+except Exception as e:
+    logger.critical(f"Failed to create database engine or session maker: {e}", exc_info=True)
+    # This is critical, re-raise to prevent application startup without DB access
+    raise RuntimeError(f"Database initialization failed: {e}") from e
 
-def _get_old_fixed_salt() -> bytes:
-    """Gets the OLD fixed salt used before per-value salting. For migration."""
-    global _OLD_FIXED_SALT
-    if _OLD_FIXED_SALT is not None:
-        return _OLD_FIXED_SALT
-
-    old_salt_str = os.getenv("DATABASE_FIXED_SALT", "default_insecure_salt_replace_me") # MUST MATCH OLD VALUE
-    if old_salt_str == "default_insecure_salt_replace_me":
-         logger.warning("Using default insecure fixed salt for migration decryption. Ensure DATABASE_FIXED_SALT env var is set if a custom one was used previously.")
-    try:
-        _OLD_FIXED_SALT = hashlib.sha256(old_salt_str.encode()).digest()[:SALT_BYTES] # Use SALT_BYTES here too for consistency
-        return _OLD_FIXED_SALT
-    except Exception as e:
-        logger.error(f"Failed to derive old fixed salt for migration: {e}")
-        raise EncryptionError(f"Cannot derive old fixed salt needed for migration: {e}")
-
-def _derive_key_old_fixed_salt() -> bytes:
-    """Derives key using the OLD fixed salt. For migration."""
-    global _OLD_DERIVED_KEY_CACHE
-    old_salt = _get_old_fixed_salt()
-
-    if _OLD_DERIVED_KEY_CACHE is not None:
-        return _OLD_DERIVED_KEY_CACHE
-
-    # Derive using the fixed salt
-    derived_key = _derive_key(old_salt) # Use the core _derive_key function
-    _OLD_DERIVED_KEY_CACHE = derived_key
-    return derived_key
-
-def decrypt_data_fixed_salt_migration(encrypted_data_b64: Optional[str]) -> Optional[str]:
-    """
-    Decrypts data encrypted using the OLD fixed salt method. FOR MIGRATION ONLY.
-    Expects Base64 encoded input: nonce(12) + ciphertext+tag.
-    """
-    if encrypted_data_b64 is None: return None
-    if not isinstance(encrypted_data_b64, str):
-        logger.error(f"[Migration Decrypt] Invalid data type: {type(encrypted_data_b64)}")
-        return None # Fail gracefully for migration
-
-    try:
-        encrypted_payload = base64.urlsafe_b64decode(encrypted_data_b64)
-        min_len = NONCE_BYTES + 16 # OLD format: nonce + ciphertext + tag
-        if len(encrypted_payload) < min_len:
-             logger.error(f"[Migration Decrypt] Payload too short ({len(encrypted_payload)} bytes). Value: {encrypted_data_b64[:50]}...")
-             return None
-
-        nonce = encrypted_payload[:NONCE_BYTES]
-        ciphertext_with_tag = encrypted_payload[NONCE_BYTES:]
-
-        derived_key = _derive_key_old_fixed_salt() # Use OLD fixed salt key derivation
-        aesgcm = AESGCM(derived_key)
-        decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
-        return decrypted_bytes.decode('utf-8')
-
-    except InvalidTag:
-        logger.error(f"[Migration Decrypt] Invalid authentication tag. Value: {encrypted_data_b64[:50]}...")
-        return None
-    except EncryptionError as ee: # Catch error from _derive_key_old_fixed_salt
-        logger.error(f"[Migration Decrypt] Failed due to encryption error: {ee}")
-        return None
-    except Exception as e:
-        logger.error(f"[Migration Decrypt] Failed unexpectedly for value '{encrypted_data_b64[:50]}...': {e}")
-        return None
-
-# --- Database Session Utility (Unchanged) ---
-async def get_session(session_maker: async_sessionmaker[AsyncSession]) -> AsyncGenerator[AsyncSession, None]:
-    """Provides an async database session via context manager."""
-    async with session_maker() as session:
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    """Provides an async database session via context manager using the pre-configured maker."""
+    # ### Phase 1 Plan Ref: 2.4 (Keep get_session)
+    async with AsyncSessionMaker() as session:
         try:
             yield session
-        except Exception:
-            await session.rollback()
+            # Commit is typically handled within the agent logic using the session
+            # await session.commit() # Removed - let caller manage commit
+        except Exception as e:
             logger.error("Exception occurred within database session, rolling back.", exc_info=True)
-            raise
+            await session.rollback()
+            raise # Re-raise the exception after rollback
+        # Session is automatically closed by the context manager
+
+# --- DELETED ---
+# ### Phase 1 Plan Ref: 2.3 (Delete old migration function)
+# Function decrypt_data_fixed_salt_migration removed.
+# ### Phase 1 Plan Ref: 2.4 (Delete KB helpers)
+# Functions like log_knowledge_fragment, query_knowledge_base etc. removed.
 
 # --- End of utils/database.py ---
