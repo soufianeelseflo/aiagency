@@ -21,8 +21,8 @@ fake-useragent==1.5.1
 twilio==9.3.3
 deepgram-sdk==3.7.2
 websockets==13.1
+pydantic-settings>=2.0.0
 
-# --- Utilities ---
 tenacity==9.0.0 # For retries
 pybreaker==1.2.0 # For circuit breakers
 python-dotenv==1.0.1 # For loading .env locally
@@ -30,21 +30,8 @@ pytz==2024.1 # For timezone handling
 cryptography==43.0.0 # For database encryption
 requests==2.32.3 # Keep for now, might be used somewhere
 
-# --- Monitoring ---
+
 prometheus-client==0.21.0
 
-# --- Data Handling & Analysis ---
 numpy==1.26.4 # Often a dependency, keep for now
 
-# --- OSINT Tools (Only if Programmer/SocialMedia agents use them via CLI) ---
-# shodan==2.1.0 # Keep ONLY if Programmer/SocialMedia explicitly needs to run Shodan commands
-
-# --- Removed ---
-# google-generativeai (Using OpenRouter)
-# reportlab (No internal PDF generation planned)
-# spacy (No internal NLP planned)
-# scikit-learn (No internal ML planned)
-# aiokafka (Not using Kafka)
-# stable-baselines3 (OptimizationAgent removed)
-# gymnasium / gym (OptimizationAgent removed)
-# python-exiftool (OSINTAgent removed)
