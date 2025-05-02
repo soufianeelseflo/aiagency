@@ -45,7 +45,6 @@ numpy==1.26.4 # Often a dependency, keep for now
 # spacy (No internal NLP planned)
 # scikit-learn (No internal ML planned)
 # aiokafka (Not using Kafka)
-# hcp-vault-secrets (Using env vars)
 # stable-baselines3 (OptimizationAgent removed)
 # gymnasium / gym (OptimizationAgent removed)
 # python-exiftool (OSINTAgent removed)

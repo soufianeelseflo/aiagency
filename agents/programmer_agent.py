@@ -275,7 +275,7 @@ class ProgrammerAgent(GeniusAgentBase):
         else: # Fallback heuristic
              tool_lower = tool_name.lower()
              if tool_lower in ["theharvester", "recon-ng", "exiftool", "nmap", "sqlmap", "jq"]: return f"sudo apt-get update && sudo apt-get install -y {tool_lower}"
-             elif tool_lower in ["photon", "requests", "beautifulsoup4", "playwright", "pytest", "flake8", "numpy", "scikit-learn", "spacy", "pybreaker", "pytz", "sqlalchemy", "asyncpg", "psutil", "reportlab", "openai", "google-generativeai", "tenacity", "prometheus-client", "stable-baselines3", "gymnasium", "aiohttp", "faker", "deepgram-sdk", "websockets", "python-dotenv", "aiokafka", "hcp-vault-secrets", "cryptography"]:
+             elif tool_lower in ["photon", "requests", "beautifulsoup4", "playwright", "pytest", "flake8", "numpy", "scikit-learn", "spacy", "pybreaker", "pytz", "sqlalchemy", "asyncpg", "psutil", "reportlab", "openai", "google-generativeai", "tenacity", "prometheus-client", "stable-baselines3", "gymnasium", "aiohttp", "faker", "deepgram-sdk", "websockets", "python-dotenv", "aiokafka", "cryptography"]:
                  pip_command = f"pip3 install --user {tool_lower}"
                  if tool_lower == "playwright": pip_command += " && python3 -m playwright install --with-deps"
                  if tool_lower == "spacy": pip_command += " && python3 -m spacy download en_core_web_sm" # Add model download
