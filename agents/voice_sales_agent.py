@@ -765,7 +765,19 @@ class VoiceSalesAgent(GeniusAgentBase):
             prompt_parts.append("Keep the response concise, natural, and suitable for the Deepgram Aura TTS voice.")
             if task_context.get('preferred_closing_phrase'): prompt_parts.append(f"Consider using this effective closing phrase: '{task_context['preferred_closing_phrase']}'")
             prompt_parts.append(f"Output ONLY the response text: {task_context.get('desired_output_format')}")
-        else: prompt_parts.append("Analyze the provided context and generate the required output based on the task description.")
+            if enriched_data:
+                prompt_parts.append("\n\n### Prospect Profile")
+                if enriched_data.get("full_name"):
+                    prompt_parts.append(f"Name: {enriched_data['full_name']}")
+                if enriched_data.get("job_title"):  
+                    prompt_parts.append(f"Title: {enriched_data['job_title']}")
+                if enriched_data.get("company_name"):
+                    prompt_parts.append(f"Company: {enriched_data['company_name']}")
+                if enriched_data.get("company_size"):
+                    prompt_parts.append(f"Company Size: {enriched_data['company_size']}")
+                if enriched_data.get("industry"):
+                    prompt_parts.append(f"Industry: {enriched_data['industry']}")
+            else: prompt_parts.append("Analyze the provided context and generate the required output based on the task description.")
 
         if "JSON" in task_context.get('desired_output_format', ''): prompt_parts.append("\n```json")
         final_prompt = "\n".join(prompt_parts)

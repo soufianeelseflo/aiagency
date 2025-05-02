@@ -5,31 +5,148 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Genius AI Sales System - Dashboard</title>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; margin: 0; background-color: #121212; color: #e0e0e0; padding: 20px; }
-        .container { max-width: 1200px; margin: auto; background-color: #1e1e1e; padding: 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5); }
-        h1, h2 { color: #00ccff; text-align: center; border-bottom: 1px solid #444; padding-bottom: 10px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .card { background-color: #2a2a2a; padding: 15px; border-radius: 6px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3); }
-        .card h3 { margin-top: 0; color: #bb86fc; font-size: 1.1em; border-bottom: 1px solid #555; padding-bottom: 5px; }
-        .card p { margin: 5px 0; font-size: 1.2em; font-weight: bold; color: #03dac6; }
-        .card span { font-size: 0.9em; color: #aaa; }
-        .status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
-        .status-running { background-color: #00e676; }
-        .status-stopped { background-color: #ff1744; }
-        .status-error { background-color: #ffea00; }
-        .status-idle { background-color: #607d8b; }
-        .status-working { background-color: #29b6f6; }
-        .status-planning { background-color: #ab47bc; }
-        .status-learning { background-color: #ffa726; }
-        .status-unavailable { background-color: #ff1744; }
-        .status-available { background-color: #00e676; }
-        button { padding: 10px 20px; font-size: 1em; background-color: #00ccff; border: none; border-radius: 5px; color: #fff; cursor: pointer; transition: background-color 0.3s; margin: 5px; }
-        button:hover { background-color: #0099cc; }
-        #approval-status { font-weight: bold; text-align: center; margin-bottom: 20px; padding: 10px; border-radius: 4px; }
+        /* Base Styles */
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            margin: 0;
+            background-color: #121212; /* Dark background */
+            color: #e0e0e0; /* Light text */
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1400px; /* Increased max-width */
+            margin: auto;
+            background-color: #1e1e1e; /* Slightly lighter dark shade */
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+        }
+        h1, h2, h3 {
+            color: #00bcd4; /* Cyan accent */
+            border-bottom: 1px solid #444;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        h1 { text-align: center; font-size: 2em; }
+        h2 { font-size: 1.6em; }
+        h3 { font-size: 1.2em; color: #bb86fc; border-bottom: 1px solid #555; padding-bottom: 5px; margin-top: 0; }
+
+        /* Grid Layout */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); /* Slightly wider cards */
+            gap: 25px;
+            margin-bottom: 35px;
+        }
+
+        /* Card Styles */
+        .card {
+            background-color: #2a2a2a; /* Darker card background */
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
+            transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+        }
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+        }
+        .card p { margin: 8px 0; font-size: 1.4em; font-weight: bold; color: #03dac6; /* Teal accent */ }
+        .card span { font-size: 0.9em; color: #aaa; display: block; margin-top: 5px; }
+
+        /* Status Indicators */
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            vertical-align: middle;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .status-running, .status-available, .status-success { background-color: #00e676; /* Bright Green */ }
+        .status-stopped, .status-unavailable, .status-failure, .status-error, .status-banned { background-color: #ff1744; /* Bright Red */ }
+        .status-warning, .status-limited { background-color: #ffea00; /* Yellow */ }
+        .status-idle, .status-pending, .status-unknown { background-color: #607d8b; /* Blue Grey */ }
+        .status-executing, .status-working, .status-active { background-color: #29b6f6; /* Light Blue */ }
+        .status-planning { background-color: #ab47bc; /* Purple */ }
+        .status-learning { background-color: #ffa726; /* Orange */ }
+        .status-stopping { background-color: #ff7043; /* Deep Orange */ }
+        .status-skipped, .status-cancelled { background-color: #bdbdbd; /* Grey */ }
+
+        /* Control Panel & Buttons */
+        .control-panel, .actions-panel {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 15px;
+            background-color: #2a2a2a;
+            border-radius: 8px;
+        }
+        .actions-panel section {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #444;
+        }
+        .actions-panel section:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+        .actions-panel label { display: block; margin-bottom: 8px; font-weight: bold; color: #00bcd4; }
+        button, input[type="text"], input[type="tel"], textarea {
+            padding: 10px 18px;
+            font-size: 1em;
+            border-radius: 5px;
+            margin: 5px;
+            border: 1px solid #555;
+            background-color: #333;
+            color: #e0e0e0;
+        }
+        button {
+            background-color: #0097a7; /* Darker Cyan */
+            border: none;
+            color: #fff;
+            cursor: pointer;
+            transition: background-color 0.3s, transform 0.1s;
+        }
+        button:hover { background-color: #00bcd4; /* Lighter Cyan */ transform: translateY(-1px); }
+        button:active { transform: translateY(0px); }
+        input[type="text"], input[type="tel"], textarea { width: calc(100% - 40px); max-width: 400px; }
+        textarea { min-height: 80px; resize: vertical; }
+
+        /* Approval Status Banner */
+        #approval-status {
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 1.1em;
+        }
         .approved { background-color: #2e7d32; color: #c8e6c9; }
         .not-approved { background-color: #c62828; color: #ffcdd2; }
-        pre { background-color: #2a2a2a; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.9em; }
-        .grafana-placeholder { border: 1px dashed #555; padding: 20px; text-align: center; color: #888; margin-top: 20px; border-radius: 6px; }
+
+        /* Grafana Placeholder */
+        .grafana-placeholder {
+            border: 1px dashed #555;
+            padding: 30px;
+            text-align: center;
+            color: #888;
+            margin-top: 30px;
+            border-radius: 8px;
+            background-color: #2a2a2a;
+        }
+        .grafana-placeholder code { background-color: #333; padding: 2px 5px; border-radius: 3px; font-family: monospace; }
+
+        /* Responsive Design */
+        @media (max-width: 600px) {
+            .grid { grid-template-columns: 1fr; }
+            h1 { font-size: 1.6em; }
+            h2 { font-size: 1.3em; }
+            .card p { font-size: 1.2em; }
+            input[type="text"], input[type="tel"], textarea { width: calc(100% - 30px); }
+        }
     </style>
 </head>
 <body>
@@ -38,13 +155,12 @@
 
         <div id="approval-status">Loading Approval Status...</div>
 
-        <div class="control-panel" style="text-align: center; margin-bottom: 20px;">
+        <div class="control-panel">
             <button id="approve-button" onclick="approveAgency()" style="display: none;">Approve Agency Operation</button>
-            <!-- Add other control buttons if needed -->
-            <button onclick="downloadData()">Download DB (Requires Password)</button>
-        </div>
+            <button onclick="exportData('clients')">Export Client Data (CSV)</button>
+            </div>
 
-        <h2>Key Performance Indicators (KPIs) - Last 24 Hours</h2>
+        <h2>Key Performance Indicators</h2>
         <div class="grid">
             <div class="card">
                 <h3>Total Profit (All Time)</h3>
@@ -92,7 +208,7 @@
         <div class="grid">
             <div class="card">
                 <h3>Orchestrator</h3>
-                <p id="status-orchestrator"><span class="status-indicator status-stopped"></span>Stopped</p>
+                <div id="status-orchestrator"><span class="status-indicator status-unknown"></span>Unknown</div>
             </div>
             <div class="card">
                 <h3>LLM Clients</h3>
@@ -102,20 +218,45 @@
 
         <h2>Agent Status</h2>
         <div class="grid" id="agent-status-grid">
-            <!-- Agent statuses will be loaded here -->
             <p>Loading agent statuses...</p>
         </div>
 
-        <!-- Placeholder for Grafana Dashboard -->
+        <h2>Actions & Testing</h2>
+        <div class="actions-panel">
+             <section>
+                <h3>Submit Feedback</h3>
+                <label for="feedback-text">Provide feedback on agent performance or strategy:</label>
+                <textarea id="feedback-text" placeholder="Enter your feedback here..."></textarea><br>
+                <button onclick="submitFeedback()">Submit Feedback</button>
+             </section>
+
+             <section>
+                <h3>Test Voice Call</h3>
+                <label for="test-call-number">Enter phone number (E.164 format, e.g., +15551234567):</label>
+                <input type="tel" id="test-call-number" placeholder="+15551234567"><br>
+                <button onclick="testVoiceCall()">Initiate Test Call</button>
+             </section>
+
+             <section>
+                <h3>Generate Sample Videos</h3>
+                <p>Trigger the workflow to generate 3 sample UGC videos and email them to the operator.</p>
+                <button onclick="generateVideos()">Generate Videos</button>
+             </section>
+        </div>
+
+
         <h2>Detailed Monitoring (Grafana)</h2>
         <div class="grafana-placeholder">
             Grafana iframe placeholder. Configure your Grafana dashboard in Coolify and embed the panel URL here using an iframe tag. Example:<br>
-            <code><iframe src="YOUR_GRAFANA_PANEL_URL" width="100%" height="400" frameborder="0"></iframe></code>
+            <code>&lt;iframe src="YOUR_GRAFANA_PANEL_URL_HERE" width="100%" height="600" frameborder="0"&gt;&lt;/iframe&gt;</code>
+            <br><br>
+            Ensure the Grafana panel allows embedding (check Grafana server settings `allow_embedding = true` and panel share options).
         </div>
 
     </div>
 
     <script>
+        // --- DOM Element References ---
         const approvalStatusDiv = document.getElementById('approval-status');
         const approveButton = document.getElementById('approve-button');
         const kpiElements = {
@@ -134,141 +275,264 @@
         const statusOrchestrator = document.getElementById('status-orchestrator');
         const statusLlm = document.getElementById('status-llm');
         const agentStatusGrid = document.getElementById('agent-status-grid');
+        const feedbackTextArea = document.getElementById('feedback-text');
+        const testCallInput = document.getElementById('test-call-number');
+
+        // --- API Fetch & Update Functions ---
 
         async function fetchStatus() {
+            console.debug("Fetching status and KPIs...");
             try {
                 const response = await fetch('/api/status_kpi');
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                    throw new Error(`HTTP error! status: ${response.status} ${response.statusText}`);
                 }
                 const data = await response.json();
+                console.debug("Status data received:", data);
 
-                // Update Approval Status
-                if (data.approved_for_operation) {
-                    approvalStatusDiv.textContent = 'Agency Operation: APPROVED';
-                    approvalStatusDiv.className = 'approved';
-                    approveButton.style.display = 'none';
-                } else {
-                    approvalStatusDiv.textContent = 'Agency Operation: NOT APPROVED (Requires API call to /api/approve)';
-                    approvalStatusDiv.className = 'not-approved';
-                    approveButton.style.display = 'inline-block';
-                }
-
-                // Update KPIs
-                const kpis = data.kpis || {};
-                kpiElements.total_profit.textContent = `$${kpis.total_profit?.toFixed(2) || '0.00'}`;
-                kpiElements.emails_sent_24h.textContent = kpis.emails_sent_24h || 0;
-                kpiElements.emails_opened_24h.textContent = kpis.emails_opened_24h || 0;
-                kpiElements.emails_responded_24h.textContent = kpis.emails_responded_24h || 0;
-                kpiElements.calls_made_24h.textContent = kpis.calls_made_24h || 0;
-                kpiElements.calls_success_24h.textContent = kpis.calls_success_24h || 0;
-                kpiElements.avg_client_score.textContent = kpis.avg_client_score?.toFixed(3) || '0.0';
-                kpiElements.active_clients.textContent = kpis.active_clients || 0;
-
-                // Calculate Rates
-                const openRate = kpis.emails_sent_24h > 0 ? ((kpis.emails_opened_24h || 0) / kpis.emails_sent_24h * 100).toFixed(1) : 0;
-                const responseRate = kpis.emails_sent_24h > 0 ? ((kpis.emails_responded_24h || 0) / kpis.emails_sent_24h * 100).toFixed(1) : 0;
-                const callSuccessRate = kpis.calls_made_24h > 0 ? ((kpis.calls_success_24h || 0) / kpis.calls_made_24h * 100).toFixed(1) : 0;
-                kpiElements.open_rate.textContent = `Open Rate: ${openRate}%`;
-                kpiElements.response_rate.textContent = `Response Rate: ${responseRate}%`;
-                kpiElements.call_success_rate.textContent = `Success Rate: ${callSuccessRate}%`;
-
-
-                // Update Orchestrator Status
-                const orchStatus = data.orchestrator_status || 'unknown';
-                statusOrchestrator.innerHTML = `<span class="status-indicator status-${orchStatus}"></span>${orchStatus.charAt(0).toUpperCase() + orchStatus.slice(1)}`;
-                statusOrchestrator.className = ''; // Clear previous classes
-                statusOrchestrator.classList.add(`status-${orchStatus}`);
-
-
-                // Update LLM Status
-                const llmStatuses = data.llm_client_status || {};
-                let llmHtml = '';
-                if (Object.keys(llmStatuses).length > 0) {
-                    for (const [keyId, status] of Object.entries(llmStatuses)) {
-                        llmHtml += `<p><span class="status-indicator status-${status}"></span>Key ...${keyId}: ${status}</p>`;
-                    }
-                } else {
-                    llmHtml = '<p>No LLM clients initialized or status unavailable.</p>';
-                }
-                statusLlm.innerHTML = llmHtml;
-
-                // Update Agent Statuses
-                const agentStatuses = data.agent_statuses || {};
-                agentStatusGrid.innerHTML = ''; // Clear previous statuses
-                if (Object.keys(agentStatuses).length > 0) {
-                    for (const [agentName, statusInfo] of Object.entries(agentStatuses)) {
-                        const status = statusInfo.status || 'unknown';
-                        const card = document.createElement('div');
-                        card.className = 'card';
-                        card.innerHTML = `
-                            <h3>${agentName}</h3>
-                            <p><span class="status-indicator status-${status}"></span>${status.charAt(0).toUpperCase() + status.slice(1)}</p>
-                            <span>Queue: ${statusInfo.queue_size ?? 'N/A'} | Tasks: ${statusInfo.tasks_processed_session ?? 0} | Errors: ${statusInfo.errors_encountered_session ?? 0}</span>
-                        `;
-                        agentStatusGrid.appendChild(card);
-                    }
-                } else {
-                    agentStatusGrid.innerHTML = '<p>No agent statuses available.</p>';
-                }
+                updateApprovalStatus(data.approved_for_operation);
+                updateKpis(data.kpis);
+                updateOrchestratorStatus(data.orchestrator_status);
+                updateLlmStatus(data.llm_client_status);
+                updateAgentStatuses(data.agent_statuses);
 
             } catch (error) {
                 console.error('Error fetching status:', error);
-                approvalStatusDiv.textContent = 'Error fetching status.';
+                approvalStatusDiv.textContent = `Error fetching status: ${error.message}`;
                 approvalStatusDiv.className = 'not-approved'; // Use error styling
+                // Clear other potentially stale data
+                statusOrchestrator.innerHTML = `<span class="status-indicator status-error"></span>Error`;
+                statusLlm.innerHTML = `<p>Error loading LLM status.</p>`;
+                agentStatusGrid.innerHTML = '<p>Error loading agent statuses.</p>';
             }
         }
 
+        function updateApprovalStatus(isApproved) {
+            if (isApproved) {
+                approvalStatusDiv.textContent = 'Agency Operation: APPROVED';
+                approvalStatusDiv.className = 'approved';
+                approveButton.style.display = 'none';
+            } else {
+                approvalStatusDiv.textContent = 'Agency Operation: NOT APPROVED (Requires API call or button click)';
+                approvalStatusDiv.className = 'not-approved';
+                approveButton.style.display = 'inline-block';
+            }
+        }
+
+        function updateKpis(kpis = {}) {
+            kpiElements.total_profit.textContent = `$${kpis.total_profit?.toFixed(2) ?? '0.00'}`;
+            kpiElements.emails_sent_24h.textContent = kpis.emails_sent_24h ?? 0;
+            kpiElements.emails_opened_24h.textContent = kpis.emails_opened_24h ?? 0;
+            kpiElements.emails_responded_24h.textContent = kpis.emails_responded_24h ?? 0;
+            kpiElements.calls_made_24h.textContent = kpis.calls_made_24h ?? 0;
+            kpiElements.calls_success_24h.textContent = kpis.calls_success_24h ?? 0;
+            kpiElements.avg_client_score.textContent = kpis.avg_client_score?.toFixed(3) ?? '0.0';
+            kpiElements.active_clients.textContent = kpis.active_clients ?? 0;
+
+            // Calculate Rates
+            const sent = kpis.emails_sent_24h ?? 0;
+            const opened = kpis.emails_opened_24h ?? 0;
+            const responded = kpis.emails_responded_24h ?? 0;
+            const callsMade = kpis.calls_made_24h ?? 0;
+            const callsSuccess = kpis.calls_success_24h ?? 0;
+
+            const openRate = sent > 0 ? (opened / sent * 100).toFixed(1) : '0.0';
+            const responseRate = sent > 0 ? (responded / sent * 100).toFixed(1) : '0.0';
+            const callSuccessRate = callsMade > 0 ? (callsSuccess / callsMade * 100).toFixed(1) : '0.0';
+
+            kpiElements.open_rate.textContent = `Open Rate: ${openRate}%`;
+            kpiElements.response_rate.textContent = `Response Rate: ${responseRate}%`;
+            kpiElements.call_success_rate.textContent = `Success Rate: ${callSuccessRate}%`;
+        }
+
+        function updateOrchestratorStatus(orchStatus = 'unknown') {
+            const statusClass = `status-${orchStatus.toLowerCase().replace('_', '-')}`;
+            statusOrchestrator.innerHTML = `<span class="status-indicator ${statusClass}"></span>${orchStatus.charAt(0).toUpperCase() + orchStatus.slice(1)}`;
+        }
+
+        function updateLlmStatus(llmStatuses = {}) {
+            let llmHtml = '';
+            if (Object.keys(llmStatuses).length > 0) {
+                for (const [keyId, status] of Object.entries(llmStatuses)) {
+                    const statusClass = `status-${status.toLowerCase()}`;
+                    // Display only last 4 chars of key ID for brevity/security
+                    const displayKeyId = keyId.length > 4 ? `...${keyId.slice(-4)}` : keyId;
+                    llmHtml += `<p><span class="status-indicator ${statusClass}"></span>Key ${displayKeyId}: ${status}</p>`;
+                }
+            } else {
+                llmHtml = '<p>No LLM clients initialized or status unavailable.</p>';
+            }
+            statusLlm.innerHTML = llmHtml;
+        }
+
+        function updateAgentStatuses(agentStatuses = {}) {
+            agentStatusGrid.innerHTML = ''; // Clear previous statuses
+            if (Object.keys(agentStatuses).length > 0) {
+                // Sort agents alphabetically for consistent order
+                const sortedAgentNames = Object.keys(agentStatuses).sort();
+                sortedAgentNames.forEach(agentName => {
+                    const statusInfo = agentStatuses[agentName];
+                    const status = statusInfo.status || 'unknown';
+                    const statusClass = `status-${status.toLowerCase().replace('_', '-')}`;
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    // Display more detailed info if available
+                    const queueSize = statusInfo.queue_size ?? 'N/A';
+                    const tasksProcessed = statusInfo.tasks_processed_session ?? 0;
+                    const errors = statusInfo.errors_encountered_session ?? 0;
+                    const currentTask = statusInfo.current_task_id ? ` | Task: ${statusInfo.current_task_id.substring(0, 8)}...` : '';
+
+                    card.innerHTML = `
+                        <h3>${agentName}</h3>
+                        <p><span class="status-indicator ${statusClass}"></span>${status.charAt(0).toUpperCase() + status.slice(1)}</p>
+                        <span>Queue: ${queueSize} | Tasks: ${tasksProcessed} | Errors: ${errors}${currentTask}</span>
+                        ${statusInfo.last_error_ts ? `<span style="color: #ffea00;">Last Error: ${new Date(statusInfo.last_error_ts).toLocaleString()}</span>` : ''}
+                    `;
+                    agentStatusGrid.appendChild(card);
+                });
+            } else {
+                agentStatusGrid.innerHTML = '<p>No agent statuses available.</p>';
+            }
+        }
+
+
+        // --- Action Functions ---
+
         async function approveAgency() {
-            if (!confirm('Are you sure you want to approve the agency for full operation?')) return;
+            if (!confirm('Are you sure you want to approve the agency for full operation? This enables potentially costly actions.')) return;
             try {
                 const response = await fetch('/api/approve_agency', { method: 'POST' });
                 const data = await response.json();
-                if (data.status === 'approved') {
-                    alert('Agency approved!');
-                    fetchStatus(); // Refresh status display
+                if (response.ok && data.status === 'approved') {
+                    alert('Agency approved successfully!');
+                    fetchStatus(); // Refresh status display immediately
                 } else {
-                    alert(`Approval failed: ${data.error || 'Unknown error'}`);
+                    alert(`Approval failed: ${data.error || data.message || 'Unknown error'}`);
                 }
             } catch (e) {
-                alert(`Error: ${e.message}`);
+                console.error("Approve agency error:", e);
+                alert(`Error sending approval request: ${e.message}`);
             }
         }
 
-        async function downloadData() {
-            const password = prompt("Enter password to download data:");
+        async function exportData(exportType = 'clients') {
+            const password = prompt("Enter password to export data:");
             if (!password) return;
             try {
-                const response = await fetch('/api/download_data', {
+                const response = await fetch('/api/export_data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password })
+                    body: JSON.stringify({ password: password, type: exportType })
                 });
+
                 if (response.ok) {
                     const blob = await response.blob();
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.style.display = 'none';
                     a.href = url;
-                    // Use a generic name as direct DB download isn't ideal for Postgres
-                    a.download = 'agency_export_data.json'; // Suggest JSON export instead
-                    alert("Note: Direct DB download isn't supported for Postgres. This endpoint should ideally trigger a data export (e.g., JSON/CSV). Placeholder download initiated.");
-                    // document.body.appendChild(a);
-                    // a.click();
-                    // window.URL.revokeObjectURL(url);
-                    // document.body.removeChild(a);
+                    // Extract filename from content-disposition or default
+                    const disposition = response.headers.get('content-disposition');
+                    let filename = `${exportType}_export.csv`; // Default filename
+                    if (disposition && disposition.indexOf('attachment') !== -1) {
+                        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+                        const matches = filenameRegex.exec(disposition);
+                        if (matches != null && matches[1]) {
+                          filename = matches[1].replace(/['"]/g, '');
+                        }
+                    }
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    alert(`${exportType} data export started.`);
                 } else {
                     const data = await response.json();
-                    alert(`Download failed: ${data.error || response.statusText}`);
+                    alert(`Export failed: ${data.error || response.statusText}`);
                 }
             } catch (e) {
-                alert(`Error: ${e.message}`);
+                console.error("Export data error:", e);
+                alert(`Error exporting data: ${e.message}`);
             }
         }
 
-        // Fetch status immediately and then every 10 seconds
-        fetchStatus();
-        setInterval(fetchStatus, 10000); // Refresh every 10 seconds
+        async function submitFeedback() {
+            const feedback = feedbackTextArea.value.trim();
+            if (!feedback) {
+                alert("Please enter feedback before submitting.");
+                return;
+            }
+            try {
+                const response = await fetch('/api/submit_feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ feedback: feedback })
+                });
+                const data = await response.json();
+                if (response.ok && data.status === 'success') {
+                    alert('Feedback submitted successfully!');
+                    feedbackTextArea.value = ''; // Clear the text area
+                } else {
+                    alert(`Feedback submission failed: ${data.error || data.message || 'Unknown error'}`);
+                }
+            } catch (e) {
+                console.error("Submit feedback error:", e);
+                alert(`Error submitting feedback: ${e.message}`);
+            }
+        }
+
+        async function testVoiceCall() {
+            const phoneNumber = testCallInput.value.trim();
+            // Basic validation - E.164 format allows '+' and digits
+            if (!phoneNumber || !/^\+?[1-9]\d{1,14}$/.test(phoneNumber)) {
+                alert("Please enter a valid phone number in E.164 format (e.g., +15551234567).");
+                return;
+            }
+            if (!confirm(`Initiate a test call to ${phoneNumber}?`)) return;
+
+            try {
+                const response = await fetch('/api/test_voice_call', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone_number: phoneNumber })
+                });
+                const data = await response.json();
+                if (response.ok && data.status === 'success') {
+                    alert(`Test call initiation requested for ${phoneNumber}. Check agent logs.`);
+                    testCallInput.value = ''; // Clear input
+                } else {
+                    alert(`Test call failed: ${data.error || data.message || 'Unknown error'}`);
+                }
+            } catch (e) {
+                console.error("Test call error:", e);
+                alert(`Error initiating test call: ${e.message}`);
+            }
+        }
+
+        async function generateVideos() {
+            if (!confirm('Trigger the workflow to generate 3 sample videos and email them? This might take time and incur costs.')) return;
+            try {
+                const response = await fetch('/api/generate_videos', { method: 'POST' });
+                const data = await response.json();
+                if (response.ok && data.status === 'success') {
+                    alert('Video generation workflow initiated! Check agent logs and operator email.');
+                } else {
+                    alert(`Video generation trigger failed: ${data.error || data.message || 'Unknown error'}`);
+                }
+            } catch (e) {
+                console.error("Generate videos error:", e);
+                alert(`Error triggering video generation: ${e.message}`);
+            }
+        }
+
+        // --- Initial Load & Periodic Refresh ---
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log("Dashboard DOM loaded. Fetching initial status...");
+            fetchStatus(); // Fetch status immediately on load
+            setInterval(fetchStatus, 15000); // Refresh every 15 seconds
+        });
+
     </script>
 </body>
 </html>

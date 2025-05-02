@@ -1,54 +1,44 @@
 # Filename: agents/browsing_agent.py
-# Description: Genius Agentic Browsing Agent - Handles all web interactions,
-#              multi-instance management, proxy rotation, anti-ban, and task execution.
-# Version: 3.0 (Genius Agentic - Multi-Instance, Clay API, Trial Creation)
+# Description: Genius Agentic Browsing Agent - Handles web scraping, searching,
+#              data extraction, proxy management, and Clay.com API integration.
+# Version: 2.0 (Genius Agentic - Production Ready with Clay API)
 
 import asyncio
 import logging
 import json
 import os
 import random
+import re
 import time
-import base64
-import re # Added for sanitizing filenames etc.
-import uuid # Added for unique identifiers
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Tuple, Union
-from urllib.parse import urlparse
+import aiohttp # For Clay.com API calls
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union, Tuple, AsyncGenerator, Type
+from urllib.parse import urlparse, urljoin
 
 # --- Core Framework Imports ---
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.exc import SQLAlchemyError
 
 # --- Project Imports ---
 try:
-    # Use production-ready base class
     from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
 except ImportError:
-    # Fallback, log warning
     logging.warning("Production base agent not found, using GeniusAgentBase. Ensure base_agent_prod.py is used.")
-    from .base_agent import GeniusAgentBase
+    from .base_agent import GeniusAgentBase # Fallback
 
-from models import AccountCredentials # To log new account details
-from config.settings import settings # Access validated settings
-from utils.database import encrypt_data # For encrypting credentials before logging
+from models import KnowledgeFragment, AccountCredentials, StrategicDirective # Add relevant models
+from config.settings import settings # Use validated settings
+from utils.database import encrypt_data, decrypt_data # Use DB utils
 
-# --- Web Interaction Libraries ---
-import aiohttp # For direct API calls like Clay.com
+# --- External Libraries ---
 try:
-    from playwright.async_api import (
-        async_playwright, Playwright, Browser, BrowserContext, Page, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
-    )
+    from playwright.async_api import async_playwright, Playwright, Browser, Page, Error as PlaywrightError
 except ImportError:
-    logging.critical("Playwright library not found. BrowsingAgent cannot function. Install: pip install playwright && python -m playwright install --with-deps")
-    raise ImportError("Playwright is required for BrowsingAgent")
-
-try:
-    from fake_useragent import UserAgent
-except ImportError:
-    logging.warning("fake_useragent not installed. Using default User-Agent.")
-    UserAgent = None # Define as None if import fails
+    logging.critical("Playwright library not found. BrowsingAgent requires 'pip install playwright' and 'playwright install'.")
+    raise
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
+from bs4 import BeautifulSoup # For basic HTML parsing if needed
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -58,57 +48,71 @@ op_logger = logging.getLogger('OperationalLog') # Assuming setup elsewhere
 # --- Meta Prompt ---
 BROWSING_AGENT_META_PROMPT = """
 You are the BrowsingAgent within the Synapse AI Sales System.
-Your Core Mandate: Execute all web-based interactions flawlessly and stealthily as directed by the Orchestrator/ThinkTool. This includes scraping, API calls (via HTTP or browser automation), social media actions, and account creation/management.
+Your Core Mandate: Intelligently navigate the web, extract critical information, manage proxies effectively, and integrate with Clay.com API to support the agency's sales and data enrichment goals ($10k+/day -> $100M/8mo).
 Key Responsibilities:
-1.  **Task Execution:** Reliably perform actions like `scrape_url`, `execute_clay_api_call`, `create_free_trial_account`, `execute_social_post`, `execute_social_interact`, `perform_search_and_summarize`.
-2.  **Multi-Instance Management:** Manage multiple independent browser contexts, each potentially tied to a specific account identity and proxy. Ensure contexts persist state (cookies) for specific identifiers.
-3.  **Proxy & Identity Management:** Utilize proxies provided by the Orchestrator for specific tasks or accounts. Maintain session integrity per context. Use realistic user agents.
-4.  **Anti-Detection & Human Simulation:** Implement techniques to avoid bot detection (random delays between actions, realistic typing speeds, viewport interaction). Handle basic CAPTCHAs by flagging failure if unsolvable.
-5.  **Robust Interaction:** Navigate websites, fill forms, click buttons, handle logins, extract data based on provided selectors or intelligent inference (if necessary). Handle dynamic page loads and waits effectively.
-6.  **Error Handling & Reporting:** Gracefully handle common web errors (timeouts, connection errors, element not found). Take screenshots on failure. Report failures clearly to the Orchestrator.
-7.  **Resource Efficiency:** Close browser contexts and pages promptly when no longer needed or after a period of inactivity.
-**Goal:** Be the reliable "hands and eyes" of the agency on the internet, executing complex web tasks efficiently and avoiding bans.
+1.  **Intelligent Web Navigation & Scraping:** Access URLs, perform searches, analyze page structures (using LLM if needed), extract specific data points (text, links, structured data), and handle dynamic content (JavaScript rendering).
+2.  **Proxy Management & Rotation:** Utilize and manage a pool of proxies (e.g., Smartproxy) for requests. Implement rotation strategies, handle authentication, and track proxy performance/bans. Provide proxies to other agents via Orchestrator if requested.
+3.  **Data Extraction & Structuring:** Extract relevant information based on task requirements or LLM analysis. Structure the extracted data (e.g., into JSON) for downstream use.
+4.  **Clay.com API Integration:** Directly call Clay.com API endpoints (as tasked by ThinkTool/Orchestrator) for data enrichment or workflow triggers using scraped data. Process and return Clay API results.
+5.  **Error Handling & Resilience:** Gracefully handle website changes, anti-scraping measures, proxy failures, and timeouts using retries and fallback strategies.
+6.  **Learning & Adaptation:** Learn effective scraping selectors, identify reliable proxy patterns, adapt to website structure changes, and potentially learn optimal times/methods for accessing specific sites.
+7.  **Collaboration & Reporting:** Execute browsing/scraping/Clay tasks delegated by the Orchestrator. Report extracted data, summaries, errors, and operational insights. Log relevant findings to the Knowledge Base via ThinkTool.
+**Goal:** Be the agency's reliable eyes and hands on the web and its interface to Clay.com, providing accurate data and enabling automated workflows while navigating complexities and maintaining operational integrity.
 """
 
 class BrowsingAgent(GeniusAgentBase):
     """
-    Browsing Agent (Genius Level): Executes all web interactions, manages browser instances,
-    handles proxies, simulates human behavior, and performs tasks like scraping, API calls,
-    account creation, and social media actions.
-    Version: 3.0
+    Browsing Agent (Genius Level): Navigates the web, scrapes data, manages proxies,
+    and integrates directly with the Clay.com API.
+    Version: 2.0
     """
     AGENT_NAME = "BrowsingAgent"
 
-    def __init__(self, session_maker: async_sessionmaker[AsyncSession], orchestrator: Any, smartproxy_password: Optional[str]):
+    def __init__(self, session_maker: async_sessionmaker[AsyncSession], orchestrator: Any, smartproxy_password: Optional[str] = None):
         """Initializes the BrowsingAgent."""
-        # ### Phase 3 Plan Ref: 6.1 (Implement __init__)
         super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, session_maker=session_maker)
         self.meta_prompt = BROWSING_AGENT_META_PROMPT
+        self.think_tool = orchestrator.agents.get('think') # Reference ThinkTool if needed
 
-        # Playwright instance management
-        self._playwright: Optional[Playwright] = None
-        self._browser: Optional[Browser] = None
-        self._contexts: Dict[str, BrowserContext] = {} # identifier -> context
-        self._context_locks: Dict[str, asyncio.Lock] = {} # identifier -> lock (for safe access/creation)
-        self._context_last_used: Dict[str, float] = {} # identifier -> timestamp
+        # Store secrets passed directly
+        self._smartproxy_password = smartproxy_password
+        self._smartproxy_user = self.config.get("SMARTPROXY_USER")
+        self._smartproxy_host = self.config.get("SMARTPROXY_HOST")
+        self._smartproxy_port = self.config.get("SMARTPROXY_PORT")
 
-        # Proxy configuration
-        self._proxy_username = self.config.get("SMARTPROXY_USERNAME")
-        self._proxy_password = smartproxy_password # Passed during init
-        self._proxy_endpoint_base = os.getenv("SMARTPROXY_ENDPOINT", "gate.smartproxy.com:7000") # Example
+        # --- Internal State Initialization ---
+        self.internal_state = getattr(self, 'internal_state', {})
+        self.internal_state['playwright_instance'] = None # type: Optional[Playwright]
+        self.internal_state['browser_instance'] = None # type: Optional[Browser]
+        self.internal_state['active_pages'] = {} # page_id -> Page object
+        self.internal_state['proxy_pool'] = self._load_proxies() # Load initial proxy config
+        self.internal_state['current_proxy_index'] = 0
+        self.internal_state['proxy_stats'] = {} # proxy_url -> {'success': N, 'failure': N, 'last_used': datetime}
+        self.internal_state['user_agent'] = self.config.get("BROWSER_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36") # Example User Agent
+        self.internal_state['max_concurrent_pages'] = int(self.config.get("BROWSER_MAX_CONCURRENT_PAGES", 5))
+        self.internal_state['page_semaphore'] = asyncio.Semaphore(self.internal_state['max_concurrent_pages'])
+        self.internal_state['default_timeout_ms'] = int(self.config.get("BROWSER_DEFAULT_TIMEOUT_MS", 60000)) # 60 seconds
 
-        # User Agent Generator
-        self.user_agent_generator = None
-        try:
-            if UserAgent: self.user_agent_generator = UserAgent()
-        except Exception as ua_err:
-            self.logger.warning(f"Failed to initialize fake_useragent: {ua_err}. Using default UA.")
+        self.logger.info(f"{self.AGENT_NAME} v2.0 initialized. Max Pages: {self.internal_state['max_concurrent_pages']}")
 
-        self.logger.info(f"{self.AGENT_NAME} v3.0 initialized.")
-        # Start Playwright in the background
-        asyncio.create_task(self._ensure_playwright_running())
-        # Start context cleanup task
-        asyncio.create_task(self._periodic_context_cleanup())
+    def _load_proxies(self) -> List[Dict]:
+        """Loads proxy configurations."""
+        proxies = []
+        # Example: Load Smartproxy rotating residential proxy
+        if self._smartproxy_user and self._smartproxy_password and self._smartproxy_host and self._smartproxy_port:
+            # Format for Playwright proxy setting
+            proxy_server = f"http://{self._smartproxy_host}:{self._smartproxy_port}"
+            proxies.append({
+                "server": proxy_server,
+                "username": self._smartproxy_user,
+                "password": self._smartproxy_password,
+                "type": "smartproxy_rotating" # Identifier
+            })
+            self.logger.info(f"Loaded Smartproxy configuration: {proxy_server}")
+        else:
+            self.logger.warning("Smartproxy credentials/host/port missing. Proxy functionality limited.")
+        # TODO: Extend to load other proxy types or lists from config/DB if needed
+        return proxies
 
     async def log_operation(self, level: str, message: str):
         """Helper to log to the operational log file."""
@@ -120,612 +124,595 @@ class BrowsingAgent(GeniusAgentBase):
 
     # --- Playwright Lifecycle Management ---
 
-    async def _ensure_playwright_running(self):
-        """Starts Playwright and launches a persistent browser instance if not already running."""
-        # ### Phase 3 Plan Ref: 6.1
-        if self._browser and self._browser.is_connected():
-            self.logger.debug("Playwright browser already running.")
-            return True
-        try:
-            self.logger.info("Initializing Playwright and launching browser...")
-            self._playwright = await async_playwright().start()
-            # Launch Chromium. Headless=True for server environments.
-            self._browser = await self._playwright.chromium.launch(headless=True)
-            self.logger.info("Playwright browser launched successfully.")
-            return True
-        except Exception as e:
-            self.logger.critical(f"Failed to initialize Playwright or launch browser: {e}", exc_info=True)
-            self._status = self.STATUS_ERROR
-            await self._report_error(f"Playwright initialization failed: {e}")
-            return False
+    async def _ensure_browser_running(self):
+        """Ensures Playwright and a browser instance are running."""
+        if self.internal_state.get('browser_instance') and self.internal_state['browser_instance'].is_connected():
+            return # Already running
 
-    async def _shutdown_playwright(self):
-        """Closes all contexts and the browser."""
-        # ### Phase 3 Plan Ref: 6.1
-        self.logger.info("Shutting down Playwright...")
-        for identifier in list(self._contexts.keys()):
-            await self._close_browser_context(identifier)
-        if self._browser and self._browser.is_connected(): # Check connection before closing
+        self.logger.info("Initializing Playwright and launching browser...")
+        try:
+            if not self.internal_state.get('playwright_instance'):
+                self.internal_state['playwright_instance'] = await async_playwright().start()
+
+            # Select proxy for browser launch (optional, can be set per context/page)
+            # proxy_config = self._get_proxy_config() # Get proxy settings if needed for the whole browser
+
+            self.internal_state['browser_instance'] = await self.internal_state['playwright_instance'].chromium.launch(
+                headless=True, # Run headless for server environment
+                # proxy=proxy_config # Apply proxy globally if needed
+                args=['--no-sandbox', '--disable-setuid-sandbox'] # Common args for Linux/Docker
+            )
+            self.logger.info("Playwright browser launched successfully.")
+        except Exception as e:
+            self.logger.critical(f"Failed to launch Playwright browser: {e}", exc_info=True)
+            self._status = self.STATUS_ERROR
+            await self._report_error(f"Failed to launch browser: {e}")
+            raise # Re-raise to indicate critical failure
+
+    async def _close_browser(self):
+        """Closes the browser and stops Playwright if running."""
+        self.logger.info("Attempting to close Playwright browser...")
+        browser = self.internal_state.get('browser_instance')
+        if browser and browser.is_connected():
             try:
-                await self._browser.close()
+                await browser.close()
                 self.logger.info("Playwright browser closed.")
             except Exception as e:
-                self.logger.error(f"Error closing Playwright browser: {e}")
-        if self._playwright:
+                self.logger.error(f"Error closing browser: {e}", exc_info=True)
+        self.internal_state['browser_instance'] = None
+
+        playwright_instance = self.internal_state.get('playwright_instance')
+        if playwright_instance:
             try:
-                # Playwright's stop method is synchronous in the library, run in executor
-                await asyncio.to_thread(self._playwright.stop)
-                self.logger.info("Playwright stopped.")
+                await playwright_instance.stop()
+                self.logger.info("Playwright instance stopped.")
             except Exception as e:
-                self.logger.error(f"Error stopping Playwright: {e}")
-        self._browser = None
-        self._playwright = None
-        self._contexts = {}
-        self._context_locks = {}
-        self._context_last_used = {}
+                self.logger.error(f"Error stopping Playwright: {e}", exc_info=True)
+        self.internal_state['playwright_instance'] = None
+        self.internal_state['active_pages'] = {} # Clear active pages
 
-    # --- Browser Context & Proxy Management ---
+    async def _get_new_page(self) -> Tuple[str, Page]:
+        """Gets a new browser page, respecting concurrency limits."""
+        await self._ensure_browser_running() # Make sure browser is up
+        browser = self.internal_state.get('browser_instance')
+        if not browser: raise RuntimeError("Browser instance is not available.")
 
-    def _get_proxy_config(self, session_id: Optional[str] = None, country: Optional[str] = None) -> Optional[Dict]:
-        """Constructs proxy dictionary for Playwright, potentially with session/geo."""
-        # ### Phase 3 Plan Ref: 6.6 (Proxy config generation)
-        if not self._proxy_username or not self._proxy_password or not self._proxy_endpoint_base:
-            self.logger.warning("Proxy credentials or endpoint missing. Cannot configure proxy.")
+        await self.internal_state['page_semaphore'].acquire() # Wait for available slot
+        page_id = str(uuid.uuid4())
+        page = None
+        try:
+            # --- Proxy Configuration Per Context ---
+            proxy_config = self._get_proxy_config() # Get proxy for this specific context
+
+            context = await browser.new_context(
+                user_agent=self.internal_state['user_agent'],
+                proxy=proxy_config, # Apply proxy per-context
+                java_script_enabled=True,
+                ignore_https_errors=True, # Be cautious with this in production
+                # viewport={'width': 1920, 'height': 1080} # Set viewport if needed
+            )
+            page = await context.new_page()
+            page.set_default_timeout(self.internal_state['default_timeout_ms'])
+            self.internal_state['active_pages'][page_id] = page
+            self.logger.info(f"Created new browser page (ID: {page_id}). Active pages: {len(self.internal_state['active_pages'])}")
+            return page_id, page
+        except Exception as e:
+            self.internal_state['page_semaphore'].release() # Release semaphore on error
+            self.logger.error(f"Failed to create new browser page: {e}", exc_info=True)
+            if page: await self._close_page(page_id, page) # Attempt cleanup
+            raise # Re-raise
+
+    async def _close_page(self, page_id: str, page: Optional[Page] = None):
+        """Closes a specific browser page and releases semaphore."""
+        page_to_close = page or self.internal_state['active_pages'].get(page_id)
+        if page_to_close:
+            try:
+                await page_to_close.close()
+                self.logger.info(f"Closed browser page (ID: {page_id}).")
+            except Exception as e:
+                self.logger.warning(f"Error closing page {page_id}: {e}")
+            finally:
+                self.internal_state['active_pages'].pop(page_id, None)
+                self.internal_state['page_semaphore'].release() # Release semaphore
+                self.logger.debug(f"Semaphore released. Active pages: {len(self.internal_state['active_pages'])}")
+        else:
+             # If page wasn't found but ID exists, ensure semaphore is released
+             if page_id in self.internal_state['active_pages']:
+                 self.internal_state['active_pages'].pop(page_id, None)
+                 self.internal_state['page_semaphore'].release()
+                 self.logger.warning(f"Page {page_id} not found in active list, but released semaphore.")
+
+    # --- Proxy Management ---
+
+    def _get_proxy_config(self) -> Optional[Dict]:
+        """Selects the next proxy from the pool for Playwright."""
+        if not self.internal_state['proxy_pool']:
+            self.logger.debug("No proxies configured.")
             return None
 
-        # Smartproxy session format: user-USERNAME-country-COUNTRY-session-SESSIONID
-        proxy_user = f"user-{self._proxy_username}"
-        if country: proxy_user += f"-country-{country.lower()}"
-        # Use a unique but deterministic session ID based on the identifier
-        session_part = session_id if session_id else f"rand_{random.randint(10000, 99999)}"
-        proxy_user += f"-session-{session_part}"
+        num_proxies = len(self.internal_state['proxy_pool'])
+        self.internal_state['current_proxy_index'] = (self.internal_state['current_proxy_index']) % num_proxies
+        selected_proxy = self.internal_state['proxy_pool'][self.internal_state['current_proxy_index']]
+        self.internal_state['current_proxy_index'] += 1 # Rotate for next time
 
+        proxy_url = selected_proxy.get("server")
+        self.logger.info(f"Selected proxy for next context/page: {proxy_url}")
+
+        # Update stats (can be enhanced to track success/failure)
+        now = datetime.now(timezone.utc)
+        if proxy_url not in self.internal_state['proxy_stats']:
+             self.internal_state['proxy_stats'][proxy_url] = {'success': 0, 'failure': 0, 'last_used': now}
+        else: self.internal_state['proxy_stats'][proxy_url]['last_used'] = now
+
+        # Return format expected by Playwright's context/launch `proxy` option
         return {
-            "server": f"http://{self._proxy_endpoint_base}", # Playwright needs scheme
-            "username": proxy_user,
-            "password": self._proxy_password
+            "server": selected_proxy["server"],
+            "username": selected_proxy.get("username"),
+            "password": selected_proxy.get("password")
         }
 
     async def get_proxy_for_account(self, account_identifier: Optional[str] = None, purpose: str = "general", target_url: Optional[str] = None) -> Optional[str]:
-        """Gets a formatted proxy URL string, potentially specific to an account."""
-        # ### Phase 3 Plan Ref: 6.6 (Proxy URL for Orchestrator/aiohttp)
-        session_id = account_identifier # Use account identifier for sticky session
-        # TODO: Determine country based on target_url or purpose if needed
-        country = None
-        proxy_dict = self._get_proxy_config(session_id=session_id, country=country)
-        if proxy_dict:
-            # Format for aiohttp/requests
-            server_no_scheme = proxy_dict['server'].replace('http://', '').replace('https://', '')
-            return f"http://{proxy_dict['username']}:{proxy_dict['password']}@{server_no_scheme}"
-        return None
-
-    async def _get_browser_context(self, identifier: str, recreate: bool = False) -> Optional[BrowserContext]:
-        """Gets or creates a BrowserContext, potentially with a unique proxy and user agent."""
-        # ### Phase 3 Plan Ref: 6.1 (Multi-instance context management)
-        if not await self._ensure_playwright_running(): return None
-
-        # Ensure a lock exists for this identifier
-        if identifier not in self._context_locks:
-            self._context_locks[identifier] = asyncio.Lock()
-
-        async with self._context_locks[identifier]:
-            if identifier in self._contexts and not recreate:
-                self.logger.debug(f"Reusing existing browser context for identifier: {identifier}")
-                self._context_last_used[identifier] = time.time() # Update last used time
-                return self._contexts[identifier]
-
-            if identifier in self._contexts and recreate:
-                self.logger.info(f"Recreating browser context for identifier: {identifier}")
-                await self._close_browser_context(identifier, acquire_lock=False) # Close existing without re-acquiring lock
-
-            self.logger.info(f"Creating new browser context for identifier: {identifier}")
-            try:
-                # Generate unique proxy session for this context
-                proxy_config = self._get_proxy_config(session_id=identifier)
-                user_agent = self.user_agent_generator.random if self.user_agent_generator else None
-
-                context_options = {
-                    "user_agent": user_agent,
-                    "proxy": proxy_config,
-                    "locale": "en-US",
-                    "timezone_id": "America/New_York", # Example, make configurable?
-                    "geolocation": None, # TODO: Add random geolocation?
-                    "permissions": ["geolocation"], # Example permissions
-                    "java_script_enabled": True,
-                    "accept_downloads": True,
-                }
-                context_options = {k: v for k, v in context_options.items() if v is not None}
-
-                context = await self._browser.new_context(**context_options)
-                self._contexts[identifier] = context
-                self._context_last_used[identifier] = time.time()
-                self.logger.info(f"Browser context created for {identifier} with Proxy Session: {proxy_config['username'] if proxy_config else 'None'}")
-                return context
-            except Exception as e:
-                self.logger.error(f"Failed to create browser context for {identifier}: {e}", exc_info=True)
-                await self._report_error(f"Failed to create browser context for {identifier}: {e}")
-                # Clean up lock if creation failed
-                self._context_locks.pop(identifier, None)
-                return None
-
-    async def _close_browser_context(self, identifier: str, acquire_lock: bool = True):
-        """Closes and removes a specific browser context."""
-        lock = self._context_locks.get(identifier)
-        if not lock:
-             # If no lock exists, context likely doesn't either or was already cleaned up
-             self.logger.debug(f"No lock found for context identifier {identifier} during close request, likely already closed.")
-             self._contexts.pop(identifier, None) # Ensure removal from dicts
-             self._context_last_used.pop(identifier, None)
-             return
-
-        if acquire_lock:
-            acquired = await lock.acquire()
-            if not acquired: # Should not happen with default Lock behavior
-                 self.logger.error(f"Failed to acquire lock for closing context {identifier}")
-                 return
-        try:
-            context = self._contexts.pop(identifier, None)
-            self._context_last_used.pop(identifier, None) # Remove usage timestamp
-            if context:
-                try:
-                    await context.close()
-                    self.logger.info(f"Closed browser context for identifier: {identifier}")
-                except Exception as e:
-                    # Log error but continue cleanup
-                    self.logger.error(f"Error closing context {identifier}: {e}")
+        """Provides a proxy URL, potentially associated with an account."""
+        # This method is called by Orchestrator.get_proxy
+        # Simple implementation: return next available proxy URL string
+        # TODO: Implement more sophisticated logic if proxies need to be pinned to accounts
+        # or selected based on target_url/purpose.
+        selected_proxy_config = self._get_proxy_config()
+        if selected_proxy_config:
+            # Construct URL string if username/password exist
+            url_parts = urlparse(selected_proxy_config["server"])
+            user = selected_proxy_config.get("username")
+            pwd = selected_proxy_config.get("password")
+            if user and pwd:
+                proxy_url_str = f"{url_parts.scheme}://{user}:{pwd}@{url_parts.netloc}"
             else:
-                self.logger.debug(f"Context {identifier} already closed or never existed.")
-            # Remove the lock itself after closing the context
-            self._context_locks.pop(identifier, None)
-        finally:
-            if acquire_lock and lock.locked():
-                lock.release()
-
-    async def _periodic_context_cleanup(self, interval_seconds: int = 300, max_idle_seconds: int = 1800):
-         """Periodically closes contexts that haven't been used recently."""
-         self.logger.info(f"Starting periodic browser context cleanup task (Interval: {interval_seconds}s, Max Idle: {max_idle_seconds}s).")
-         while True:
-             await asyncio.sleep(interval_seconds)
-             now = time.time()
-             closed_count = 0
-             # Iterate over a copy of keys as we might modify the dict
-             for identifier in list(self._contexts.keys()):
-                 last_used = self._context_last_used.get(identifier, 0)
-                 if now - last_used > max_idle_seconds:
-                     self.logger.info(f"Context '{identifier}' idle for > {max_idle_seconds}s. Closing.")
-                     await self._close_browser_context(identifier) # Handles lock acquisition/release
-                     closed_count += 1
-             if closed_count > 0:
-                 self.logger.info(f"Periodic cleanup closed {closed_count} idle browser contexts.")
-
-
-    async def _get_page(self, identifier: str) -> Optional[Page]:
-        """Gets a new page within a specific browser context."""
-        # ### Phase 3 Plan Ref: 6.1
-        context = await self._get_browser_context(identifier)
-        if not context: return None
-        try:
-            page = await context.new_page()
-            # Add stealth measures
-            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            return page
-        except Exception as e:
-            self.logger.error(f"Failed to create new page for context {identifier}: {e}")
+                proxy_url_str = selected_proxy_config["server"]
+            self.logger.info(f"Providing proxy URL: {proxy_url_str} for purpose: {purpose}")
+            return proxy_url_str
+        else:
+            self.logger.warning(f"No proxy available to provide for purpose: {purpose}")
             return None
 
-    # --- Human Simulation Helpers ---
-
-    async def _human_like_type(self, page: Page, selector: str, text: str, delay_ms: int = 110):
-        """Types text into an element with human-like delays."""
-        # ### Phase 3 Plan Ref: 6.5 (Implement human-like interaction)
-        self.logger.debug(f"Typing into selector '{selector}' with human-like delay.")
-        try:
-            # Wait for element and click with slight delay
-            element = page.locator(selector).first # Ensure we target one element
-            await element.wait_for(state='visible', timeout=15000)
-            await element.click(delay=random.uniform(50, 150))
-            await asyncio.sleep(random.uniform(0.1, 0.3)) # Pause after click
-
-            # Use fill with a slight delay before starting
-            await element.fill(text, timeout=15000)
-            # Optional: Add slight pause after filling
-            await asyncio.sleep(random.uniform(0.2, 0.5))
-
-        except PlaywrightError as e:
-            self.logger.warning(f"Playwright error during human-like typing into '{selector}': {e}")
-            raise # Re-raise to be caught by caller
-        except Exception as e:
-             self.logger.error(f"Unexpected error during typing into '{selector}': {e}")
-             raise PlaywrightError(f"Typing failed: {e}") from e
-
-
-    async def _human_like_click(self, page: Page, selector: str, timeout: int = 15000):
-        """Clicks an element with slight random delay after ensuring visibility."""
-        # ### Phase 3 Plan Ref: 6.5 (Implement human-like interaction)
-        self.logger.debug(f"Clicking selector '{selector}' with human-like delay.")
-        try:
-            element = page.locator(selector).first
-            await element.wait_for(state='visible', timeout=timeout)
-            # Optional: Hover briefly before clicking
-            try:
-                await element.hover(timeout=3000)
-                await asyncio.sleep(random.uniform(0.1, 0.4))
-            except Exception:
-                self.logger.debug(f"Hover failed or not applicable for selector '{selector}', proceeding with click.")
-
-            await element.click(delay=random.uniform(80, 200), timeout=timeout)
-            # Optional: Short pause after click
-            await asyncio.sleep(random.uniform(0.1, 0.3))
-        except PlaywrightError as e:
-            self.logger.warning(f"Playwright error during human-like click on '{selector}': {e}")
-            raise # Re-raise
-        except Exception as e:
-             self.logger.error(f"Unexpected error during click on '{selector}': {e}")
-             raise PlaywrightError(f"Click failed: {e}") from e
-
-    # --- Core Task Execution Methods ---
-
-    async def execute_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Executes browsing-related tasks delegated by the Orchestrator."""
-        # ### Phase 3 Plan Ref: 6.7 (Implement execute_task router)
-        action = task_details.get('action')
-        self.logger.info(f"{self.AGENT_NAME} executing action: {action}")
-        self._status = self.STATUS_EXECUTING
-        result = {"status": "failure", "message": f"Unsupported browsing action: {action}"}
-
-        handler_method = None
-        if action == 'scrape_url': handler_method = self._scrape_url_task
-        elif action == 'execute_clay_api_call': handler_method = self._execute_clay_api_call_task
-        elif action == 'create_free_trial_account': handler_method = self._create_free_trial_account_task
-        elif action == 'execute_social_post': handler_method = self._execute_social_post_task
-        elif action == 'execute_social_interact': handler_method = self._execute_social_interact_task
-        elif action == 'perform_search_and_summarize': handler_method = self._perform_search_and_summarize_task
-        # Add other actions...
-
-        if handler_method:
-            try:
-                result = await handler_method(task_details)
-            except PlaywrightError as pe:
-                 self.logger.error(f"Playwright error during action '{action}': {pe}", exc_info=True)
-                 result = {"status": "error", "message": f"Playwright Error: {pe}"}
-                 await self._report_error(f"Playwright Error during {action}: {pe}")
-            except Exception as e:
-                self.logger.error(f"Unexpected error during action '{action}': {e}", exc_info=True)
-                result = {"status": "error", "message": f"Unexpected error: {e}"}
-                await self._report_error(f"Unexpected error during {action}: {e}")
+    def _update_proxy_stats(self, proxy_url: Optional[str], success: bool):
+        """Updates success/failure count for a used proxy."""
+        if not proxy_url or proxy_url not in self.internal_state['proxy_stats']:
+            return
+        if success:
+            self.internal_state['proxy_stats'][proxy_url]['success'] += 1
         else:
-            self.logger.warning(f"No handler found for action: {action}")
+            self.internal_state['proxy_stats'][proxy_url]['failure'] += 1
+        # TODO: Add logic to temporarily disable failing proxies
 
-        self._status = self.STATUS_IDLE
-        return result
+    # --- Clay.com API Integration ---
 
-    # --- Specific Task Handlers ---
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(aiohttp.ClientError))
+    async def call_clay_api(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Makes a direct API call to the specified Clay.com endpoint.
+        (Moved from ThinkTool as per user request)
+        """
+        api_key = self.config.get_secret("CLAY_API_KEY")
+        if not api_key:
+            self.logger.error("Clay.com API key (CLAY_API_KEY) not found.")
+            return {"status": "failure", "message": "Clay API key not configured."}
+        if not endpoint.startswith('/'): endpoint = '/' + endpoint
 
-    async def _scrape_url_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Handles scraping data from a specific URL."""
-        # ### Phase 3 Plan Ref: 6.4 (Add execute_scrape_task)
-        url = task_details.get('url')
-        selectors = task_details.get('selectors') # Dict: {'data_point_name': 'css_selector'}
-        account_identifier = task_details.get('account_identifier', f"scrape_{urlparse(url).netloc}_{uuid.uuid4().hex[:6]}") # Unique ID for scrape task
-        if not url or not isinstance(selectors, dict): return {"status": "failure", "message": "Missing url or valid selectors dict for scrape task."}
+        clay_url = f"https://api.clay.com{endpoint}"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json"}
 
-        page = None
-        scraped_data = {}
+        await self._internal_think(f"Calling Clay API via BrowsingAgent: {endpoint}", details=data)
+        await self.log_operation('debug', f"Calling Clay API endpoint: {endpoint}")
+
         try:
-            await self._internal_think(f"Scraping URL: {url}", details={"selectors": selectors, "context": account_identifier})
-            page = await self._get_page(account_identifier) # Get a page within the context
-            if not page: raise RuntimeError("Failed to get browser page.")
-
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(random.uniform(2, 5)) # Wait for dynamic content
-
-            for name, selector in selectors.items():
-                try:
-                    element = page.locator(selector).first
-                    await element.wait_for(state='visible', timeout=10000) # Wait for element
-                    content = await element.text_content(timeout=5000)
-                    scraped_data[name] = content.strip() if content else None
-                except PlaywrightTimeoutError:
-                    self.logger.warning(f"Timeout finding/waiting for selector '{selector}' for '{name}' on {url}")
-                    scraped_data[name] = None
-                except Exception as loc_err:
-                     self.logger.warning(f"Error extracting selector '{selector}' for '{name}' on {url}: {loc_err}")
-                     scraped_data[name] = None
-
-            self.logger.info(f"Scraping successful for {url}. Found data for {len([v for v in scraped_data.values() if v])} selectors.")
-            return {"status": "success", "data": scraped_data}
-        except Exception as e:
-            self.logger.error(f"Scraping failed for {url}: {e}", exc_info=True)
-            return {"status": "failure", "message": f"Scraping failed: {e}"}
-        finally:
-            if page: await page.close()
-            # Close context after scrape? Optional - keeps session if needed later
-            # await self._close_browser_context(account_identifier)
-
-    async def _execute_clay_api_call_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Handles making a direct API call to Clay.com."""
-        # ### Phase 3 Plan Ref: 6.2 (Implement execute_clay_api_call)
-        api_key = os.getenv("CLAY_API_KEY") # Get key from environment
-        parameters = task_details.get('parameters') # e.g., {"linkedin_url": "...", "enrichment_type": "email"}
-        if not api_key: return {"status": "failure", "message": "Clay.com API key not found in environment."}
-        if not parameters: return {"status": "failure", "message": "Missing parameters for Clay API call."}
-
-        # Construct Clay API request (EXAMPLE - needs actual Clay API docs)
-        clay_api_endpoint = "https://api.clay.com/v1/enrich" # Placeholder URL
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = parameters # Assuming parameters match API body
-
-        await self._internal_think("Executing Clay.com API call", details=payload)
-        try:
-            timeout = aiohttp.ClientTimeout(total=45)
+            timeout = aiohttp.ClientTimeout(total=60) # 60 second timeout
             async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                async with session.post(clay_api_endpoint, json=payload) as response:
-                    response_data = await response.json() if 'application/json' in response.headers.get('Content-Type', '') else await response.text()
-                    if 200 <= response.status < 300:
-                        self.logger.info(f"Clay.com API call successful. Status: {response.status}")
-                        # Report cost to Orchestrator
-                        await self.orchestrator.report_expense(self.AGENT_NAME, 0.01, "API", "Clay.com API Call") # Example cost
+                async with session.post(clay_url, json=data) as response:
+                    response_status = response.status
+                    try: response_data = await response.json(content_type=None) # Try parsing JSON regardless of type
+                    except Exception: response_data = await response.text() # Fallback to text
+
+                    if 200 <= response_status < 300:
+                        self.logger.info(f"Clay API call to {endpoint} successful (Status: {response_status}).")
+                        # Report expense via orchestrator
+                        await self.orchestrator.report_expense(self.AGENT_NAME, 0.02, "API_Clay", f"Clay API Call: {endpoint}") # Example cost
                         return {"status": "success", "data": response_data}
                     else:
-                        self.logger.error(f"Clay.com API call failed. Status: {response.status}, Response: {str(response_data)[:500]}...")
-                        return {"status": "failure", "message": f"Clay API Error (Status {response.status})", "details": response_data}
+                        self.logger.error(f"Clay API call to {endpoint} failed. Status: {response_status}, Response: {str(response_data)[:500]}...")
+                        return {"status": "failure", "message": f"Clay API Error (Status {response_status})", "details": response_data}
+        except asyncio.TimeoutError:
+            self.logger.error(f"Timeout calling Clay API endpoint: {endpoint}")
+            return {"status": "error", "message": f"Clay API call timed out"}
+        except aiohttp.ClientError as e:
+            self.logger.error(f"Network/Connection error calling Clay API endpoint {endpoint}: {e}")
+            raise # Re-raise for tenacity retry
         except Exception as e:
-            self.logger.error(f"Error during Clay.com API call: {e}", exc_info=True)
+            self.logger.error(f"Unexpected error during Clay API call to {endpoint}: {e}", exc_info=True)
             return {"status": "error", "message": f"Clay API call exception: {e}"}
 
-    async def _create_free_trial_account_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Handles creating a new free trial account for a service."""
-        # ### Phase 3 Plan Ref: 6.3 (Implement create_free_trial_account)
-        service = task_details.get('service') # e.g., 'clay.com', 'heygen.com'
-        target_url = task_details.get('target_url') # Signup URL
-        new_email = task_details.get('new_email') # Email provided by ThinkTool/Orchestrator
-        if not service or not target_url or not new_email:
-            return {"status": "failure", "message": "Missing service, target_url, or new_email for trial creation."}
+    async def _process_clay_result(self, clay_data: Dict[str, Any], task_context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Processes data returned from Clay API within the browsing agent's context.
+        (Moved from ThinkTool as per user request)
+        """
+        self.logger.info(f"Processing Clay API result within BrowsingAgent.")
+        await self._internal_think("Processing Clay API result", details=clay_data)
+        processed_result = {"status": "success", "message": "Clay result processed.", "processed_data": None}
 
-        account_identifier = new_email # Use email as the unique ID for this context/proxy
-        page = None
-        context = None # Keep track of context to close it
-        generated_password = f"GeniusP@ss{random.randint(100000,999999)}!" # More complex password
+        # Example: Extract key info and maybe log it or return it
+        # This depends heavily on the task and the expected Clay response structure
+        extracted_info = {}
+        if isinstance(clay_data, dict):
+            extracted_info['email'] = clay_data.get('email') or clay_data.get('person', {}).get('email')
+            extracted_info['linkedin_url'] = clay_data.get('linkedin_url')
+            extracted_info['job_title'] = clay_data.get('job_title') or clay_data.get('person', {}).get('title')
+            extracted_info['company_name'] = clay_data.get('company', {}).get('name')
+            # Add more extraction logic as needed based on the Clay endpoint used
 
-        try:
-            await self._internal_think(f"Creating new trial account for {service} using email {new_email}", details={"url": target_url})
-            context = await self._get_browser_context(account_identifier, recreate=True) # Use a fresh context/proxy/UA
-            if not context: raise RuntimeError("Failed to get browser context for trial creation.")
-            page = await self._get_page(account_identifier) # Get page from this specific context
-            if not page: raise RuntimeError("Failed to get browser page for trial creation.")
+            processed_result["processed_data"] = extracted_info
+            self.logger.info(f"Extracted from Clay result: {extracted_info}")
 
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=90000)
-            await asyncio.sleep(random.uniform(3, 6))
-
-            # --- Platform-Specific Signup Logic ---
-            # Needs refinement based on actual site structure
-            email_selector = 'input[type="email"], input[name*="email"], #email'
-            password_selector = 'input[type="password"], input[name*="password"], #password'
-            name_selector = 'input[name*="name"], #name, #fullname' # Guess common name fields
-            submit_selector = 'button[type="submit"], input[type="submit"], button:has-text("Sign Up"), button:has-text("Create Account"), button:has-text("Continue")'
-
-            await self._human_like_type(page, email_selector, new_email)
-            await self._human_like_type(page, password_selector, generated_password)
-            # Attempt to fill name if selector found
-            try: await self._human_like_type(page, name_selector, f"{new_email.split('@')[0]}") # Use email prefix as name guess
-            except Exception: self.logger.debug(f"Name field not found or failed to fill for {service} signup.")
-
-            await self._human_like_click(page, submit_selector)
-            await page.wait_for_load_state("networkidle", timeout=60000)
-            await asyncio.sleep(random.uniform(2, 4))
-
-            # --- Verification & API Key Extraction ---
-            # TODO: Implement email/SMS verification handling using _VerificationHandler
-            # TODO: Implement API key extraction logic using _extract_api_key_after_signup
-
-            api_key = None # Placeholder
-            signup_confirmed = True # Placeholder - check for dashboard element
-
-            # --- Log Credentials ---
-            if signup_confirmed:
-                self.logger.info(f"Successfully created trial account for {service} ({new_email}). API Key found: {'Yes' if api_key else 'No'}")
-                encrypted_api_key = encrypt_data(api_key) if api_key else None
-                encrypted_password = encrypt_data(generated_password)
-                proxy_used = self._get_proxy_config(session_id=account_identifier).get('server') if self._get_proxy_config(session_id=account_identifier) else None
-
-                # Log to DB via Orchestrator/ThinkTool directive
-                log_task = {
-                    "action": "log_new_credential", # Define this for ThinkTool/Orchestrator
-                    "credential_data": {
-                        "service": service, "account_identifier": new_email,
-                        "api_key": encrypted_api_key, "password": encrypted_password,
-                        "proxy_used": proxy_used, "status": 'active',
-                        "notes": f"Free trial created {datetime.now(timezone.utc).date()}"
-                    }
-                }
-                # Delegate logging task
-                await self.orchestrator.delegate_task("ThinkTool", log_task)
-
-                return {"status": "success", "message": f"Trial account created for {service}.", "account_identifier": new_email, "api_key_found": bool(api_key)}
-            else:
-                self.logger.error(f"Failed to confirm successful signup for {service} ({new_email}).")
-                return {"status": "failure", "message": "Failed to confirm signup success."}
-
-        except Exception as e:
-            self.logger.error(f"Trial account creation failed for {service} ({new_email}): {e}", exc_info=True)
-            return {"status": "error", "message": f"Trial creation exception: {e}"}
-        finally:
-            # Close the specific context used for this signup attempt
-            await self._close_browser_context(account_identifier)
-
-    async def _execute_social_post_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Handles posting content to a social media platform."""
-        # ### Phase 3 Plan Ref: 6.4 (Add execute_social_post)
-        platform = task_details.get('target_platform')
-        account_identifier = task_details.get('account_identifier') # Email or username
-        content = task_details.get('post_content')
-        if not platform or not account_identifier or not content:
-            return {"status": "failure", "message": "Missing platform, account_identifier, or content for social post."}
-
-        page = None
-        context = None # Keep track to close later
-        try:
-            await self._internal_think(f"Posting to {platform} using account {account_identifier}", details={"content": content[:100]+"..."})
-            context = await self._get_browser_context(account_identifier) # Reuse context if exists
-            if not context: raise RuntimeError(f"Failed to get browser context for {account_identifier}")
-            page = await self._get_page(account_identifier)
-            if not page: raise RuntimeError("Failed to get browser page for social post.")
-
-            # --- Platform-Specific Posting Logic ---
-            platform_config = self._get_platform_config(platform)
-            post_url = platform_config.get("post_url", f"https://{platform}/")
-            textarea_selector = platform_config.get("selectors", {}).get("post_textarea")
-            submit_selector = platform_config.get("selectors", {}).get("submit_button")
-
-            if not textarea_selector or not submit_selector:
-                raise ValueError(f"Missing post selectors for platform {platform}")
-
-            await page.goto(post_url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(random.uniform(2, 4))
-
-            # TODO: Implement robust login check and handling using _login_to_service
-
-            await self._human_like_type(page, textarea_selector, content)
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-            await self._human_like_click(page, submit_selector)
-            await page.wait_for_load_state("networkidle", timeout=30000)
-
-            # TODO: Verify post success
-            post_id = f"{platform}_{int(time.time())}" # Placeholder
-
-            self.logger.info(f"Successfully posted to {platform} using account {account_identifier}.")
-            return {"status": "success", "message": "Post successful.", "post_id": post_id}
-
-        except Exception as e:
-            self.logger.error(f"Social post failed for {platform} ({account_identifier}): {e}", exc_info=True)
-            screenshot_path = None
-            if page and not page.is_closed(): screenshot_path = await self._take_screenshot(page, f"social_post_fail_{platform}_{account_identifier}")
-            return {"status": "error", "message": f"Social post exception: {e}", "screenshot": screenshot_path}
-        finally:
-            if page: await page.close()
-            # Don't close context here, let periodic cleanup handle it or specific directive
-
-    async def _execute_social_interact_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Handles interacting (like/comment) on a social media post."""
-        # ### Phase 3 Plan Ref: 6.4 (Add execute_social_interact)
-        self.logger.warning("_execute_social_interact_task not fully implemented.")
-        return {"status": "skipped", "message": "Social interaction not implemented yet."}
-
-    async def _perform_search_and_summarize_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Performs a web search and summarizes results (for Tech Radar)."""
-        # ### Phase 3 Plan Ref: 6.7 (Implement search/summarize for Radar)
-        query = task_details.get('query')
-        num_results = task_details.get('num_results', 3)
-        if not query: return {"status": "failure", "message": "Missing query for search task."}
-
-        page = None
-        context = None
-        search_engine_url = "https://duckduckgo.com/"
-        account_identifier = f"search_{hashlib.sha1(query.encode()).hexdigest()[:8]}"
-
-        try:
-            await self._internal_think(f"Performing web search for: '{query}'", details={"num_results": num_results})
-            context = await self._get_browser_context(account_identifier, recreate=True) # Fresh context
-            if not context: raise RuntimeError("Failed to get browser context for search.")
-            page = await self._get_page(account_identifier)
-            if not page: raise RuntimeError("Failed to get browser page for search.")
-
-            await page.goto(f"{search_engine_url}?q={query.replace(' ', '+')}", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(random.uniform(1, 3))
-
-            link_selector = 'a[data-testid="result-title-a"]'
-            links = await page.locator(link_selector).all()
-            urls_to_scrape = [await link.get_attribute('href') for link in links[:num_results] if await link.get_attribute('href')]
-
-            if not urls_to_scrape: return {"status": "success", "summary": "No relevant search results found.", "results": []}
-
-            scraped_contents = []
-            for url in urls_to_scrape:
-                await asyncio.sleep(random.uniform(1, 2))
+            # Optionally log to KB via ThinkTool if significant insight gained
+            if self.think_tool and extracted_info.get('email'):
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                    body_text = await page.locator('body').inner_text(timeout=10000)
-                    scraped_contents.append({"url": url, "content": body_text[:2000]})
-                except Exception as scrape_err: self.logger.warning(f"Failed to scrape search result {url}: {scrape_err}")
+                    log_task = {
+                        "action": "log_knowledge_fragment",
+                        "fragment_data": {
+                            "agent_source": self.AGENT_NAME, "data_type": "clay_enrichment_result",
+                            "content": extracted_info, "tags": ["clay", "enrichment", "lead_data", "browsing_agent"],
+                            "relevance_score": 0.8, "source_reference": f"BrowsingTask_{task_context.get('id', 'N/A')}"
+                        }
+                    }
+                    await self.orchestrator.delegate_task("ThinkTool", log_task)
+                except Exception as log_err:
+                    self.logger.warning(f"Failed to log Clay result to KB via ThinkTool: {log_err}")
 
-            if not scraped_contents: return {"status": "success", "summary": "Found search results but failed to scrape content.", "results": urls_to_scrape}
+        else:
+             self.logger.warning(f"Received non-dict data for Clay result processing: {type(clay_data)}")
+             processed_result = {"status": "warning", "message": "Received non-dictionary Clay data.", "processed_data": clay_data}
 
-            await self._internal_think("Summarizing search results via LLM.")
-            summary_prompt = f"Summarize the key information relevant to the query '{query}' from the following scraped web content:\n\n"
-            for item in scraped_contents: summary_prompt += f"--- URL: {item['url']} ---\n{item['content']}\n\n"
-            summary_prompt += "\nProvide a concise summary highlighting new tools, techniques, or significant findings."
+        return processed_result
 
-            summary = await self._call_llm_with_retry(summary_prompt, max_tokens=1000, temperature=0.4)
-
-            return {"status": "success", "summary": summary or "Failed to generate summary.", "results": scraped_contents}
-
-        except Exception as e:
-            self.logger.error(f"Search and summarize failed for query '{query}': {e}", exc_info=True)
-            return {"status": "error", "message": f"Search/Summarize exception: {e}"}
-        finally:
-            # Close context used specifically for this search
-            await self._close_browser_context(account_identifier)
-
-    async def _take_screenshot(self, page: Page, base_filename: str) -> Optional[str]:
-         """Takes a screenshot and saves it."""
-         try:
-              screenshot_dir = os.path.join(os.path.dirname(__file__), '..', 'screenshots')
-              os.makedirs(screenshot_dir, exist_ok=True)
-              timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-              safe_base = re.sub(r'[^\w\-]+', '_', base_filename)
-              filename = f"{safe_base}_{timestamp}.png"
-              full_path = os.path.join(screenshot_dir, filename)
-              await page.screenshot(path=full_path, full_page=True)
-              self.logger.info(f"Screenshot saved: {full_path}")
-              return full_path
-         except Exception as e:
-              self.logger.error(f"Failed to take screenshot {base_filename}: {e}")
-              return None
-
-    # --- Abstract Method Implementations ---
+    # --- Core Abstract Method Implementations ---
 
     async def plan_task(self, task_details: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-        self.logger.debug("BrowsingAgent does not plan tasks, relies on directives.")
-        return None
+        """Generates a plan for browsing, scraping, or Clay API tasks."""
+        action = task_details.get('action')
+        plan = []
+        await self._internal_think(f"Planning task: {action}", details=task_details)
 
+        if action == 'scrape_website':
+            url = task_details.get('url')
+            selectors = task_details.get('selectors') # e.g., {"title": "h1", "description": ".desc"}
+            extraction_prompt = task_details.get('extraction_prompt') # For LLM-based extraction
+            if not url: raise ValueError("Missing 'url' for scrape_website task.")
+
+            plan.append({"step": 1, "action": "open_page", "tool": "browser", "params": {"url": url}})
+            if selectors:
+                plan.append({"step": 2, "action": "extract_by_selectors", "tool": "browser", "params": {"selectors": selectors}})
+            elif extraction_prompt:
+                plan.append({"step": 2, "action": "extract_with_llm", "tool": "browser", "params": {"prompt": extraction_prompt}})
+            else:
+                # Default: Extract main content text if no specific instructions
+                plan.append({"step": 2, "action": "extract_main_content", "tool": "browser", "params": {}})
+            plan.append({"step": 3, "action": "close_page", "tool": "browser", "params": {}}) # Ensure cleanup
+
+        elif action == 'perform_search_and_summarize':
+            query = task_details.get('query')
+            num_results = task_details.get('num_results', 3)
+            if not query: raise ValueError("Missing 'query' for search task.")
+            # Simple plan: Use an external search tool/API via orchestrator (if available)
+            # Or implement basic browser-based search
+            plan.append({"step": 1, "action": "execute_search", "tool": "search_engine", "params": {"query": query, "num_results": num_results}})
+            plan.append({"step": 2, "action": "summarize_results", "tool": "llm", "params": {}}) # Use LLM to summarize
+
+        elif action == 'call_clay_api_via_browser_agent': # Specific action name
+            endpoint = task_details.get('endpoint')
+            payload = task_details.get('payload')
+            if not endpoint or not payload: raise ValueError("Missing 'endpoint' or 'payload' for Clay API call task.")
+            plan.append({"step": 1, "action": "execute_clay_call", "tool": "clay_api", "params": {"endpoint": endpoint, "data": payload}})
+            plan.append({"step": 2, "action": "process_clay_response", "tool": "internal", "params": {}})
+
+        # Add more complex planning logic here if needed
+        # e.g., multi-page navigation, form filling
+
+        else:
+            self.logger.warning(f"No specific plan generated for action '{action}'. Assuming direct execution if possible.")
+            # Return None or a single step plan if execute_step can handle it directly
+            return None # Let execute_task handle direct actions
+
+        self.logger.info(f"Generated plan with {len(plan)} steps for action '{action}'.")
+        return plan
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=3, max=10), retry=retry_if_exception_type(PlaywrightError))
     async def execute_step(self, step: Dict[str, Any], task_context: Dict[str, Any]) -> Dict[str, Any]:
-        self.logger.warning(f"execute_step called unexpectedly for BrowsingAgent. Step: {step}")
-        action = step.get("tool") or step.get("action")
-        params = step.get("params", {})
-        params['action'] = action # Ensure action key exists
-        if action: return await self.execute_task(params)
-        else: return {"status": "failure", "message": "Invalid step format for execute_step."}
+        """Executes a single step of a browsing/scraping/Clay plan."""
+        step_action = step.get('action')
+        tool = step.get('tool')
+        params = step.get('params', {})
+        step_num = step.get('step', '?')
+        result = {"status": "failure", "message": f"Step action '{step_action}' not implemented."}
+        page_id = task_context.get("current_page_id") # Track current page across steps
+        page = self.internal_state['active_pages'].get(page_id) if page_id else None
+        proxy_url = page.context.proxy.server if page and page.context.proxy else None # Get proxy used for this page
+
+        await self._internal_think(f"Executing step {step_num}: {step_action}", details=params)
+
+        try:
+            # --- Browser Actions ---
+            if tool == 'browser':
+                if step_action == 'open_page':
+                    url = params.get('url')
+                    if not url: raise ValueError("Missing 'url' parameter.")
+                    if page_id and page: await self._close_page(page_id, page) # Close previous page if any
+                    page_id, page = await self._get_new_page()
+                    task_context["current_page_id"] = page_id # Store for subsequent steps
+                    self.logger.info(f"Navigating page {page_id} to URL: {url}")
+                    response = await page.goto(url, wait_until='domcontentloaded') # Use 'domcontentloaded' or 'load' or 'networkidle'
+                    status_code = response.status if response else None
+                    self.logger.info(f"Page {page_id} navigated to {url}. Status: {status_code}")
+                    if not response or not response.ok:
+                         raise PlaywrightError(f"Failed to load page {url}. Status: {status_code}")
+                    # Optional: Add delay or wait for specific element after load
+                    await page.wait_for_timeout(random.uniform(1500, 3000)) # Small random delay
+                    result = {"status": "success", "message": f"Page opened: {url}", "page_id": page_id, "status_code": status_code}
+                    self._update_proxy_stats(proxy_url, True)
+
+                elif step_action == 'extract_by_selectors':
+                    if not page: raise RuntimeError("No active page found for extraction.")
+                    selectors = params.get('selectors')
+                    if not selectors or not isinstance(selectors, dict): raise ValueError("Invalid 'selectors' parameter.")
+                    extracted_data = {}
+                    self.logger.info(f"Extracting data using selectors on page {page_id}.")
+                    for key, selector in selectors.items():
+                        try:
+                            element = page.locator(selector).first # Take the first match
+                            # Try different ways to get text content
+                            content = await element.text_content(timeout=5000) or await element.inner_text(timeout=5000) or await element.get_attribute('value', timeout=5000) or ""
+                            extracted_data[key] = content.strip()
+                        except PlaywrightError as pe: self.logger.warning(f"Selector '{selector}' for key '{key}' failed on page {page_id}: {pe}"); extracted_data[key] = None
+                        except Exception as e: self.logger.warning(f"Error extracting selector '{selector}' for key '{key}': {e}"); extracted_data[key] = None
+                    result = {"status": "success", "message": "Data extracted via selectors.", "extracted_data": extracted_data}
+                    self._update_proxy_stats(proxy_url, True)
+
+                elif step_action == 'extract_with_llm':
+                    if not page: raise RuntimeError("No active page found for LLM extraction.")
+                    extraction_prompt = params.get('prompt')
+                    if not extraction_prompt: raise ValueError("Missing 'prompt' for LLM extraction.")
+                    self.logger.info(f"Extracting data using LLM analysis on page {page_id}.")
+                    try:
+                        # Get page content (consider simplifying HTML)
+                        # page_content = await page.content() # Full HTML
+                        # Use evaluate to get text content, potentially cleaner
+                        body_text = await page.evaluate("document.body.innerText")
+                        max_len = 8000 # Limit context for LLM
+                        content_snippet = body_text[:max_len] + ("..." if len(body_text) > max_len else "")
+
+                        llm_task_context = {
+                            "task": "Extract structured data from webpage content based on prompt",
+                            "webpage_content_snippet": content_snippet,
+                            "extraction_instructions": extraction_prompt,
+                            "current_url": page.url,
+                            "desired_output_format": "JSON containing the extracted data as requested by the instructions."
+                        }
+                        llm_prompt = await self.generate_dynamic_prompt(llm_task_context)
+                        llm_response_str = await self.orchestrator.call_llm(
+                            agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.2,
+                            max_tokens=1500, is_json_output=True
+                        )
+                        if llm_response_str:
+                             # Basic JSON parsing (improve if needed)
+                             try:
+                                 extracted_data = json.loads(llm_response_str[llm_response_str.find('{'):llm_response_str.rfind('}')+1])
+                                 result = {"status": "success", "message": "Data extracted via LLM.", "extracted_data": extracted_data}
+                             except json.JSONDecodeError: result = {"status": "failure", "message": "LLM returned non-JSON data.", "raw_output": llm_response_str}
+                        else: result = {"status": "failure", "message": "LLM analysis returned no response."}
+                    except Exception as llm_err: result = {"status": "failure", "message": f"Error during LLM extraction: {llm_err}"}
+                    self._update_proxy_stats(proxy_url, True) # Assume proxy worked if page loaded
+
+                elif step_action == 'extract_main_content':
+                     if not page: raise RuntimeError("No active page found for extraction.")
+                     self.logger.info(f"Extracting main text content from page {page_id}.")
+                     try:
+                         body_text = await page.evaluate("document.body.innerText")
+                         result = {"status": "success", "message": "Main content extracted.", "extracted_data": {"main_text": body_text.strip()}}
+                     except Exception as text_err: result = {"status": "failure", "message": f"Error extracting main text: {text_err}"}
+                     self._update_proxy_stats(proxy_url, True)
+
+                elif step_action == 'close_page':
+                    if page_id:
+                        await self._close_page(page_id, page)
+                        task_context["current_page_id"] = None # Clear page ID from context
+                        result = {"status": "success", "message": "Page closed."}
+                    else: result = {"status": "warning", "message": "No active page ID found to close."}
+
+                # Add other browser actions: click, fill_form, screenshot, etc.
+
+            # --- Search Engine Action ---
+            elif tool == 'search_engine':
+                 if step_action == 'execute_search':
+                      query = params.get('query')
+                      num_results = params.get('num_results', 3)
+                      if not query: raise ValueError("Missing 'query' parameter.")
+                      self.logger.info(f"Executing search for: '{query}'")
+                      # Delegate to an external search tool/API via orchestrator
+                      # Example: Using a hypothetical 'google_search' tool
+                      search_tool_result = await self._execute_tool('google_search', {'query': query, 'num_results': num_results}, step_num)
+                      if search_tool_result.get('status') == 'success':
+                           task_context['search_results'] = search_tool_result.get('results', []) # Store for next step
+                           result = {"status": "success", "message": f"Search completed. Found {len(task_context['search_results'])} results.", "result_data": task_context['search_results']}
+                      else: result = search_tool_result # Propagate failure
+                 else: result = {"status": "failure", "message": f"Unknown search engine action: {step_action}"}
+
+            # --- LLM Action (e.g., Summarization) ---
+            elif tool == 'llm':
+                 if step_action == 'summarize_results':
+                      search_results = task_context.get('search_results')
+                      if not search_results: raise ValueError("No search results found in context to summarize.")
+                      self.logger.info(f"Summarizing {len(search_results)} search results using LLM.")
+                      # Prepare content for LLM
+                      content_to_summarize = "\n---\n".join([f"Title: {r.get('title', 'N/A')}\nURL: {r.get('url', 'N/A')}\nSnippet: {r.get('snippet', 'N/A')}" for r in search_results])
+                      max_len = 8000
+                      content_snippet = content_to_summarize[:max_len] + ("..." if len(content_to_summarize) > max_len else "")
+
+                      llm_task_context = {
+                          "task": "Summarize the key information from the provided search results",
+                          "search_results_content": content_snippet,
+                          "desired_output_format": "A concise bulleted list summarizing the main findings."
+                      }
+                      llm_prompt = await self.generate_dynamic_prompt(llm_task_context)
+                      summary = await self.orchestrator.call_llm(
+                          agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.3, max_tokens=1000
+                      )
+                      if summary: result = {"status": "success", "message": "Search results summarized.", "summary": summary, "result_data": summary}
+                      else: result = {"status": "failure", "message": "LLM summarization failed."}
+                 else: result = {"status": "failure", "message": f"Unknown LLM action: {step_action}"}
+
+            # --- Clay API Actions ---
+            elif tool == 'clay_api':
+                 if step_action == 'execute_clay_call':
+                      endpoint = params.get('endpoint')
+                      data = params.get('data')
+                      if not endpoint or not data: raise ValueError("Missing endpoint/data for Clay API call.")
+                      clay_result = await self.call_clay_api(endpoint, data) # Call the method within this agent
+                      task_context['last_clay_response'] = clay_result # Store response for next step
+                      result = clay_result # Pass the result directly
+                 else: result = {"status": "failure", "message": f"Unknown Clay API action: {step_action}"}
+
+            # --- Internal Processing Actions ---
+            elif tool == 'internal':
+                 if step_action == 'process_clay_response':
+                      clay_response = task_context.get('last_clay_response')
+                      if not clay_response: raise ValueError("No Clay API response found in context.")
+                      if clay_response.get("status") == "success":
+                           processed_data = await self._process_clay_result(clay_response.get("data"), task_context)
+                           result = {"status": "success", "message": "Clay response processed.", "result_data": processed_data.get("processed_data")}
+                      else:
+                           # Pass through the failure/error from the API call step
+                           result = {"status": clay_response.get("status", "failure"), "message": f"Clay API call failed: {clay_response.get('message', 'Unknown error')}", "details": clay_response.get("details")}
+                 else: result = {"status": "failure", "message": f"Unknown internal action: {step_action}"}
+
+            # --- Unknown Tool ---
+            else:
+                result = {"status": "failure", "message": f"Unsupported tool type: {tool}"}
+
+        except PlaywrightError as pe:
+            self.logger.error(f"Playwright error during step {step_num} ('{step_action}'): {pe}", exc_info=True)
+            result = {"status": "failure", "message": f"Browser error: {pe}"}
+            # Update proxy stats on failure if proxy was involved
+            self._update_proxy_stats(proxy_url, False)
+            # Attempt to close the problematic page
+            if page_id: await self._close_page(page_id, page)
+            task_context["current_page_id"] = None
+            raise # Re-raise Playwright errors to trigger tenacity retry if configured at task level
+        except Exception as e:
+            self.logger.error(f"Unexpected error during step {step_num} ('{step_action}'): {e}", exc_info=True)
+            result = {"status": "failure", "message": f"Unexpected error: {e}"}
+            self._update_proxy_stats(proxy_url, False) # Assume failure if exception occurs
+            if page_id: await self._close_page(page_id, page) # Cleanup on error
+            task_context["current_page_id"] = None
+            await self._report_error(f"Step {step_num} ('{step_action}') failed: {e}", task_context.get('id'))
+
+        return result
 
     async def learning_loop(self):
-        self.logger.info("BrowsingAgent learning loop: Passive. Performance tracked via task outcomes analyzed by ThinkTool.")
-        while self.status == self.STATUS_RUNNING and not self._stop_event.is_set():
-            await asyncio.sleep(3600)
+        """Autonomous learning cycle for the browsing agent."""
+        self.logger.info("BrowsingAgent learning_loop started.")
+        while not self._stop_event.is_set():
+            try:
+                await self._internal_think("Starting learning cycle: Analyzing proxy performance and website structures.")
+
+                # 1. Analyze Proxy Performance
+                poor_proxies = []
+                for proxy, stats in self.internal_state['proxy_stats'].items():
+                    total_attempts = stats['success'] + stats['failure']
+                    if total_attempts > 10 and (stats['failure'] / total_attempts) > 0.5:
+                        poor_proxies.append(proxy)
+                        self.logger.warning(f"Proxy {proxy} identified as potentially poor performing (Fail rate: {stats['failure']/total_attempts:.1%}).")
+                # TODO: Implement logic to temporarily disable or deprioritize poor proxies.
+
+                # 2. Analyze Recent Scraping Failures (Needs logging mechanism)
+                # - Query KB for recent scraping failures logged by this agent.
+                # - Identify common failing URLs or selectors.
+                # - Trigger LLM analysis: "Website structure for [URL] likely changed. Analyze current structure and suggest new selectors for [target data]."
+                # - Update KB or internal state with new potential selectors.
+
+                # 3. Identify Opportunities for Clay Enrichment
+                # - Query KB for recently scraped company/person data lacking key info (e.g., email).
+                # - Generate a StrategicDirective for ThinkTool: "Found potential leads [list] needing enrichment via Clay. Please prioritize."
+
+                self.internal_state["last_learning_cycle_ts"] = datetime.now(timezone.utc)
+                self.logger.info("BrowsingAgent learning cycle complete.")
+
+                # Sleep for a configured interval
+                learn_interval = int(self.config.get("BROWSER_LEARNING_INTERVAL_S", 3600 * 4)) # Default 4 hours
+                await asyncio.sleep(learn_interval)
+
+            except asyncio.CancelledError:
+                self.logger.info("BrowsingAgent learning loop cancelled.")
+                break
+            except Exception as e:
+                self.logger.error(f"Error in BrowsingAgent learning loop: {e}", exc_info=True)
+                await self._report_error(f"Learning loop error: {e}")
+                await asyncio.sleep(60 * 15) # Wait longer after error
 
     async def self_critique(self) -> Dict[str, Any]:
+        """Evaluates browsing performance, proxy health, and resource usage."""
         self.logger.info(f"{self.AGENT_NAME}: Performing self-critique.")
-        num_contexts = len(self._contexts)
-        # TODO: Query logs/metrics for task success rates
-        feedback = f"Critique: Currently managing {num_contexts} browser contexts. Task success rate analysis needed."
-        return {"status": "ok", "feedback": feedback, "metrics": {"active_contexts": num_contexts}}
+        critique = {"status": "ok", "feedback": "Critique pending analysis."}
+        try:
+            num_active_pages = len(self.internal_state['active_pages'])
+            proxy_stats_summary = {p: f"S:{s['success']}/F:{s['failure']}" for p, s in self.internal_state['proxy_stats'].items()}
+
+            critique['resource_usage'] = {"active_pages": num_active_pages, "max_pages": self.internal_state['max_concurrent_pages']}
+            critique['proxy_stats'] = proxy_stats_summary
+
+            feedback_points = [f"Active Pages: {num_active_pages}/{self.internal_state['max_concurrent_pages']}."]
+            high_failure_proxies = sum(1 for stats in self.internal_state['proxy_stats'].values() if (stats['success'] + stats['failure']) > 5 and stats['failure'] / (stats['success'] + stats['failure']) > 0.4)
+            if high_failure_proxies > 0:
+                feedback_points.append(f"WARNING: {high_failure_proxies} proxies show high failure rates. Check proxy provider/config.")
+                critique['status'] = 'warning'
+            if num_active_pages >= self.internal_state['max_concurrent_pages']:
+                 feedback_points.append("INFO: Approaching maximum concurrent page limit.")
+
+            # TODO: Query DB/KB for recent task success/failure rates specific to this agent.
+
+            critique['feedback'] = " ".join(feedback_points)
+
+        except Exception as e:
+            self.logger.error(f"Error during self-critique: {e}", exc_info=True)
+            critique['status'] = 'error'; critique['feedback'] = f"Critique failed: {e}"
+        return critique
 
     async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
-        """Constructs prompts for LLM calls (e.g., inferring steps, summarizing)."""
+        """Constructs context-rich prompts for LLM calls related to browsing."""
         self.logger.debug(f"Generating dynamic prompt for BrowsingAgent task: {task_context.get('task')}")
-        prompt_parts = [self.meta_prompt]
+        prompt_parts = [self.meta_prompt] # Start with BrowsingAgent's meta-prompt
+
         prompt_parts.append("\n--- Current Task Context ---")
+        # Add specific task details, limiting length of large items
         for key, value in task_context.items():
-            value_str = str(value)
-            if len(value_str) > 500: value_str = value_str[:500] + "..."
+            value_str = ""
+            max_len = 4000 # Allow more context for webpage content
+            if key == 'webpage_content_snippet': max_len = 8000
+            if isinstance(value, str): value_str = value[:max_len] + ("..." if len(value) > max_len else "")
+            elif isinstance(value, (int, float, bool)): value_str = str(value)
+            elif isinstance(value, dict): value_str = json.dumps(value, default=str)[:max_len] + "..."
+            elif isinstance(value, list): value_str = json.dumps(value, default=str)[:max_len] + "..."
+            else: value_str = str(value)[:max_len] + "..."
             prompt_parts.append(f"**{key.replace('_', ' ').title()}**: {value_str}")
 
         prompt_parts.append("\n--- Instructions ---")
         task_type = task_context.get('task')
-        if task_type == 'Infer Browsing Steps':
-             prompt_parts.append("Based on the goal and current page state, determine the next logical browsing action (e.g., click, type, scroll, navigate).")
-             prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format', 'JSON: {\"action\": \"click|type|scroll|navigate\", \"selector\": \"css_selector?\", \"text\": \"text_to_type?\", \"url\": \"url_to_navigate?\"}')}")
-        elif task_type == 'Summarize Scraped Content':
-             prompt_parts.append("Summarize the key information from the provided scraped web content relevant to the original query.")
-             prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format', 'Concise text summary.')}")
+        if task_type == 'Extract structured data from webpage content based on prompt':
+            prompt_parts.append(f"Analyze the 'Webpage Content Snippet' from URL '{task_context.get('current_url', 'N/A')}'.")
+            prompt_parts.append(f"Follow these extraction instructions precisely: {task_context.get('extraction_instructions', 'Extract key information.')}")
+            prompt_parts.append("If data is missing, use null or an empty string for that field.")
+            prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format')}")
+        elif task_type == 'Summarize the key information from the provided search results':
+             prompt_parts.append("Review the 'Search Results Content'.")
+             prompt_parts.append("Identify the most relevant and important findings related to the original query.")
+             prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format')}")
+        # Add prompts for other LLM-assisted browsing tasks (e.g., deciding next navigation step)
         else:
             prompt_parts.append("Analyze the provided context and generate the required output based on the task description.")
 
@@ -736,17 +723,80 @@ class BrowsingAgent(GeniusAgentBase):
         return final_prompt
 
     async def collect_insights(self) -> Dict[str, Any]:
-        """Collects insights about browsing operations."""
-        return {
+        """Collects insights about browsing activity and proxy status."""
+        self.logger.debug("BrowsingAgent collect_insights called.")
+        num_active_pages = len(self.internal_state.get('active_pages', {}))
+        # Calculate overall proxy success rate (simple average)
+        total_success = sum(s['success'] for s in self.internal_state['proxy_stats'].values())
+        total_failure = sum(s['failure'] for s in self.internal_state['proxy_stats'].values())
+        total_attempts = total_success + total_failure
+        avg_proxy_success_rate = (total_success / total_attempts) if total_attempts > 0 else 1.0
+
+        insights = {
             "agent_name": self.AGENT_NAME, "status": self.status,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "active_browser_contexts": len(self._contexts),
-            "key_observations": ["Basic operational status."]
+            "active_pages": num_active_pages,
+            "max_pages": self.internal_state.get('max_concurrent_pages'),
+            "proxy_pool_size": len(self.internal_state.get('proxy_pool', [])),
+            "avg_proxy_success_rate": round(avg_proxy_success_rate, 3),
+            "total_proxy_attempts": total_attempts,
+            # Add metrics like pages_scraped_session, data_points_extracted_session if tracked
         }
+        return insights
 
     async def stop(self, timeout: float = 30.0):
-        """Override stop to include Playwright shutdown."""
-        await self._shutdown_playwright() # Shutdown browser first
-        await super().stop(timeout) # Call base class stop
+        """Override stop to close browser and cancel tasks."""
+        self.logger.info(f"{self.AGENT_NAME} received stop signal.")
+        # Signal loops to stop
+        self._stop_event.set()
+        # Close browser first
+        await self._close_browser()
+        # Cancel background tasks specific to this agent
+        tasks_to_cancel = list(self._background_tasks)
+        for task in tasks_to_cancel:
+            if task and not task.done():
+                task.cancel()
+        if tasks_to_cancel:
+            self.logger.info(f"Waiting for {len(tasks_to_cancel)} BrowsingAgent background tasks to cancel...")
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            self.logger.info("BrowsingAgent background tasks cancellation complete.")
+        # Call base class stop for any common cleanup
+        await super().stop(timeout)
+
+    async def run(self):
+        """Main run loop: Processes task queue and runs learning loop."""
+        if await self._run_lock.acquire(blocking=False): # Use non-blocking acquire
+            try:
+                if self._status == self.STATUS_RUNNING:
+                    self.logger.warning("Run requested but agent is already running.")
+                    return
+                if self._status == self.STATUS_STOPPING:
+                    self.logger.warning("Run requested but agent is currently stopping.")
+                    return
+
+                self._status = self.STATUS_RUNNING
+                self._stop_event.clear()
+                self.internal_state["errors_encountered_session"] = 0
+                self.internal_state["tasks_processed_session"] = 0
+                self.internal_state["last_error_ts"] = None
+                self.internal_state["last_error_details"] = None
+
+                # Ensure browser is ready before starting loops that might need it
+                await self._ensure_browser_running()
+
+                # Create and store the main run task (which starts sub-tasks)
+                run_task = asyncio.create_task(self._run_main_loop(), name=f"{self.agent_name}_MainLoop")
+                self._background_tasks.add(run_task)
+                self.logger.info("Main run loop initiated.")
+
+            except Exception as e:
+                 self.logger.critical(f"Failed to start BrowsingAgent run loop: {e}", exc_info=True)
+                 self._status = self.STATUS_ERROR
+                 await self._report_error(f"Failed to start run loop: {e}")
+            finally:
+                self._run_lock.release()
+        else:
+            self.logger.warning("Run lock already held, skipping run initiation.")
+
 
 # --- End of agents/browsing_agent.py ---

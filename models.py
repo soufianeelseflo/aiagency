@@ -1,6 +1,6 @@
 # Filename: models.py
 # Description: SQLAlchemy ORM Models for the AI Agency Database (Postgres Focused).
-# Version: 3.0 (Genius Agentic Ready)
+# Version: 4.0 (Genius Agentic - Streamlined & Finalized)
 
 import json
 import uuid as uuid_pkg
@@ -10,7 +10,7 @@ from sqlalchemy import (
     UniqueConstraint, func, event, DDL
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID, JSONB # Use JSONB for tags if possible
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import declarative_base, relationship # Added relationship
 
 # Define Base using modern approach
 Base = declarative_base()
@@ -31,14 +31,20 @@ class Client(Base):
     timezone = Column(String, default="America/New_York")
     interests = Column(Text, nullable=True) # Store as JSON string or comma-separated
     last_interaction = Column(DateTime(timezone=True), default=utcnow, index=True)
-    last_contacted_at = Column(DateTime(timezone=True), nullable=True, index=True)
-    last_opened_at = Column(DateTime(timezone=True), nullable=True, index=True)
-    last_replied_at = Column(DateTime(timezone=True), nullable=True, index=True)
-    engagement_score = Column(Float, default=0.1, index=True, nullable=False) # Lead score
-    opt_in = Column(Boolean, default=True, nullable=False, index=True) # GDPR/CASL/STOP tracking
+    last_contacted_at = Column(DateTime(timezone=True), nullable=True, index=True) # Track last outreach attempt
+    last_opened_at = Column(DateTime(timezone=True), nullable=True, index=True) # Track last email open
+    last_replied_at = Column(DateTime(timezone=True), nullable=True, index=True) # Track last email reply
+    engagement_score = Column(Float, default=0.1, index=True, nullable=False) # Lead score (Added nullable=False)
+    opt_in = Column(Boolean, default=True, nullable=False, index=True) # GDPR/CASL/STOP tracking (Verified)
     is_deliverable = Column(Boolean, default=True, nullable=False, index=True) # Email deliverability
     source = Column(String, nullable=True, index=True) # e.g., 'Clay.com', 'Manual', 'WebScrape'
     assigned_agent = Column(String, nullable=True) # Primary agent if needed
+
+    # Relationships (Optional but useful)
+    email_logs = relationship("EmailLog", back_populates="client")
+    call_logs = relationship("CallLog", back_populates="client")
+    invoices = relationship("Invoice", back_populates="client")
+    knowledge_fragments = relationship("KnowledgeFragment", back_populates="client")
 
     def __repr__(self):
         return f"<Client(id={self.id}, name='{self.name}', email='{self.email}', opt_in={self.opt_in})>"
@@ -46,19 +52,23 @@ class Client(Base):
 class EmailLog(Base):
     __tablename__ = 'email_logs'
     id = Column(Integer, primary_key=True)
-    client_id = Column(Integer, ForeignKey('clients.id'), index=True, nullable=True) # Nullable if email sent to non-client lead
+    client_id = Column(Integer, ForeignKey('clients.id'), index=True, nullable=True)
     recipient = Column(String, index=True, nullable=False)
-    subject = Column(Text, nullable=True) # Use Text for potentially long subjects
+    subject = Column(Text, nullable=True)
     content_preview = Column(Text, nullable=True) # Store first ~250 chars
-    status = Column(String, index=True, nullable=False) # 'sent', 'delivered', 'opened', 'responded', 'bounced', 'failed', 'blocked', 'opt_out_stop'
+    status = Column(String, index=True, nullable=False) # 'sent', 'delivered', 'opened', 'responded', 'bounced', 'failed_send', 'blocked_compliance', 'error_internal'
     timestamp = Column(DateTime(timezone=True), default=utcnow, index=True)
     opened_at = Column(DateTime(timezone=True), nullable=True, index=True)
     responded_at = Column(DateTime(timezone=True), nullable=True, index=True)
-    agent_version = Column(String, nullable=True) # Which version of agent/prompt sent this
+    agent_version = Column(String, nullable=True)
     error_message = Column(Text, nullable=True)
-    sender_account = Column(String, nullable=True, index=True) # Email address used to send
-    message_id = Column(Text, unique=True, index=True, nullable=True) # SMTP Message-ID for tracking replies
+    sender_account = Column(String, nullable=True, index=True)
+    message_id = Column(Text, unique=True, index=True, nullable=True) # SMTP Message-ID
     tracking_pixel_id = Column(UUID(as_uuid=True), unique=True, index=True, nullable=True, default=uuid_pkg.uuid4) # For open tracking
+
+    # Relationship
+    client = relationship("Client", back_populates="email_logs")
+    composition = relationship("EmailComposition", back_populates="email_log", uselist=False) # One-to-one
 
     def __repr__(self):
         return f"<EmailLog(id={self.id}, recipient='{self.recipient}', status='{self.status}')>"
@@ -72,16 +82,19 @@ class CallLog(Base):
     timestamp = Column(DateTime(timezone=True), default=utcnow, index=True)
     duration_seconds = Column(Integer, nullable=True)
     transcript = Column(Text, nullable=True) # JSON string of conversation turns
-    outcome = Column(String, index=True, nullable=True) # 'success_sale', 'success_followup', 'failed_hangup', 'failed_voicemail', 'failed_error', 'failed_compliance' etc.
+    outcome = Column(String, index=True, nullable=True) # 'success_sale', 'success_followup', 'failed_hangup', 'failed_voicemail', 'failed_error', 'failed_compliance', 'disconnected_client_request', etc.
     recording_url = Column(String, nullable=True)
     final_twilio_status = Column(String, nullable=True) # e.g., 'completed', 'no-answer', 'busy'
+
+    # Relationship
+    client = relationship("Client", back_populates="call_logs")
 
     def __repr__(self):
         return f"<CallLog(id={self.id}, call_sid='{self.call_sid}', outcome='{self.outcome}')>"
 
 class ConversationState(Base):
     __tablename__ = 'conversation_states'
-    call_sid = Column(String, primary_key=True) # Use call_sid as PK for active call lookup
+    call_sid = Column(String, primary_key=True) # Use call_sid as PK
     client_id = Column(Integer, ForeignKey('clients.id'), index=True, nullable=True)
     state = Column(String, nullable=False) # Current state in the voice agent FSM
     conversation_log = Column(Text) # Running JSON log of the conversation turns
@@ -99,8 +112,11 @@ class Invoice(Base):
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     due_date = Column(DateTime(timezone=True), nullable=True)
     invoice_path = Column(String, nullable=True) # Path to stored PDF on VPS
-    payment_link = Column(String, nullable=True) # Link to payment processor (e.g., Lemon Squeezy)
+    payment_link = Column(String, nullable=True) # Link to payment processor
     source_reference = Column(String, nullable=True) # e.g., CallLog.call_sid
+
+    # Relationship
+    client = relationship("Client", back_populates="invoices")
 
     def __repr__(self):
         return f"<Invoice(id={self.id}, client_id={self.client_id}, amount={self.amount}, status='{self.status}')>"
@@ -155,14 +171,17 @@ class KnowledgeFragment(Base):
     id = Column(Integer, primary_key=True)
     agent_source = Column(String, nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
-    last_accessed_ts = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True) # Use onupdate=utcnow in trigger if needed
-    data_type = Column(String, nullable=False, index=True) # e.g., 'email_subject', 'legal_interpretation', 'osint_summary', 'learning_material_summary', 'competitor_strategy', 'market_need'
+    last_accessed_ts = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True) # Updated on query
+    data_type = Column(String, nullable=False, index=True) # e.g., 'email_subject', 'legal_interpretation', 'osint_summary', 'learning_material_summary', 'competitor_strategy', 'market_need', 'client_insight', 'successful_call_script'
     content = Column(Text, nullable=False) # The actual knowledge content (string or JSON string)
     item_hash = Column(String(64), unique=True, index=True, nullable=False) # SHA-256 hash REQUIRED
     relevance_score = Column(Float, default=0.5, nullable=False)
     tags = Column(Text, nullable=True) # Store as JSON string: '["tag1", "tag2"]'
     related_client_id = Column(Integer, ForeignKey('clients.id'), nullable=True, index=True)
     source_reference = Column(String, nullable=True, index=True) # Link back to source (log ID, URL, task ID etc.)
+
+    # Relationship
+    client = relationship("Client", back_populates="knowledge_fragments")
 
     # Add GIN index for tags if using PostgreSQL JSONB functions frequently and storing tags as JSONB
     # __table_args__ = (Index('ix_knowledge_fragments_tags_gin', 'tags', postgresql_using='gin'),)
@@ -194,8 +213,8 @@ class StrategicDirective(Base):
     id = Column(Integer, primary_key=True)
     source = Column(String, nullable=False) # 'ThinkToolSynthesis', 'ThinkToolCritique', 'Human', 'OptimizationLogic'
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
-    target_agent = Column(String, nullable=False, index=True) # Specific agent name or 'All'
-    directive_type = Column(String, nullable=False, index=True) # e.g., 'test_strategy', 'prioritize_target', 'update_prompt', 'evaluate_tool', 'create_trial_account'
+    target_agent = Column(String, nullable=False, index=True) # Specific agent name or 'All' or 'Orchestrator'
+    directive_type = Column(String, nullable=False, index=True) # e.g., 'test_strategy', 'prioritize_target', 'update_prompt', 'evaluate_tool', 'create_trial_account', 'execute_clay_call'
     content = Column(Text, nullable=False) # Detailed instructions, potentially JSON
     priority = Column(Integer, default=5, nullable=False, index=True) # Lower number = higher priority
     status = Column(String, default='pending', nullable=False, index=True) # 'pending', 'active', 'completed', 'failed', 'expired', 'cancelled'
@@ -231,41 +250,76 @@ class EmailStyles(Base):
     __tablename__ = 'email_styles'
     id = Column(Integer, primary_key=True)
     content_hash = Column(String(64), unique=True, index=True, nullable=False) # SHA256 hash of body
-    body_template = Column(Text, nullable=True)
-    subject_template = Column(Text, nullable=True)
-    performance_score = Column(Float, default=0.5, index=True) # Based on open/reply rates
+    body_template = Column(Text, nullable=True) # Store the successful HTML body
+    subject_template = Column(Text, nullable=True) # Store the successful subject
+    performance_score = Column(Float, default=0.5, index=True) # Based on open/reply rates associated with this style
     usage_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), default=utcnow)
+    last_used_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
     def __repr__(self):
         return f"<EmailStyle(id={self.id}, score={self.performance_score:.2f}, hash='{self.content_hash[:8]}...')>"
 
+class EmailComposition(Base):
+    """Links a sent email (EmailLog) to the specific knowledge fragments used."""
+    __tablename__ = 'email_composition'
+    id = Column(Integer, primary_key=True)
+    email_log_id = Column(Integer, ForeignKey('email_logs.id'), unique=True, nullable=False, index=True)
+    subject_kf_id = Column(Integer, ForeignKey('knowledge_fragments.id'), nullable=True)
+    hook_kf_id = Column(Integer, ForeignKey('knowledge_fragments.id'), nullable=True)
+    body_snippets_kf_ids = Column(ARRAY(Integer), nullable=True) # Use ARRAY for list of IDs (PostgreSQL specific)
+    cta_kf_id = Column(Integer, ForeignKey('knowledge_fragments.id'), nullable=True)
+    style_id = Column(Integer, ForeignKey('email_styles.id'), nullable=True) # Link to EmailStyles if applicable
+    timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    # Relationships
+    email_log = relationship("EmailLog", back_populates="composition")
+    # Define relationships to KnowledgeFragment if needed (use foreign_keys for multiple FKs to same table)
+    # subject_fragment = relationship("KnowledgeFragment", foreign_keys=[subject_kf_id])
+    # style = relationship("EmailStyles")
+
+    def __repr__(self):
+        return f"<EmailComposition(id={self.id}, email_log_id={self.email_log_id})>"
+
 class KVStore(Base):
-    """Generic Key-Value store for caching or temporary data."""
+    """Generic Key-Value store for caching or temporary data (e.g., tracking pixel mapping)."""
     __tablename__ = 'kv_store'
-    key = Column(Text, primary_key=True)
-    value = Column(Text, nullable=False) # Store serialized data (JSON string)
+    key = Column(Text, primary_key=True) # The key (e.g., tracking_pixel_uuid)
+    value = Column(Text, nullable=False) # The value (e.g., email_log_id as string)
     expires_at = Column(DateTime(timezone=True), nullable=True, index=True) # Null means no expiry
 
     def __repr__(self):
         return f"<KVStore(key='{self.key}', expires_at='{self.expires_at}')>"
 
-# --- Optional: Add Trigger for last_accessed_ts ---
-# This is PostgreSQL specific syntax to automatically update last_accessed_ts
-# It might be simpler to handle this in the application logic (as done in ThinkTool.query_knowledge_base)
-# update_last_accessed_trigger = DDL("""
+# --- Optional: Add Trigger for last_accessed_ts on KnowledgeFragment ---
+# This ensures last_accessed_ts is updated automatically on SELECT/UPDATE in Postgres
+# Note: Requires superuser privileges or trust settings in Postgres to create functions.
+# Consider if application-level updates (in query_knowledge_base) are sufficient.
+
+# update_last_accessed_trigger_func = DDL("""
 # CREATE OR REPLACE FUNCTION update_last_accessed_ts_func()
 # RETURNS TRIGGER AS $$
 # BEGIN
-#     NEW.last_accessed_ts = now();
+#     -- Check if the trigger is fired by an UPDATE statement
+#     -- Only update last_accessed_ts if other columns are being updated,
+#     -- or handle SELECT updates separately in application logic.
+#     -- This basic version updates on ANY update.
+#     NEW.last_accessed_ts = now() AT TIME ZONE 'utc';
 #     RETURN NEW;
 # END;
 # $$ LANGUAGE plpgsql;
-#
+# """)
+
+# update_last_accessed_trigger = DDL("""
+# DROP TRIGGER IF EXISTS update_kf_last_accessed ON knowledge_fragments; -- Drop existing trigger first
 # CREATE TRIGGER update_kf_last_accessed
 # BEFORE UPDATE ON knowledge_fragments
-# FOR EACH ROW EXECUTE FUNCTION update_last_accessed_ts_func();
+# FOR EACH ROW
+# EXECUTE FUNCTION update_last_accessed_ts_func();
 # """)
-# event.listen(KnowledgeFragment.__table__, 'after_create', update_last_accessed_trigger)
+
+# event.listen(KnowledgeFragment.__table__, 'after_create', update_last_accessed_trigger_func.execute_if(dialect='postgresql'))
+# event.listen(KnowledgeFragment.__table__, 'after_create', update_last_accessed_trigger.execute_if(dialect='postgresql'))
+
 
 # --- End of models.py ---
