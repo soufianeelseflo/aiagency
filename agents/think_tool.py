@@ -1,6 +1,6 @@
 # Filename: agents/think_tool.py
-# Description: Central cognitive engine with Clay.com integration.
-# Version: 5.2 (Added Clay API Integration)
+# Description: Central cognitive engine with Clay.com integration, learning, and reflection.
+# Version: 5.3 (Integrated Reflection, Video Planning Stub, Refined Task Handling)
 
 import asyncio
 import logging
@@ -8,11 +8,11 @@ import json
 import os
 import hashlib
 import time
-import random # Needed for technology_radar random choice
-import glob # Needed for learning materials
-import shlex # Needed for install command determination (though likely moved)
+import random
+import glob
+import shlex # Keep for potential future use if ProgrammerAgent returns
 import re
-import aiohttp # For Clay.com API calls
+import aiohttp
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Union, Tuple, AsyncGenerator, Type
@@ -25,11 +25,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # --- Project Imports ---
 try:
-    # Ensure correct relative import path if needed
     from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
 except ImportError:
     logging.warning("Production base agent not found, using GeniusAgentBase. Ensure base_agent_prod.py is used.")
-    # Attempt absolute import if relative fails (common in some setups)
     try:
         from agents.base_agent import GeniusAgentBase
     except ImportError:
@@ -41,7 +39,7 @@ from models import (
     EmailLog, CallLog, Invoice, Client, ExpenseLog # Use correct models
 )
 from config.settings import settings
-from utils.database import encrypt_data, decrypt_data # For potential sensitive KB logging
+from utils.database import encrypt_data, decrypt_data
 
 # --- LLM Client & Resilience ---
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -55,20 +53,21 @@ THINK_TOOL_META_PROMPT = """
 You are ThinkTool, the central intelligence of the Synapse AI Sales System. Your mandate is **Maximize Profit & Growth ($10k+/day -> $100M/8mo)**.
 **Core Functions:**
 1.  **Knowledge Synthesis:** Continuously analyze ALL data sources (Postgres KB Fragments, Performance Logs, Learning Materials, Market Scans) to identify patterns, opportunities, and inefficiencies. Manage the Postgres Knowledge Base directly.
-2.  **Strategic Planning:** Generate high-level goals and break them down into actionable `StrategicDirectives` for the Orchestrator and other agents. Prioritize based on ROI and risk. Use Clay.com strategically for lead generation/enrichment.
+2.  **Strategic Planning:** Generate high-level goals and break them down into actionable `StrategicDirectives` for the Orchestrator and other agents. Prioritize based on ROI and risk. Use Clay.com strategically for lead generation/enrichment. Plan complex workflows like video generation.
 3.  **Agent Guidance:** Generate/Refine prompts for other agents. Provide context and strategic direction for tasks (e.g., email personalization angles, call script focus, Clay.com search parameters).
 4.  **Performance Monitoring & Adaptation:** Analyze agent performance metrics (email opens, call success, profit). Adapt strategies and scoring models (internal logic) based on results. Trigger self-critiques.
 5.  **Opportunity Identification:** Proactively identify new market niches, competitor weaknesses, and high-ROI ventures beyond current operations (e.g., beyond UGC). Leverage Clay.com and web scraping findings.
 6.  **Grey Area Strategy:** Devise and manage strategies involving calculated risks (e.g., multi-accounting, trial rotation), informed by LegalAgent's risk assessments.
 7.  **Learning Integration:** Ingest and synthesize external knowledge (`learning for AI/` folder).
-**Principles:** Extreme Agency, Hyper-Efficiency, Relentless Learning, AI-Native Advantage, Strategic Exploitation, Adaptability, Compliance Awareness.
+8.  **Self-Reflection:** Before executing complex plans or directives, pause to reflect on logic, completeness, and potential issues using internal LLM calls.
+**Principles:** Extreme Agency, Hyper-Efficiency, Relentless Learning, AI-Native Advantage, Strategic Exploitation, Adaptability, Compliance Awareness, Reflective Thinking.
 """
 
 class ThinkTool(GeniusAgentBase):
     """
     ThinkTool (Genius Level): The central cognitive engine. Manages strategy,
-    learning, knowledge base (Postgres), Clay.com integration, and directs other agents.
-    Version: 5.2
+    learning, knowledge base (Postgres), Clay.com integration, reflection, and directs other agents.
+    Version: 5.3
     """
     AGENT_NAME = "ThinkTool"
 
@@ -85,16 +84,14 @@ class ThinkTool(GeniusAgentBase):
         self.scoring_weights = self.config.get("SCORING_WEIGHTS", {"email_response": 1.0, "call_success": 2.5, "invoice_paid": 5.0})
         self.scoring_decay_rate = self.config.get("SCORING_DECAY_RATE_PER_DAY", 0.05)
 
-        self.logger.info("ThinkTool v5.2 initialized.")
-        # Start learning material synthesis after a short delay to allow orchestrator/DB setup
-        asyncio.create_task(self._delayed_learning_material_synthesis(delay_seconds=5))
-
+        self.logger.info("ThinkTool v5.3 initialized.")
+        # Start learning material synthesis after a short delay
+        asyncio.create_task(self._delayed_learning_material_synthesis(delay_seconds=10)) # Increased delay slightly
 
     async def _delayed_learning_material_synthesis(self, delay_seconds: int):
         """Waits for a specified delay before starting learning material synthesis."""
         await asyncio.sleep(delay_seconds)
         await self._load_and_synthesize_learning_materials()
-
 
     async def log_operation(self, level: str, message: str):
         """Helper to log to the operational log file."""
@@ -107,56 +104,72 @@ class ThinkTool(GeniusAgentBase):
     # --- Knowledge Loading & Synthesis ---
     async def _load_and_synthesize_learning_materials(self):
         """Loads and processes text files from the learning directory, storing insights in KB."""
-        learning_dir = 'learning for AI/'
-        self.logger.info(f"ThinkTool: Loading learning materials from '{learning_dir}'...")
+        learning_dir_setting = self.config.get("LEARNING_MATERIALS_DIR", "learning for AI")
+        self.logger.info(f"ThinkTool: Loading learning materials from configured dir: '{learning_dir_setting}'...")
         processed_files = 0; learning_files = []
         try:
-            # Correctly determine base directory assuming agents folder is one level down
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            full_learning_dir = os.path.join(base_dir, learning_dir)
-            if not os.path.isdir(full_learning_dir):
-                self.logger.warning(f"Learning directory '{full_learning_dir}' not found."); return
+            # Assume learning dir is relative to project root where main.py is
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # Go up one level from agents/
+            full_learning_dir = os.path.join(base_dir, learning_dir_setting)
 
-            file_pattern = os.path.join(full_learning_dir, '**', '*.txt')
-            learning_files = glob.glob(file_pattern, recursive=True)
+            if not os.path.isdir(full_learning_dir):
+                self.logger.warning(f"Learning directory '{full_learning_dir}' not found or not a directory."); return
+
+            # Use Orchestrator's list_files tool if available, otherwise fallback to glob
+            if self.orchestrator and hasattr(self.orchestrator, 'use_tool'):
+                 list_result = await self.orchestrator.use_tool('list_files', {'path': full_learning_dir, 'recursive': True, 'pattern': '*.txt'})
+                 if list_result and list_result.get('status') == 'success':
+                     learning_files = list_result.get('files', [])
+                     self.logger.info(f"Found {len(learning_files)} potential learning files via Orchestrator tool.")
+                 else:
+                     self.logger.warning("Failed to list learning files via Orchestrator tool, falling back to glob.")
+                     file_pattern = os.path.join(full_learning_dir, '**', '*.txt')
+                     learning_files = glob.glob(file_pattern, recursive=True)
+            else:
+                 self.logger.warning("Orchestrator list_files tool unavailable, using glob.")
+                 file_pattern = os.path.join(full_learning_dir, '**', '*.txt')
+                 learning_files = glob.glob(file_pattern, recursive=True)
+
             if not learning_files: self.logger.info(f"No .txt files found in '{full_learning_dir}'."); return
-            self.logger.info(f"Found {len(learning_files)} potential learning files.")
 
             for file_path in learning_files:
                 try:
                     self.logger.debug(f"Processing learning file: {file_path}")
                     file_content = None
+                    # Use Orchestrator's read_file tool
                     if self.orchestrator and hasattr(self.orchestrator, 'use_tool'):
-                         # Pass relative path if orchestrator base is project root, or absolute
+                         # Ensure we pass an absolute path if the tool expects it
                          abs_file_path = os.path.abspath(file_path)
                          file_content_result = await self.orchestrator.use_tool('read_file', {'path': abs_file_path})
                          if file_content_result and file_content_result.get('status') == 'success': file_content = file_content_result.get('content')
                          else: self.logger.warning(f"Could not read file {abs_file_path} via orchestrator tool: {file_content_result.get('message')}"); continue
-                    else: self.logger.error("Orchestrator tool access unavailable."); continue
+                    else: self.logger.error("Orchestrator tool access unavailable for reading learning files."); break # Stop if tool unavailable
 
                     if not file_content or not file_content.strip(): self.logger.warning(f"File is empty: {file_path}"); continue
 
                     self.logger.info(f"Analyzing content from: {os.path.basename(file_path)} using LLM...")
                     analysis_thought = f"Structured Thinking: Analyze Learning Material '{os.path.basename(file_path)}'. Plan: Formulate analysis prompt -> Call LLM -> Parse JSON -> Log to KB."
                     await self._internal_think(analysis_thought)
-                    analysis_prompt = f"""
-                    {self.meta_prompt[:500]}...
-                    **Task:** Analyze text from '{os.path.basename(file_path)}'. Identify key concepts, actionable strategies (sales, marketing, efficiency), relevant mindsets, or code techniques. Determine applicable agents (e.g., ThinkTool, EmailAgent, VoiceSalesAgent, All). Categorize insight type (e.g., 'sales_tactic', 'mindset', 'prompt_engineering', 'market_insight', 'efficiency_hack'). Assign relevance score (0.0-1.0, higher if directly applicable to sales/profit).
-                    **Content (Limit 4000 chars):** ```\n{file_content[:4000]}\n```
-                    **Output Format:** Respond ONLY with valid JSON: {{"source_file": str, "summary": str, "key_concepts": [str], "actionable_strategies": [str], "applicable_agents": [str], "insight_type": str, "relevance_score": float}}
-                    """
+                    # Use generate_dynamic_prompt for consistency
+                    task_context = {
+                        "task": "Analyze Learning Material",
+                        "source_filename": os.path.basename(file_path),
+                        "content_snippet": file_content[:4000], # Limit context
+                        "desired_output_format": "JSON: {{\"source_file\": str, \"summary\": str, \"key_concepts\": [str], \"actionable_strategies\": [str], \"applicable_agents\": [str], \"insight_type\": str, \"relevance_score\": float}}"
+                    }
+                    analysis_prompt = await self.generate_dynamic_prompt(task_context)
                     synthesized_insights_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.5, max_tokens=1024, is_json_output=True)
 
                     if synthesized_insights_json:
                         try:
                             insights_data = self._parse_llm_json(synthesized_insights_json)
                             if not insights_data or not all(k in insights_data for k in ['summary', 'key_concepts', 'applicable_agents', 'insight_type', 'relevance_score']): raise ValueError("LLM response missing required keys.")
-                            insights_data['source_file'] = os.path.basename(file_path)
+                            insights_data['source_file'] = os.path.basename(file_path) # Ensure filename is set
                             await self.log_knowledge_fragment(
                                 agent_source="LearningMaterialLoader", data_type=insights_data.get('insight_type', 'learning_material_summary'),
                                 content=insights_data, relevance_score=insights_data.get('relevance_score', 0.6),
                                 tags=["learning_material", insights_data.get('insight_type', 'general')] + [f"agent:{a.lower()}" for a in insights_data.get('applicable_agents', [])],
-                                source_reference=file_path # Use file path as source reference
+                                source_reference=file_path
                             )
                             processed_files += 1
                         except (json.JSONDecodeError, ValueError) as json_error: self.logger.error(f"Error parsing/storing LLM response for {file_path}: {json_error}")
@@ -166,21 +179,33 @@ class ThinkTool(GeniusAgentBase):
             self.logger.info(f"Finished processing learning materials. Processed {processed_files}/{len(learning_files)} files.")
         except Exception as e: self.logger.error(f"Critical error during loading/synthesizing learning materials: {e}", exc_info=True)
 
-
     # --- Standardized LLM Interaction ---
     @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=4, max=30), retry=retry_if_exception_type(Exception))
-    async def _call_llm_with_retry(self, prompt: str, model_preference: Optional[List[str]] = None, temperature: float = 0.5, max_tokens: int = 1024, is_json_output: bool = False) -> Optional[str]:
+    async def _call_llm_with_retry(self, prompt: str, model: Optional[str] = None, temperature: float = 0.5, max_tokens: int = 1024, is_json_output: bool = False) -> Optional[str]:
         """Centralized method for calling LLMs via the Orchestrator."""
-        if not self.orchestrator or not hasattr(self.orchestrator, 'call_llm'): self.logger.error("Orchestrator unavailable."); return None
+        if not self.orchestrator or not hasattr(self.orchestrator, 'call_llm'):
+            self.logger.error("Orchestrator unavailable or missing call_llm method.")
+            return None
         try:
+            # Pass model preference if provided, otherwise orchestrator uses defaults
             response_content = await self.orchestrator.call_llm(
                 agent_name=self.AGENT_NAME, prompt=prompt, temperature=temperature,
-                max_tokens=max_tokens, is_json_output=is_json_output, model_preference=model_preference
+                max_tokens=max_tokens, is_json_output=is_json_output,
+                model_preference=[model] if model else None # Pass as list
             )
-            if response_content is not None and not isinstance(response_content, str): self.logger.error(f"Orchestrator.call_llm returned non-string: {type(response_content)}"); return None
-            if isinstance(response_content, str) and not response_content.strip(): self.logger.warning("Orchestrator.call_llm returned empty string."); return None
-            return response_content
-        except Exception as e: self.logger.error(f"Error calling LLM via orchestrator: {e}", exc_info=True); raise
+            # Handle potential dict response from orchestrator if it includes metadata
+            content = response_content.get('content') if isinstance(response_content, dict) else str(response_content)
+
+            if content is not None and not isinstance(content, str):
+                self.logger.error(f"Orchestrator.call_llm returned non-string content: {type(content)}")
+                return None
+            if isinstance(content, str) and not content.strip():
+                self.logger.warning("Orchestrator.call_llm returned empty string.")
+                return None
+            return content
+        except Exception as e:
+            self.logger.error(f"Error calling LLM via orchestrator: {e}", exc_info=True)
+            raise # Re-raise for tenacity
 
     # --- User Education ---
     async def generate_educational_content(self, topic: str, context: Optional[str] = None) -> Optional[str]:
@@ -188,24 +213,28 @@ class ThinkTool(GeniusAgentBase):
         self.logger.info(f"ThinkTool: Generating educational content for topic: {topic}")
         thinking_process = f"Structured Thinking: Generate Educational Content for '{topic}'. Context: '{context or 'General'}'. Plan: Formulate prompt, call LLM, return cleaned response."
         await self._internal_think(thinking_process)
-        prompt = f"""
-        {self.meta_prompt[:500]}...
-        **Task:** Generate concise, user-friendly explanation for topic: **{topic}**. Assume intelligent user, non-expert. Avoid/explain jargon. Focus on 'why' & relevance to agency goals. Context: {context or 'General understanding'}.
-        **Output:** ONLY the explanation text, suitable for direct display. Start directly with explanation.
-        """
-        llm_model_pref = settings.OPENROUTER_MODELS.get('think_user_education') if settings.OPENROUTER_MODELS else None
+        task_context = {
+            "task": "Generate Educational Content",
+            "topic": topic,
+            "context": context or "General understanding",
+            "desired_output_format": "ONLY the explanation text, suitable for direct display. Start directly with explanation. Assume intelligent user, non-expert. Avoid/explain jargon. Focus on 'why' & relevance to agency goals."
+        }
+        prompt = await self.generate_dynamic_prompt(task_context)
+        llm_model_pref = settings.OPENROUTER_MODELS.get('think_user_education')
         explanation = await self._call_llm_with_retry(
-             prompt, temperature=0.6, max_tokens=500, is_json_output=False, model_preference=[llm_model_pref] if llm_model_pref else None
+             prompt, temperature=0.6, max_tokens=500, is_json_output=False,
+             model=llm_model_pref # Pass specific model preference
         )
         if explanation: self.logger.info(f"Successfully generated educational content for topic: {topic}")
         else: self.logger.error(f"Failed to generate educational content for topic: {topic} (LLM error).")
         return explanation
 
     # --- Clay.com API Integration ---
+    # (Keep existing call_clay_api method - it seems correct)
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(aiohttp.ClientError))
     async def call_clay_api(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Makes a direct API call to the specified Clay.com endpoint."""
-        api_key = self.config.get_secret("CLAY_API_KEY") # Use helper from settings
+        api_key = self.config.get_secret("CLAY_API_KEY")
         if not api_key:
             self.logger.error("Clay.com API key (CLAY_API_KEY) not found.")
             return {"status": "failure", "message": "Clay API key not configured."}
@@ -217,38 +246,38 @@ class ThinkTool(GeniusAgentBase):
         await self._internal_think(f"Calling Clay API: {endpoint}", details=data)
         await self.log_operation('debug', f"Calling Clay API endpoint: {endpoint}")
 
-        estimated_cost = 0.02 # Default placeholder cost, adjust based on endpoint if known
+        estimated_cost = 0.02 # Placeholder cost
 
         try:
             timeout = aiohttp.ClientTimeout(total=60)
             async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
                 async with session.post(clay_url, json=data) as response:
                     response_status = response.status
-                    try: response_data = await response.json(content_type=None) # Allow any content type for parsing
+                    try: response_data = await response.json(content_type=None)
                     except Exception: response_data = await response.text()
 
                     if 200 <= response_status < 300:
                         self.logger.info(f"Clay API call to {endpoint} successful (Status: {response_status}).")
-                        # Report expense only on success
                         if hasattr(self.orchestrator, 'report_expense'):
                             await self.orchestrator.report_expense(self.AGENT_NAME, estimated_cost, "API_Clay", f"Clay API Call: {endpoint}")
                         return {"status": "success", "data": response_data}
                     else:
                         self.logger.error(f"Clay API call to {endpoint} failed. Status: {response_status}, Response: {str(response_data)[:500]}...")
-                        # Handle specific errors like rate limits if needed
                         return {"status": "failure", "message": f"Clay API Error (Status {response_status})", "details": response_data}
         except asyncio.TimeoutError:
             self.logger.error(f"Timeout calling Clay API endpoint: {endpoint}")
             return {"status": "error", "message": f"Clay API call timed out"}
         except aiohttp.ClientError as e:
             self.logger.error(f"Network/Connection error calling Clay API endpoint {endpoint}: {e}")
-            raise # Re-raise for tenacity
+            raise
         except Exception as e:
             self.logger.error(f"Unexpected error during Clay API call to {endpoint}: {e}", exc_info=True)
             return {"status": "error", "message": f"Clay API call exception: {e}"}
 
 
     # --- Knowledge Base Interface Implementation (Direct Postgres) ---
+    # (Keep existing KB methods: log_knowledge_fragment, query_knowledge_base, log_learned_pattern, get_latest_patterns, purge_old_knowledge)
+    # ... (Paste existing KB methods here, ensure they use self.session_maker) ...
     async def log_knowledge_fragment(self, agent_source: str, data_type: str, content: Union[str, dict], relevance_score: float = 0.5, tags: Optional[List[str]] = None, related_client_id: Optional[int] = None, source_reference: Optional[str] = None) -> Optional[KnowledgeFragment]:
         if not self.session_maker: self.logger.error("DB session_maker not available."); return None
         try:
@@ -257,7 +286,7 @@ class ThinkTool(GeniusAgentBase):
             else: raise TypeError(f"Invalid content type: {type(content)}")
             tags_list = sorted(list(set(tags))) if tags else []; tags_str = json.dumps(tags_list) if tags_list else None
             content_hash = hashlib.sha256(content_str.encode('utf-8')).hexdigest(); now_ts = datetime.now(timezone.utc)
-            fragment = None # Define fragment outside the 'else' block
+            fragment = None
             async with self.session_maker() as session:
                 async with session.begin():
                     stmt_check = select(KnowledgeFragment.id).where(KnowledgeFragment.item_hash == content_hash).limit(1)
@@ -265,16 +294,16 @@ class ThinkTool(GeniusAgentBase):
                     if existing_id:
                         self.logger.debug(f"KF hash {content_hash[:8]} exists (ID: {existing_id}). Updating last_accessed_ts.")
                         stmt_update = update(KnowledgeFragment).where(KnowledgeFragment.id == existing_id).values(last_accessed_ts=now_ts)
-                        await session.execute(stmt_update); return None # Indicate no new fragment created
+                        await session.execute(stmt_update); return None
                     else:
                         fragment = KnowledgeFragment(agent_source=agent_source, timestamp=now_ts, last_accessed_ts=now_ts, data_type=data_type, content=content_str, item_hash=content_hash, relevance_score=relevance_score, tags=tags_str, related_client_id=related_client_id, source_reference=source_reference)
                         session.add(fragment)
-                if fragment: # Only refresh if a new fragment was added
+                if fragment:
                     await session.refresh(fragment)
                     self.logger.info(f"Logged KnowledgeFragment: ID={fragment.id}, Hash={content_hash[:8]}..., Type={data_type}, Source={agent_source}")
                     return fragment
                 else:
-                    return None # Return None if fragment already existed
+                    return None
         except (SQLAlchemyError, TypeError) as e: self.logger.error(f"Error logging KF: {e}", exc_info=True); await self._report_error(f"Error logging KF: {e}"); return None
         except Exception as e: self.logger.error(f"Unexpected error logging KF: {e}", exc_info=True); return None
 
@@ -290,13 +319,14 @@ class ThinkTool(GeniusAgentBase):
                 if time_window: stmt = stmt.where(KnowledgeFragment.timestamp >= (datetime.now(timezone.utc) - time_window))
                 if content_query: stmt = stmt.where(KnowledgeFragment.content.ilike(f'%{content_query}%'))
                 if tags: tag_conditions = [KnowledgeFragment.tags.like(f'%"{tag}"%') for tag in tags]; stmt = stmt.where(or_(*tag_conditions))
-                # Optimized query: Get IDs first, then fetch full objects
+
                 stmt_ids = stmt.with_only_columns(KnowledgeFragment.id).order_by(desc(KnowledgeFragment.last_accessed_ts), desc(KnowledgeFragment.relevance_score), desc(KnowledgeFragment.timestamp)).limit(limit)
                 fragment_ids = (await session.execute(stmt_ids)).scalars().all()
                 if not fragment_ids: return []
-                # Fetch full fragments based on the selected IDs
+
                 stmt_final = select(KnowledgeFragment).where(KnowledgeFragment.id.in_(fragment_ids)).order_by(desc(KnowledgeFragment.last_accessed_ts), desc(KnowledgeFragment.relevance_score), desc(KnowledgeFragment.timestamp))
                 fragments = list((await session.execute(stmt_final)).scalars().all())
+
                 if fragment_ids:
                     async def update_access_time():
                         try:
@@ -373,14 +403,14 @@ class ThinkTool(GeniusAgentBase):
 
         feedback_summary = json.dumps(insights_data, indent=2, default=str, ensure_ascii=False)
         max_summary_len = 4000; feedback_summary = feedback_summary[:max_summary_len] + ("..." if len(feedback_summary) > max_summary_len else "")
-        analysis_prompt = f"""
-        {self.meta_prompt[:500]}...
-        **Task:** Analyze consolidated agent feedback. Identify critical issues, successes, trends. Propose actions: StrategicDirectives (JSON), prompt critiques (list "Agent/Key"), insights to log (JSON for log_knowledge_fragment).
-        **Feedback:** ```json\n{feedback_summary}\n```
-        **Output (JSON ONLY):** {{"analysis_summary": str, "critical_issues_found": [str], "key_successes_noted": [str], "proposed_directives": [{{...}}], "prompts_to_critique": [str], "insights_to_log": [{{...}}]}}
-        """
-        llm_model_pref = settings.OPENROUTER_MODELS.get('think_synthesize') if settings.OPENROUTER_MODELS else None
-        analysis_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.6, max_tokens=2000, is_json_output=True, model_preference=[llm_model_pref] if llm_model_pref else None)
+        task_context = {
+            "task": "Analyze Agent Feedback",
+            "feedback_data": feedback_summary,
+            "desired_output_format": "JSON ONLY: {{\"analysis_summary\": str, \"critical_issues_found\": [str], \"key_successes_noted\": [str], \"proposed_directives\": [{{...}}], \"prompts_to_critique\": [str], \"insights_to_log\": [{{...}}]}}"
+        }
+        analysis_prompt = await self.generate_dynamic_prompt(task_context)
+        llm_model_pref = settings.OPENROUTER_MODELS.get('think_synthesize')
+        analysis_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.6, max_tokens=2000, is_json_output=True, model=llm_model_pref)
         if analysis_json:
             try:
                 analysis_result = self._parse_llm_json(analysis_json)
@@ -409,6 +439,7 @@ class ThinkTool(GeniusAgentBase):
         else: self.logger.error("Feedback analysis failed (LLM error).")
 
     # --- Prompt Template Management ---
+    # (Keep existing get_prompt and update_prompt methods)
     async def get_prompt(self, agent_name: str, prompt_key: str) -> Optional[str]:
         if not self.session_maker: self.logger.error("DB session_maker not available."); return None
         self.logger.debug(f"Querying DB for active prompt: {agent_name}/{prompt_key}.")
@@ -435,7 +466,7 @@ class ThinkTool(GeniusAgentBase):
                         await session.execute(stmt_deactivate); self.logger.info(f"Deactivated prompt v{current_version} for {agent_name}/{prompt_key}")
                     new_template = PromptTemplate(agent_name=agent_name, prompt_key=prompt_key, version=new_version, content=new_content, is_active=True, author_agent=author_agent, last_updated=datetime.now(timezone.utc))
                     session.add(new_template)
-                await session.refresh(new_template) # Refresh after commit
+                await session.refresh(new_template)
                 self.logger.info(f"Created and activated new prompt v{new_version} for {agent_name}/{prompt_key}")
                 return new_template
         except SQLAlchemyError as e: self.logger.error(f"DB Error updating prompt {agent_name}/{prompt_key}: {e}", exc_info=True); await self._report_error(f"DB Error updating prompt {agent_name}/{prompt_key}: {e}"); return None
@@ -443,10 +474,12 @@ class ThinkTool(GeniusAgentBase):
 
     # --- Enhanced Reflection & Validation ---
     async def reflect_on_action(self, context: str, agent_name: str, task_description: str) -> dict:
+        """Adds the 'pause and think' capability before finalizing actions or plans."""
         self.logger.debug(f"Starting reflection for {agent_name} on task: {task_description}")
         reflect_thought = f"Structured Thinking: Reflect on Action for {agent_name}. Task: {task_description[:50]}... Plan: Fetch KB context -> Format prompt -> Call LLM -> Process response -> Trigger KB updates -> Return result."
         await self._internal_think(reflect_thought); kb_context = ""
         try:
+            # Fetch context (same as before)
             active_directives = await self.get_active_directives(target_agent=agent_name)
             task_keywords = [w for w in re.findall(r'\b\w{4,}\b', task_description.lower()) if w not in ['task', 'agent', 'perform', 'execute']]
             query_tags = [agent_name.lower(), 'strategy', 'feedback'] + task_keywords[:3]
@@ -456,22 +489,21 @@ class ThinkTool(GeniusAgentBase):
             if relevant_fragments: kb_context += "\n\n**Recent Relevant Fragments:**\n" + "\n".join([f"- ID {f.id} ({f.data_type}): {f.content[:80]}..." for f in relevant_fragments])
             if relevant_patterns: kb_context += "\n\n**Relevant Learned Patterns:**\n" + "\n".join([f"- ID {p.id}: {p.pattern_description[:150]}..." for p in relevant_patterns])
         except Exception as e: self.logger.error(f"Error fetching KB context for reflection: {e}"); kb_context = "\n\n**Warning:** Failed KB context retrieval."
-        prompt = f"""
-        {self.meta_prompt[:500]}...
-        **Agent:** {agent_name} | **Task:** {task_description} | **Context Provided by Agent:** {context}
-        **Relevant Knowledge Base Context:** {kb_context or 'None'}
-        **Analysis Required:** Based on the agent's context, task, and KB info:
-        1. Is the provided context sufficient and data complete for the task? (Yes/No/Partial)
-        2. Are there immediate compliance concerns based on KB or task description? (List flags or None)
-        3. Assess the risk level of the proposed action/next step (Low/Medium/High/Critical).
-        4. Does the action align with agency goals (Profit, Growth, Efficiency)?
-        5. Suggest the most logical, efficient, and compliant next step.
-        6. Estimate confidence (0.0-1.0) in this assessment.
-        **Output (JSON ONLY):** {{"proceed": bool, "reason": str, "risk_level": str, "compliance_flags": [str], "next_step": str, "confidence": float, "log_fragment": {{...}}?, "update_directive": {{...}}?}}
-        (log_fragment: optional dict for log_knowledge_fragment if insight gained. update_directive: optional dict {{directive_id: int, status: str, result_summary: str?}} if reflection completes/fails a directive)
-        """
-        llm_model_pref = settings.OPENROUTER_MODELS.get('think_validate') if settings.OPENROUTER_MODELS else None
-        reflection_json = await self._call_llm_with_retry(prompt, temperature=0.3, max_tokens=1000, is_json_output=True, model_preference=[llm_model_pref] if llm_model_pref else None)
+
+        # Use generate_dynamic_prompt for consistency
+        task_context = {
+            "task": "Reflect on Proposed Action/Plan",
+            "agent_name": agent_name,
+            "task_description": task_description,
+            "agent_provided_context": context,
+            "knowledge_base_context": kb_context or "None",
+            "desired_output_format": "JSON ONLY: {{\"proceed\": bool, \"reason\": str, \"risk_level\": str, \"compliance_flags\": [str], \"next_step\": str, \"confidence\": float, \"log_fragment\": {{...}}?, \"update_directive\": {{...}}?}}"
+        }
+        prompt = await self.generate_dynamic_prompt(task_context)
+
+        llm_model_pref = settings.OPENROUTER_MODELS.get('think_validate')
+        reflection_json = await self._call_llm_with_retry(prompt, temperature=0.3, max_tokens=1000, is_json_output=True, model=llm_model_pref)
+
         if reflection_json:
             try:
                 reflection = self._parse_llm_json(reflection_json)
@@ -486,6 +518,7 @@ class ThinkTool(GeniusAgentBase):
         return {"proceed": False, "reason": "ThinkTool analysis failed.", "risk_level": "Critical", "compliance_flags": ["Analysis Failure"], "next_step": "Halt task.", "confidence": 0.0}
 
     async def validate_output(self, output_to_validate: str, validation_criteria: str, agent_name: str, context: str = None) -> dict:
+        # (Keep existing implementation)
         self.logger.debug(f"Starting validation for {agent_name}'s output.")
         validate_thought = f"Structured Thinking: Validate Output from {agent_name}. Criteria: {validation_criteria[:50]}... Plan: Fetch patterns -> Format prompt -> Call LLM -> Parse -> Return."
         await self._internal_think(validate_thought); pattern_context = ""
@@ -495,16 +528,19 @@ class ThinkTool(GeniusAgentBase):
             relevant_patterns = await self.get_latest_patterns(tags=query_tags, limit=5, min_confidence=0.6)
             if relevant_patterns: pattern_context += "\n\n**Relevant Learned Patterns (Consider these):**\n" + "\n".join([f"- ID {p.id}: {p.pattern_description}" for p in relevant_patterns])
         except Exception as e: self.logger.error(f"Error fetching patterns for validation: {e}"); pattern_context = "\n\n**Warning:** Failed pattern retrieval."
-        prompt = f"""
-        {self.meta_prompt[:500]}...
-        **Agent:** {agent_name} | **Context:** {context or 'N/A'}
-        **Output to Validate:** ```\n{output_to_validate}\n```
-        **Validation Criteria:** {validation_criteria} {pattern_context}
-        **Checks:** 1. Criteria Adherence? 2. Content Valid? 3. Pattern Consistent? 4. Usable? 5. Compliance/Risk OK?
-        **Output (JSON ONLY):** {{"valid": bool, "feedback": "Concise explanation for validity (pass/fail) referencing specific criteria/patterns/checks.", "suggested_fix": "If invalid, provide a specific, actionable suggestion for correction."}}
-        """
-        llm_model_pref = settings.OPENROUTER_MODELS.get('think_validate') if settings.OPENROUTER_MODELS else None
-        validation_json = await self._call_llm_with_retry(prompt, temperature=0.2, max_tokens=800, is_json_output=True, model_preference=[llm_model_pref] if llm_model_pref else None)
+
+        task_context = {
+            "task": "Validate Agent Output",
+            "agent_name": agent_name,
+            "agent_context": context or "N/A",
+            "output_to_validate": output_to_validate,
+            "validation_criteria": validation_criteria,
+            "learned_patterns_context": pattern_context,
+            "desired_output_format": "JSON ONLY: {{\"valid\": bool, \"feedback\": \"Concise explanation for validity (pass/fail) referencing specific criteria/patterns/checks.\", \"suggested_fix\": \"If invalid, provide a specific, actionable suggestion for correction.\"}}"
+        }
+        prompt = await self.generate_dynamic_prompt(task_context)
+        llm_model_pref = settings.OPENROUTER_MODELS.get('think_validate')
+        validation_json = await self._call_llm_with_retry(prompt, temperature=0.2, max_tokens=800, is_json_output=True, model=llm_model_pref)
         if validation_json:
             try:
                 validation = self._parse_llm_json(validation_json)
@@ -518,6 +554,7 @@ class ThinkTool(GeniusAgentBase):
 
     # --- Core Synthesis & Strategy Engines ---
     async def synthesize_insights_and_strategize(self):
+        # (Keep existing implementation, ensure it generates Clay directives correctly)
         self.logger.info("ThinkTool: Starting synthesis and strategy cycle.")
         synth_thought = "Structured Thinking: Synthesize & Strategize. Plan: Query KB (fragments, patterns, perf, clients needing enrichment) -> Format -> Call LLM -> Parse -> Store outputs (patterns, directives [incl. Clay], opportunities)."
         await self._internal_think(synth_thought)
@@ -540,14 +577,11 @@ class ThinkTool(GeniusAgentBase):
                 perf_data.extend([{"type": "client_score", "score": r.engagement_score} for r in (await session.execute(client_score_stmt)).mappings().all()])
 
                 # Query clients potentially needing Clay enrichment
-                # Example: Find clients with LinkedIn URL but no recent email contact
-                clients_needing_email_stmt = select(Client.id, Client.name, Client.source_reference).where( # Assuming source_reference holds LinkedIn URL
-                    Client.opt_in == True,
-                    Client.is_deliverable == True,
-                    Client.email == None, # No email currently
-                    Client.source_reference.like('%linkedin.com/in/%'), # Has LinkedIn URL
-                    Client.last_contacted_at < (datetime.now(timezone.utc) - timedelta(days=30)) # Not contacted recently
-                ).limit(10) # Limit Clay calls per cycle
+                clients_needing_email_stmt = select(Client.id, Client.name, Client.source_reference).where(
+                    Client.opt_in == True, Client.is_deliverable == True, Client.email == None,
+                    Client.source_reference.like('%linkedin.com/in/%'),
+                    Client.last_contacted_at < (datetime.now(timezone.utc) - timedelta(days=30))
+                ).limit(10)
                 clients_for_clay = (await session.execute(clients_needing_email_stmt)).mappings().all()
 
                 # Generate Clay directives for these clients
@@ -557,17 +591,15 @@ class ThinkTool(GeniusAgentBase):
                             "target_agent": "ThinkTool", # Clay calls executed by ThinkTool
                             "directive_type": "execute_clay_call",
                             "content": {
-                                "endpoint": "/v1/enrichment/person/email", # Example endpoint
+                                "endpoint": "/v1/enrichment/person/email",
                                 "data": {"linkedin_url": client_data['source_reference']},
                                 "context": {"client_id": client_data['id'], "reason": "Find email for outreach"},
-                                "source_reference": client_data['source_reference'] # Pass identifier for result processing
-                            },
-                            "priority": 6 # Medium-high priority
+                                "source_reference": client_data['source_reference']
+                            }, "priority": 6
                         })
                         self.logger.info(f"Generated Clay directive to find email for client {client_data['id']} ({client_data['source_reference']})")
 
-
-            # Prepare context for LLM synthesis (existing logic + Clay context)
+            # Prepare context for LLM synthesis
             if not recent_fragments and not perf_data and not proposed_directives: self.logger.warning("ThinkTool Synthesis: Insufficient recent data or Clay candidates."); return
             fragments_summary = [{"id": f.id, "type": f.data_type, "src": f.agent_source, "preview": (f.content if isinstance(f.content, str) else json.dumps(f.content))[:80]+"..."} for f in recent_fragments[:20]]
             patterns_summary = [{"id": p.id, "desc": p.pattern_description, "conf": p.confidence_score} for p in recent_patterns]
@@ -577,28 +609,30 @@ class ThinkTool(GeniusAgentBase):
             perf_summary_str = f"Counts: {dict(perf_counts)}. Paid Invoice Total (7d): ${paid_invoice_total:.2f}. Avg Client Score Sample: {avg_score:.2f}"
             clay_directives_summary = f"Generated {len(proposed_directives)} Clay.com directives for email enrichment." if proposed_directives else "No new Clay.com directives generated."
 
+            task_context = {
+                "task": "Synthesize Insights & Generate Strategy",
+                "recent_fragments_summary": fragments_summary,
+                "active_patterns_summary": patterns_summary,
+                "performance_summary_7d": perf_summary_str,
+                "clay_directives_status": clay_directives_summary,
+                "current_scoring_weights": self.scoring_weights,
+                "current_scoring_decay": self.scoring_decay_rate,
+                "desired_output_format": "JSON ONLY: {{\"new_patterns\": [], \"pattern_updates\": [], \"goal_assessment\": \"\", \"scoring_adjustments_suggestion\": str, \"proposed_directives\": [], \"identified_opportunities\": []}}"
+            }
+            synthesis_prompt = await self.generate_dynamic_prompt(task_context)
+            llm_model_pref = settings.OPENROUTER_MODELS.get('think_strategize')
+            synthesis_json = await self._call_llm_with_retry(synthesis_prompt, temperature=0.7, max_tokens=3500, is_json_output=True, model=llm_model_pref)
 
-            synthesis_prompt = f"""
-            {self.meta_prompt[:500]}...
-            **Task:** Synthesize insights from recent data. Identify/validate patterns, assess goal progress ($10k+/day), generate directives & opportunities. Integrate scoring/optimization logic. Include generated Clay directives in output.
-            **Data:** Recent Fragments ({len(recent_fragments)}): {json.dumps(fragments_summary)}, Active Patterns ({len(recent_patterns)}): {json.dumps(patterns_summary)}, Performance Summary (Last 7d): {perf_summary_str}, Clay Directives Status: {clay_directives_summary}
-            **Analysis:** 1. Novel Patterns? (format: {{"description": str, "supporting_fragment_ids": [int], "confidence": float, "implications": str, "tags": [str]}}) 2. Patterns to Update/Validate? (format: {{"pattern_id": int, "action": "validate"|"obsolete"|"refine", "confidence_update": float?, "reason": str}}) 3. Goal Progress Assessment? (Analyze {perf_summary_str}) 4. Scoring/Optimization Suggestions? (Analyze weights {self.scoring_weights}, decay {self.scoring_decay_rate} vs performance) 5. Additional High-Priority Strategic Directives? (Besides Clay. format: {{"target_agent": str, "directive_type": str, "content": dict or str, "priority": int (1-10)}}) 6. Business Opportunities? (format: {{"description": str, "potential_roi": str, "next_steps": str, "tags": [str]}})
-            **Output (JSON ONLY):** {{"new_patterns": [], "pattern_updates": [], "goal_assessment": "", "scoring_adjustments_suggestion": str, "proposed_directives": [], "identified_opportunities": []}}
-            (Include the Clay directives generated earlier in the 'proposed_directives' list in the final JSON output)
-            """
-            llm_model_pref = settings.OPENROUTER_MODELS.get('think_strategize') if settings.OPENROUTER_MODELS else None
-            synthesis_json = await self._call_llm_with_retry(synthesis_prompt, temperature=0.7, max_tokens=3500, is_json_output=True, model_preference=[llm_model_pref] if llm_model_pref else None)
             if synthesis_json:
                 try:
                     synthesis_result = self._parse_llm_json(synthesis_json)
                     if not synthesis_result: raise ValueError("Failed parse synthesis JSON.")
                     self.logger.info(f"ThinkTool Synthesis cycle completed. Assessment: {synthesis_result.get('goal_assessment', 'N/A')}")
-                    for p_data in synthesis_result.get('new_patterns', []): await self.log_learned_pattern(**p_data) # Simplified logging call
-                    # TODO: Handle pattern updates
+                    for p_data in synthesis_result.get('new_patterns', []): await self.log_learned_pattern(**p_data)
+                    # Handle pattern updates if implemented
                     adjustment_suggestion = synthesis_result.get('scoring_adjustments_suggestion', '').lower()
                     if 'increase' in adjustment_suggestion and 'invoice_paid' in adjustment_suggestion: self.scoring_weights['invoice_paid'] = min(self.scoring_weights.get('invoice_paid', 5.0) * 1.1, 10.0); self.logger.info(f"Synthesizer suggested: Adjusted 'invoice_paid' weight to {self.scoring_weights['invoice_paid']:.2f}")
 
-                    # Combine LLM directives with pre-generated Clay directives
                     all_directives = proposed_directives + synthesis_result.get('proposed_directives', [])
 
                     async with self.session_maker() as session:
@@ -618,8 +652,8 @@ class ThinkTool(GeniusAgentBase):
             else: self.logger.error("Synthesis analysis failed (LLM error).")
         except Exception as e: self.logger.error(f"Error during synthesis cycle: {e}", exc_info=True); await self._report_error(f"Synthesis cycle failed: {e}")
 
-
     async def technology_radar(self):
+        # (Keep existing implementation)
         self.logger.info("ThinkTool: Starting technology radar cycle.")
         radar_thought = "Structured Thinking: Technology Radar. Plan: Define topics -> Delegate search (BrowseAgent) -> Analyze results (LLM) -> Log findings/directives (KB)."
         await self._internal_think(radar_thought)
@@ -627,25 +661,24 @@ class ThinkTool(GeniusAgentBase):
             search_topics = ["Clay.com alternative API", "AI cold email personalization", "Open source voice cloning sales", "Email spam filter bypass techniques", "Automated UGC video platforms", "Best scraping proxy providers 2025", "Autonomous AI agent frameworks", "B2B SaaS competitor analysis tools"]
             search_query = f"Latest developments, tools, or research papers on: {random.choice(search_topics)}"; search_results_summary = None
             if self.orchestrator and hasattr(self.orchestrator, 'delegate_task'):
-                 search_task = {"action": "perform_search_and_summarize", "query": search_query, "num_results": 5}; Browse_agent_name = "BrowseAgent"
-                 # Check if BrowseAgent is available
-                 if Browse_agent_name not in self.orchestrator.agents:
-                     self.logger.error(f"{Browse_agent_name} not found in orchestrator agents list.")
-                     return
+                 search_task = {"action": "perform_search_and_summarize", "query": search_query, "num_results": 5}; Browse_agent_name = "BrowsingAgent"
+                 if Browse_agent_name not in self.orchestrator.agents: self.logger.error(f"{Browse_agent_name} not found."); return
                  search_result = await self.orchestrator.delegate_task(Browse_agent_name, search_task)
                  if search_result and search_result.get("status") == "success": search_results_summary = search_result.get("summary"); self.logger.info(f"Radar: Received search summary for '{search_query}'.")
                  else: self.logger.warning(f"Radar: BrowseAgent search failed: {search_result.get('message') if search_result else 'No result'}")
             else: self.logger.error("Radar: Orchestrator unavailable."); return
             if not search_results_summary: self.logger.info("Radar: No findings from web search."); return
-            analysis_prompt = f"""
-            {self.meta_prompt[:500]}...
-            **Task:** Analyze tech scouting report for AI Sales Agency. Identify novel, high-impact tools/techniques relevant to **profit maximization**, **efficiency**, or **grey area exploitation**. Assess benefits, risks, integration effort. Recommend next steps (Log, Directive, Ignore).
-            **Report:** ```\n{search_results_summary}\n```
-            **Analysis Focus:** Novelty/Impact, Relevance to Sales/UGC/Clay.com/Automation, Benefits, Risks (Technical/Legal/Ban), Integration Effort (Low/Med/High), Recommendation ('Log Insight', 'Generate Directive: [Brief Action]', 'Ignore').
-            **Output (JSON ONLY):** {{"analyzed_items": [ {{ "item_name": str, "summary": str, "relevance": str, "benefits": [str], "risks": [str], "integration_effort": str, "recommendation": str }} ], "overall_assessment": "Brief summary of findings."}}
-            """
-            llm_model_pref = settings.OPENROUTER_MODELS.get('think_radar') if settings.OPENROUTER_MODELS else None
-            analysis_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.4, max_tokens=1500, is_json_output=True, model_preference=[llm_model_pref] if llm_model_pref else None)
+
+            task_context = {
+                "task": "Analyze Technology Scouting Report",
+                "report_summary": search_results_summary,
+                "analysis_focus": "Novelty/Impact, Relevance to Sales/UGC/Clay.com/Automation, Benefits, Risks (Technical/Legal/Ban), Integration Effort (Low/Med/High), Recommendation ('Log Insight', 'Generate Directive: [Brief Action]', 'Ignore').",
+                "desired_output_format": "JSON ONLY: {{\"analyzed_items\": [ {{ \"item_name\": str, \"summary\": str, \"relevance\": str, \"benefits\": [str], \"risks\": [str], \"integration_effort\": str, \"recommendation\": str }} ], \"overall_assessment\": \"Brief summary of findings.\"}}"
+            }
+            analysis_prompt = await self.generate_dynamic_prompt(task_context)
+            llm_model_pref = settings.OPENROUTER_MODELS.get('think_radar')
+            analysis_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.4, max_tokens=1500, is_json_output=True, model=llm_model_pref)
+
             if analysis_json:
                 try:
                     analysis_result = self._parse_llm_json(analysis_json)
@@ -666,25 +699,27 @@ class ThinkTool(GeniusAgentBase):
             else: self.logger.error("Radar: Analysis failed (LLM error).")
         except Exception as e: self.logger.error(f"Error during technology radar cycle: {e}", exc_info=True); await self._report_error(f"Technology radar cycle failed: {e}")
 
-
     # --- Self-Improving Prompt Mechanism ---
     async def self_critique_prompt(self, agent_name: str, prompt_key: str, feedback_context: str):
+        # (Keep existing implementation)
         self.logger.info(f"Starting self-critique for prompt: {agent_name}/{prompt_key}")
         critique_thought = f"Structured Thinking: Self-Critique Prompt {agent_name}/{prompt_key}. Plan: Fetch prompt -> Format critique prompt -> Call LLM -> Parse -> Update prompt -> Generate test directive."
         await self._internal_think(critique_thought)
         try:
             current_prompt = await self.get_prompt(agent_name, prompt_key)
             if not current_prompt: self.logger.error(f"Critique: Cannot find active prompt {agent_name}/{prompt_key}."); return
-            critique_prompt = f"""
-            {self.meta_prompt[:500]}...
-            **Task:** Critique and rewrite LLM prompt for agent '{agent_name}', key '{prompt_key}'. Improve based on feedback/context. Use self-instruction principles. Aim for clarity, robustness, better goal alignment (profit/efficiency), and adherence to agent's meta-prompt.
-            **Feedback/Context:** {feedback_context}
-            **Current Prompt:** ```\n{current_prompt}\n```
-            **Analysis & Rewrite:** 1. **Critique:** Identify specific weaknesses. 2. **Improved Prompt:** Rewrite the *entire* prompt incorporating improvements.
-            **Output (JSON ONLY):** {{ "critique": "Detailed critique.", "improved_prompt": "Complete rewritten prompt text." }}
-            """
-            llm_model_pref = settings.OPENROUTER_MODELS.get('think_critique') if settings.OPENROUTER_MODELS else None
-            critique_json = await self._call_llm_with_retry(critique_prompt, temperature=0.6, max_tokens=3000, is_json_output=True, model_preference=[llm_model_pref] if llm_model_pref else None)
+
+            task_context = {
+                "task": "Critique and Rewrite Prompt",
+                "agent_name": agent_name, "prompt_key": prompt_key,
+                "feedback_context": feedback_context,
+                "current_prompt": current_prompt,
+                "desired_output_format": "JSON ONLY: {{ \"critique\": \"Detailed critique.\", \"improved_prompt\": \"Complete rewritten prompt text.\" }}"
+            }
+            critique_prompt = await self.generate_dynamic_prompt(task_context)
+            llm_model_pref = settings.OPENROUTER_MODELS.get('think_critique')
+            critique_json = await self._call_llm_with_retry(critique_prompt, temperature=0.6, max_tokens=3000, is_json_output=True, model=llm_model_pref)
+
             if critique_json:
                 try:
                     critique_result = self._parse_llm_json(critique_json)
@@ -706,11 +741,11 @@ class ThinkTool(GeniusAgentBase):
             else: self.logger.error(f"Critique: Failed get critique/rewrite from LLM for {agent_name}/{prompt_key}.")
         except Exception as e: self.logger.error(f"Error during self-critique for {agent_name}/{prompt_key}: {e}", exc_info=True); await self._report_error(f"Self-critique failed for {agent_name}/{prompt_key}: {e}")
 
-
     # --- Agent Run Loop ---
     async def run(self):
+        # (Keep existing implementation)
         if self.status == self.STATUS_RUNNING: self.logger.warning("ThinkTool run() called while already running."); return
-        self.logger.info("ThinkTool v5.2 starting run loop...")
+        self.logger.info("ThinkTool v5.3 starting run loop...")
         self._status = self.STATUS_RUNNING
         synthesis_interval = timedelta(seconds=int(self.config.get("THINKTOOL_SYNTHESIS_INTERVAL_SECONDS", 3600)))
         radar_interval = timedelta(seconds=int(self.config.get("THINKTOOL_RADAR_INTERVAL_SECONDS", 21600)))
@@ -733,16 +768,27 @@ class ThinkTool(GeniusAgentBase):
 
     # --- Abstract Method Implementations ---
     async def execute_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Handles tasks delegated specifically to ThinkTool, including Clay API calls and results."""
+        """Handles tasks delegated specifically to ThinkTool."""
         self._status = self.STATUS_EXECUTING
         action = task_details.get('action')
         result = {"status": "failure", "message": f"Unknown ThinkTool action: {action}"}
         self.logger.info(f"ThinkTool executing task: {action}")
         exec_thought = f"Structured Thinking: Execute Task '{action}'. Plan: Route action to appropriate method."
         await self._internal_think(exec_thought, details=task_details)
-        task_id = task_details.get('id', 'N/A') # Get task ID if available
+        task_id = task_details.get('id', 'N/A')
 
         try:
+            # --- NEW: Add internal reflection step before complex actions ---
+            if action in ['synthesize_insights_and_strategize', 'initiate_video_generation_workflow', 'plan_ugc_workflow']: # Add other complex actions here
+                 reflection_context = f"About to execute complex action: {action}. Task Details: {json.dumps(task_details, default=str)[:500]}..."
+                 reflection_result = await self.reflect_on_action(reflection_context, self.AGENT_NAME, f"Pre-execution check for {action}")
+                 if not reflection_result.get('proceed', False):
+                     self.logger.warning(f"Reflection advised against proceeding with action '{action}'. Reason: {reflection_result.get('reason')}")
+                     return {"status": "halted", "message": f"Action halted based on internal reflection: {reflection_result.get('reason')}"}
+                 else:
+                     self.logger.info(f"Reflection approved proceeding with action '{action}'.")
+
+            # --- Route to specific handlers ---
             if action == 'reflect_on_action':
                 agent_name = task_details.get('agent_name'); task_desc = task_details.get('task_description'); context = task_details.get('context')
                 if context and agent_name and task_desc: reflection = await self.reflect_on_action(context, agent_name, task_desc); result = {"status": "success", "reflection": reflection}
@@ -751,67 +797,53 @@ class ThinkTool(GeniusAgentBase):
                 output = task_details.get('output_to_validate'); criteria = task_details.get('validation_criteria'); agent_name = task_details.get('agent_name'); context = task_details.get('context')
                 if output and criteria and agent_name: validation = await self.validate_output(output, criteria, agent_name, context); result = {"status": "success", "validation": validation}
                 else: result = {"status": "failure", "message": "Missing output/criteria/agent_name for validation."}
-            elif action == 'process_feedback':
-                 feedback_data = task_details.get('feedback_data')
+            elif action == 'process_feedback' or action == 'process_external_feedback': # Handle both internal and external
+                 feedback_data = task_details.get('feedback_data') or task_details # Allow passing data directly for external
                  if feedback_data: await self.handle_feedback(feedback_data); result = {"status": "success", "message": "Feedback processed."}
                  else: result = {"status": "failure", "message": "Missing feedback_data for processing."}
             elif action == 'generate_educational_content':
                  topic = task_details.get('topic'); context = task_details.get('context')
                  if topic: explanation = await self.generate_educational_content(topic, context); result = {"status": "success" if explanation else "failure", "explanation": explanation}
                  else: result = {"status": "failure", "message": "Missing topic for educational content."}
-
-            # --- Clay.com Task Handling ---
-            elif action == 'call_clay_api':
-                 params = task_details.get('params', {}) # Get the whole content which is params here
+            elif action == 'call_clay_api': # Renamed from execute_clay_call for clarity
+                 params = task_details.get('content', {}) # Assume content holds params
                  endpoint = params.get('endpoint'); data = params.get('data')
-                 source_ref = params.get('source_reference') # Get identifier passed from synthesis
-                 client_id = params.get('context', {}).get('client_id') # Get client ID if passed
-                 original_directive_id = task_details.get('directive_id') # Get the ID of *this* directive
+                 source_ref = params.get('source_reference')
+                 client_id = params.get('context', {}).get('client_id')
+                 original_directive_id = task_details.get('directive_id')
 
                  if endpoint and data:
                      clay_api_result = await self.call_clay_api(endpoint=endpoint, data=data)
-                     # Generate the next task to process the result, pass necessary context
-                     processing_task = {
-                         "action": "process_clay_result",
-                         "clay_data": clay_api_result,
-                         "source_directive_id": original_directive_id, # Link back to the call directive
-                         "source_reference": source_ref, # Pass identifier (e.g., linkedin URL)
-                         "client_id": client_id, # Pass client ID
-                         "priority": 5 # High priority to process results quickly
-                     }
-                     # Delegate back to ThinkTool via Orchestrator
+                     processing_task = { "action": "process_clay_result", "clay_data": clay_api_result, "source_directive_id": original_directive_id, "source_reference": source_ref, "client_id": client_id, "priority": 5 }
                      await self.orchestrator.delegate_task(self.AGENT_NAME, processing_task)
                      result = {"status": "success", "message": "Clay API call executed, processing task delegated."}
-                 else: result = {"status": "failure", "message": "Missing 'endpoint' or 'data' in params for call_clay_api task."}
-
+                 else: result = {"status": "failure", "message": "Missing 'endpoint' or 'data' in content for call_clay_api task."}
             elif action == 'process_clay_result':
-                 clay_data = task_details.get('clay_data');
-                 source_directive_id = task_details.get('source_directive_id')
-                 source_reference = task_details.get('source_reference') # Identifier (e.g., LinkedIn URL)
-                 client_id = task_details.get('client_id') # Client ID if available
-
-                 if clay_data:
-                     await self._process_clay_result(clay_data, source_directive_id, source_reference, client_id)
-                     result = {"status": "success", "message": "Clay result processing initiated."}
-                 else:
-                     result = {"status": "failure", "message": "Missing clay_data for processing."}
-                     # Update the original directive to failed status if possible
-                     if source_directive_id:
-                         await self.update_directive_status(source_directive_id, 'failed', 'Missing clay_data in processing task')
-
-            # --- End Clay.com Task Handling ---
-
-            elif action == 'log_knowledge_fragment': # Allow direct logging via task
+                 clay_data = task_details.get('clay_data'); source_directive_id = task_details.get('source_directive_id'); source_reference = task_details.get('source_reference'); client_id = task_details.get('client_id')
+                 if clay_data: await self._process_clay_result(clay_data, source_directive_id, source_reference, client_id); result = {"status": "success", "message": "Clay result processing initiated."}
+                 else: result = {"status": "failure", "message": "Missing clay_data for processing."}; await self.update_directive_status(source_directive_id, 'failed', 'Missing clay_data')
+            elif action == 'log_knowledge_fragment':
                  frag_data = task_details.get('fragment_data', {})
-                 if all(k in frag_data for k in ['agent_source', 'data_type', 'content']):
-                      frag = await self.log_knowledge_fragment(**frag_data)
-                      result = {"status": "success" if frag else "failure", "fragment_id": frag.id if frag else None}
+                 if all(k in frag_data for k in ['agent_source', 'data_type', 'content']): frag = await self.log_knowledge_fragment(**frag_data); result = {"status": "success" if frag else "failure", "fragment_id": frag.id if frag else None}
                  else: result = {"status": "failure", "message": "Missing required keys for log_knowledge_fragment."}
-            elif action == 'calculate_dynamic_price': # Handle pricing request from Voice Agent
+            elif action == 'calculate_dynamic_price':
                  client_id = task_details.get('client_id'); conv_summary = task_details.get('conversation_summary'); base_price = task_details.get('base_price', 5000.0)
                  if client_id: price = await self._calculate_dynamic_price(client_id, conv_summary, base_price); result = {"status": "success", "price": price}
                  else: result = {"status": "failure", "message": "Missing client_id for dynamic pricing."}
-            # Add other actions ThinkTool handles
+            elif action == 'initiate_video_generation_workflow': # NEW Action Handler
+                 params = task_details.get('params', {})
+                 plan = await self._plan_video_workflow(params)
+                 if plan:
+                     # Store plan or immediately start delegating steps via Orchestrator
+                     # For now, just return success and the plan
+                     result = {"status": "success", "message": "Video generation plan created.", "plan": plan}
+                     # Optionally: Trigger first step delegation
+                     # if plan: await self.orchestrator.delegate_task(plan[0]['target_agent'], plan[0]['task_details'])
+                 else:
+                     result = {"status": "failure", "message": "Failed to create video generation plan."}
+            elif action == 'plan_ugc_workflow': # Existing action, ensure it's handled
+                 # Add planning logic similar to video workflow if needed, or reuse
+                 result = {"status": "pending", "message": "UGC workflow planning not fully implemented yet."} # Placeholder
             else:
                 self.logger.warning(f"Unhandled action in ThinkTool.execute_task: {action}")
                 result = {"status": "failure", "message": f"ThinkTool does not handle action: {action}"}
@@ -821,18 +853,40 @@ class ThinkTool(GeniusAgentBase):
              result = {"status": "error", "message": f"Exception during task '{action}': {e}"}
              await self._report_error(f"Error executing task '{action}': {e}", task_id=task_id)
         finally:
-             self._status = self.STATUS_IDLE # Reset status after task execution
+             self._status = self.STATUS_IDLE
 
         return result
 
+    async def _plan_video_workflow(self, params: Dict[str, Any]) -> Optional[List[Dict]]:
+        """Generates the plan for the Descript/AIStudio video workflow."""
+        self.logger.info(f"Planning video generation workflow with params: {params}")
+        await self._internal_think("Planning video workflow: Descript UI + AIStudio Images", details=params)
+        # This is a simplified plan stub. A real plan would be much more detailed.
+        # It needs specific selectors or visual prompts for BrowsingAgent.
+        # It also needs robust error handling between steps.
+        plan = [
+            {"step": 1, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "AIStudio", "goal": "Generate image based on prompt X", "output_var": "generated_image_path"}},
+            {"step": 2, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Login and start new project", "input_vars": {}}},
+            {"step": 3, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Upload base video Y", "input_vars": {"video_path": "/path/to/base/video.mp4"}}}, # Need path to base video
+            {"step": 4, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Upload generated image", "input_vars": {"image_path": "$generated_image_path"}}}, # Use variable from step 1
+            {"step": 5, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Add image to timeline at specific point"}}, # Needs more detail
+            {"step": 6, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Export video (1 min max)"}},
+            {"step": 7, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Download exported video", "output_var": "final_video_path"}},
+            {"step": 8, "target_agent": "Orchestrator", "task_details": {"action": "store_artifact", "source_path": "$final_video_path", "destination": "/app/output/videos/"}}, # Example storage
+            # Add step for sending samples if requested
+        ]
+        # TODO: Use LLM to generate a more robust plan based on params and KB context
+        self.logger.info(f"Generated video workflow plan stub with {len(plan)} steps.")
+        return plan
+
 
     async def learning_loop(self):
-        # Core learning happens in run() periodic tasks
+        # (Keep existing implementation)
         self.logger.info("ThinkTool learning_loop: Core learning logic is in run() periodic tasks.")
         while self.status == self.STATUS_RUNNING and not self._stop_event.is_set(): await asyncio.sleep(3600)
 
     async def self_critique(self) -> Dict[str, Any]:
-        """Evaluates ThinkTool's own effectiveness."""
+        # (Keep existing implementation)
         self.logger.info("ThinkTool: Performing self-critique.")
         critique = {"status": "ok", "feedback": "Critique pending analysis."}
         critique_thought = "Structured Thinking: Self-Critique ThinkTool. Plan: Query DB stats -> Analyze -> Format -> Return."
@@ -847,14 +901,14 @@ class ThinkTool(GeniusAgentBase):
             critique['directive_stats'] = directive_status
             feedback = f"KB Size: {kf_count} fragments, {pattern_count} patterns. Directives: {directive_status}. "
             failed_directives = directive_status.get('failed', 0)
-            total_processed = sum(v for k, v in directive_status.items() if k not in ['pending', 'active']) # Approx processed
+            total_processed = sum(v for k, v in directive_status.items() if k not in ['pending', 'active'])
             if total_processed > 10 and failed_directives / total_processed > 0.2: feedback += "High directive failure rate observed. " ; critique['status'] = 'warning'
             critique['feedback'] = feedback
         except Exception as e: self.logger.error(f"Error during self-critique: {e}", exc_info=True); critique['status'] = 'error'; critique['feedback'] = f"Critique failed: {e}"
         return critique
 
     async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
-        """Constructs context-rich prompts for internal LLM calls."""
+        # (Keep existing implementation, ensure it handles new task types)
         self.logger.debug(f"Generating dynamic prompt for ThinkTool task: {task_context.get('task')}")
         prompt_gen_thought = f"Structured Thinking: Generate Dynamic Prompt for task '{task_context.get('task')}'. Plan: Combine meta-prompt, task context, KB context (if needed), instructions."
         await self._internal_think(prompt_gen_thought)
@@ -862,8 +916,7 @@ class ThinkTool(GeniusAgentBase):
         prompt_parts.append("\n--- Current Task Context ---")
         for key, value in task_context.items():
             value_str = ""; max_len = 1500
-            # Increase length for context-heavy fields
-            if key in ['knowledge_base_context', 'Feedback', 'Report', 'Content', 'Current Prompt', 'feedback_data', 'clay_data', 'conversation_summary']: max_len = 3000
+            if key in ['knowledge_base_context', 'Feedback', 'Report', 'Content', 'Current Prompt', 'feedback_data', 'clay_data', 'conversation_summary', 'content_snippet', 'report_summary']: max_len = 4000 # Increased limit
             if isinstance(value, str): value_str = value[:max_len] + ("..." if len(value) > max_len else "")
             elif isinstance(value, (int, float, bool)): value_str = str(value)
             elif isinstance(value, (dict, list)):
@@ -873,19 +926,43 @@ class ThinkTool(GeniusAgentBase):
             prompt_parts.append(f"**{key.replace('_', ' ').title()}**: {value_str}")
 
         prompt_parts.append("\n--- Instructions ---")
-        prompt_parts.append(f"Based on the above context, perform the task: **{task_context.get('task', 'N/A')}**")
+        task_type = task_context.get('task')
+        prompt_parts.append(f"Based on the above context, perform the task: **{task_type or 'N/A'}**")
+
+        # Add specific instructions based on task_type
+        if task_type == 'Analyze Learning Material':
+             prompt_parts.append("Identify key concepts, actionable strategies (sales, marketing, efficiency), relevant mindsets, or code techniques. Determine applicable agents. Categorize insight type. Assign relevance score (0.0-1.0).")
+        elif task_type == 'Generate Educational Content':
+             prompt_parts.append("Generate concise, user-friendly explanation. Assume intelligent user, non-expert. Avoid/explain jargon. Focus on 'why' & relevance. Start directly with explanation.")
+        elif task_type == 'Analyze Agent Feedback':
+             prompt_parts.append("Analyze consolidated agent feedback. Identify critical issues, successes, trends. Propose actions: StrategicDirectives (JSON), prompt critiques (list 'Agent/Key'), insights to log (JSON for log_knowledge_fragment).")
+        elif task_type == 'Synthesize Insights & Generate Strategy':
+             prompt_parts.append("Synthesize insights from recent data. Identify/validate patterns, assess goal progress ($10k+/day), generate directives & opportunities. Integrate scoring/optimization logic. Include generated Clay directives.")
+        elif task_type == 'Analyze Technology Scouting Report':
+             prompt_parts.append(f"Analyze tech scouting report. Identify novel, high-impact tools/techniques relevant to profit/efficiency/grey areas. Assess benefits, risks, integration effort. Focus: {task_context.get('analysis_focus')}")
+        elif task_type == 'Critique and Rewrite Prompt':
+             prompt_parts.append(f"Critique prompt for {task_context.get('agent_name')}/{task_context.get('prompt_key')}. Improve based on feedback: {task_context.get('feedback_context')}. Aim for clarity, robustness, goal alignment. Rewrite the *entire* prompt.")
+        elif task_type == 'Reflect on Proposed Action/Plan':
+             prompt_parts.append("Analyze agent's context, task, KB info. Assess context sufficiency, compliance concerns, risk level (Low/Med/High/Critical), goal alignment. Suggest next step. Estimate confidence (0.0-1.0).")
+        elif task_type == 'Validate Agent Output':
+             prompt_parts.append(f"Validate agent output against criteria: {task_context.get('validation_criteria')}. Consider patterns: {task_context.get('learned_patterns_context')}. Checks: Criteria Adherence? Content Valid? Pattern Consistent? Usable? Compliance/Risk OK?")
+        elif task_type == 'Calculate Dynamic Price':
+             prompt_parts.append(f"Analyze conversation summary for pricing signals (urgency, budget, need). Client Score: {task_context.get('client_score', 0.1):.2f}. Base Price: ${task_context.get('base_price', 5000.0)}. Suggest adjustment factor (0.9-1.1) and reason.")
+        # Add other task types as needed...
+        else:
+            prompt_parts.append("Provide a clear, concise, and actionable response based on the task description.")
+
         if task_context.get('desired_output_format'): prompt_parts.append(f"**Output Format:** {task_context['desired_output_format']}")
-        else: prompt_parts.append("**Output:** Provide a clear, concise, and actionable response.")
         if task_context.get('is_json_output', False) or "JSON" in task_context.get('desired_output_format', ''):
             prompt_parts.append("\nRespond ONLY with valid JSON matching the specified format. Do not include explanations or markdown formatting outside the JSON structure.")
-            prompt_parts.append("```json") # Start JSON block for LLM
+            prompt_parts.append("```json")
 
         final_prompt = "\n".join(prompt_parts)
         self.logger.debug(f"Generated dynamic prompt for ThinkTool (length: {len(final_prompt)} chars)")
         return final_prompt
 
     async def collect_insights(self) -> Dict[str, Any]:
-        """Collects insights about ThinkTool's own operation and KB status."""
+        # (Keep existing implementation)
         self.logger.debug("ThinkTool collect_insights called.")
         insights = { "agent_name": self.AGENT_NAME, "status": self.status, "timestamp": datetime.now(timezone.utc).isoformat(), "kb_fragments": 0, "kb_patterns": 0, "active_directives": 0, "last_synthesis_run": self.last_synthesis_run.isoformat() if self.last_synthesis_run else None, "last_radar_run": self.last_radar_run.isoformat() if self.last_radar_run else None, "last_purge_run": self.last_purge_run.isoformat() if self.last_purge_run else None, "key_observations": [] }
         if not self.session_maker: insights["key_observations"].append("DB session unavailable."); return insights
@@ -900,7 +977,7 @@ class ThinkTool(GeniusAgentBase):
 
     # --- Helper for reporting errors ---
     async def _report_error(self, error_message: str, task_id: Optional[str] = None):
-        """Internal helper to report errors via Orchestrator."""
+        # (Keep existing implementation)
         if self.orchestrator and hasattr(self.orchestrator, 'report_error'):
             try: await self.orchestrator.report_error(self.AGENT_NAME, f"TaskID [{task_id or 'N/A'}]: {error_message}")
             except Exception as report_err: self.logger.error(f"Failed to report error to orchestrator: {report_err}")
@@ -908,250 +985,152 @@ class ThinkTool(GeniusAgentBase):
 
     # --- Helper for parsing LLM JSON ---
     def _parse_llm_json(self, json_string: str, expect_type: Type = dict) -> Union[Dict, List, None]:
-        """Safely parses JSON from LLM output, handling markdown code blocks."""
+        # (Keep existing implementation)
         if not json_string: return None
         try:
             match = None; start_char, end_char = '{', '}'
             if expect_type == list: start_char, end_char = '[', ']'
-            # Relaxed regex to find JSON block, allowing whitespace and potentially missing ```json marker
             match = re.search(rf'(?:```json)?\s*(\{start_char}.*\{end_char})\s*(?:```)?', json_string, re.DOTALL)
 
             parsed_json = None
             if match:
                 potential_json = match.group(1)
-                try:
-                    parsed_json = json.loads(potential_json)
+                try: parsed_json = json.loads(potential_json)
                 except json.JSONDecodeError as e:
                     self.logger.warning(f"Initial JSON parsing failed ({e}), attempting to clean and retry: {potential_json[:100]}...")
-                    # Basic cleaning (remove trailing commas, etc.) - needs more robust logic if necessary
-                    cleaned_json = re.sub(r',\s*([\}\]])', r'\1', potential_json)
-                    try:
-                         parsed_json = json.loads(cleaned_json)
-                    except json.JSONDecodeError as e2:
-                        self.logger.error(f"JSON cleaning failed ({e2}), unable to parse: {potential_json[:200]}...")
-                        return None
+                    cleaned_json = re.sub(r',\s*([\}\]])', r'\1', potential_json) # Basic cleaning
+                    try: parsed_json = json.loads(cleaned_json)
+                    except json.JSONDecodeError as e2: self.logger.error(f"JSON cleaning failed ({e2}), unable to parse: {potential_json[:200]}..."); return None
             elif json_string.strip().startswith(start_char) and json_string.strip().endswith(end_char):
-                 try:
-                     parsed_json = json.loads(json_string) # Fallback if no markdown
-                 except json.JSONDecodeError as e:
-                    self.logger.error(f"Direct JSON parsing failed ({e}): {json_string[:200]}...")
-                    return None
-            else:
-                self.logger.warning(f"Could not find expected JSON structure ({expect_type}) in LLM output: {json_string[:200]}..."); return None
+                 try: parsed_json = json.loads(json_string)
+                 except json.JSONDecodeError as e: self.logger.error(f"Direct JSON parsing failed ({e}): {json_string[:200]}..."); return None
+            else: self.logger.warning(f"Could not find expected JSON structure ({expect_type}) in LLM output: {json_string[:200]}..."); return None
 
             if isinstance(parsed_json, expect_type): return parsed_json
             else: self.logger.error(f"Parsed JSON type mismatch. Expected {expect_type}, got {type(parsed_json)}"); return None
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to decode LLM JSON response: {e}. Response snippet: {json_string[:500]}...")
-            return None
-        except Exception as e:
-             self.logger.error(f"Unexpected error during JSON parsing: {e}", exc_info=True)
-             return None
+        except json.JSONDecodeError as e: self.logger.error(f"Failed to decode LLM JSON response: {e}. Response snippet: {json_string[:500]}..."); return None
+        except Exception as e: self.logger.error(f"Unexpected error during JSON parsing: {e}", exc_info=True); return None
 
     # --- Specific Logic Moved/Integrated ---
     async def _calculate_dynamic_price(self, client_id: int, conversation_summary: Optional[List] = None, base_price: float = 5000.0) -> float:
-        """Calculates dynamic price based on client score and conversation context."""
-        client_score = 0.1 # Default score
+        # (Keep existing implementation)
+        client_score = 0.1
         try:
             async with self.session_maker() as session:
                  score_res = await session.execute(select(Client.engagement_score).where(Client.id == client_id))
                  client_score = score_res.scalar_one_or_none() or 0.1
 
-            # Simple logic based on score - Enhance with LLM analysis of summary later
-            price_adjustment_factor = 1 + (client_score / 200) # Max +50% adjustment for score 100
-            # LLM call to analyze conversation summary for pricing signals (e.g., urgency, budget mentions)
+            price_adjustment_factor = 1 + (client_score / 200)
             if conversation_summary:
-                analysis_prompt = f"""
-                Analyze the recent conversation turns for pricing signals. Client Score: {client_score:.2f}. Base Price: ${base_price}.
-                Is the client showing high urgency, mentioning budget constraints, or expressing strong need?
-                Suggest a pricing adjustment factor (e.g., 1.0 for no change, 1.1 for increase, 0.9 for decrease).
-                Conversation:
-                ```json
-                {json.dumps(conversation_summary, indent=2)}
-                ```
-                Output JSON ONLY: {{"adjustment_factor": float, "reason": "Brief justification"}}
-                """
+                task_context = {
+                    "task": "Analyze Conversation for Pricing Adjustment",
+                    "client_score": client_score, "base_price": base_price,
+                    "conversation_summary": conversation_summary,
+                    "desired_output_format": "JSON ONLY: {{\"adjustment_factor\": float, \"reason\": \"Brief justification\"}}"
+                }
+                analysis_prompt = await self.generate_dynamic_prompt(task_context)
                 try:
                     analysis_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.3, max_tokens=200, is_json_output=True)
                     if analysis_json:
                         analysis_result = self._parse_llm_json(analysis_json)
                         if analysis_result and 'adjustment_factor' in analysis_result:
                             llm_factor = float(analysis_result['adjustment_factor'])
-                            # Combine score and LLM factor cautiously (e.g., average or weighted)
                             price_adjustment_factor = (price_adjustment_factor + llm_factor) / 2
                             self.logger.info(f"LLM suggested price factor: {llm_factor:.2f}. Combined factor: {price_adjustment_factor:.2f}. Reason: {analysis_result.get('reason')}")
-                except Exception as llm_err:
-                    self.logger.warning(f"LLM pricing analysis failed: {llm_err}")
+                except Exception as llm_err: self.logger.warning(f"LLM pricing analysis failed: {llm_err}")
 
             calculated_price = base_price * price_adjustment_factor
-            final_price = min(max(calculated_price, 3000.0), 10000.0) # Apply bounds
+            final_price = min(max(calculated_price, 3000.0), 10000.0)
             self.logger.info(f"Calculated dynamic price for client {client_id}: ${final_price:.2f} (Base: {base_price}, Score: {client_score:.2f}, Factor: {price_adjustment_factor:.2f})")
             return round(final_price, 2)
-        except Exception as e:
-            self.logger.error(f"Error calculating dynamic price for client {client_id}: {e}", exc_info=True)
-            return round(base_price, 2) # Fallback
+        except Exception as e: self.logger.error(f"Error calculating dynamic price for client {client_id}: {e}", exc_info=True); return round(base_price, 2)
 
     async def _process_clay_result(self, clay_api_result: Dict[str, Any], source_directive_id: Optional[int] = None, source_reference: Optional[str] = None, client_id: Optional[int] = None):
-        """Processes data returned from Clay API, updates DB, logs to KB, generates next steps."""
+        # (Keep existing implementation)
         self.logger.info(f"Processing Clay API result. Directive ID: {source_directive_id}, Ref: {source_reference}, ClientID: {client_id}")
         await self._internal_think("Processing Clay API result", details={"result_status": clay_api_result.get("status"), "ref": source_reference})
 
-        # Check if the API call itself failed
         if clay_api_result.get("status") != "success":
             self.logger.warning(f"Clay API call failed, cannot process result. Message: {clay_api_result.get('message')}")
-            if source_directive_id:
-                await self.update_directive_status(source_directive_id, 'failed', f"Clay API call failed: {clay_api_result.get('message')}")
-            # Log the failure?
-            await self.log_knowledge_fragment(
-                agent_source=self.AGENT_NAME, data_type="clay_enrichment_error",
-                content=clay_api_result, tags=["clay", "enrichment", "error"], relevance_score=0.2,
-                source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}"
-            )
+            if source_directive_id: await self.update_directive_status(source_directive_id, 'failed', f"Clay API call failed: {clay_api_result.get('message')}")
+            await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="clay_enrichment_error", content=clay_api_result, tags=["clay", "enrichment", "error"], relevance_score=0.2, source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}")
             return
 
         clay_data = clay_api_result.get("data", {})
         processed_info = {}
         if isinstance(clay_data, dict):
-            # Standardize extraction - adjust based on common Clay response structures
-            processed_info['verified_email'] = clay_data.get('email') or clay_data.get('person', {}).get('email') or clay_data.get('verified_email') # Add variations
+            processed_info['verified_email'] = clay_data.get('email') or clay_data.get('person', {}).get('email') or clay_data.get('verified_email')
             processed_info['job_title'] = clay_data.get('job_title') or clay_data.get('person', {}).get('title') or clay_data.get('title')
             processed_info['company_name'] = clay_data.get('company_name') or clay_data.get('company', {}).get('name')
-            processed_info['linkedin_url'] = clay_data.get('linkedin_url') or clay_data.get('person', {}).get('linkedin_url') or source_reference # Use original ref if not in result
+            processed_info['linkedin_url'] = clay_data.get('linkedin_url') or clay_data.get('person', {}).get('linkedin_url') or source_reference
             processed_info['company_domain'] = clay_data.get('company', {}).get('domain')
             processed_info['full_name'] = clay_data.get('full_name') or clay_data.get('person', {}).get('full_name')
-            # Add any other relevant fields
-
-            # Filter out None values
             processed_info = {k: v for k, v in processed_info.items() if v is not None}
 
-            if processed_info.get('verified_email'): # Check if we got a usable email
+            if processed_info.get('verified_email'):
                 try:
                     async with self.session_maker() as session:
                         async with session.begin():
-                            target_client_id = client_id # Prioritize passed client ID
-                            target_client = None
-
-                            # Try to find client if ID was passed
-                            if target_client_id:
-                                target_client = await session.get(Client, target_client_id)
-                                if not target_client:
-                                    self.logger.warning(f"Client ID {target_client_id} passed but not found.")
-
-                            # If no client found via ID, try lookup by email or source_reference
+                            target_client_id = client_id; target_client = None
+                            if target_client_id: target_client = await session.get(Client, target_client_id)
                             if not target_client:
                                 lookup_stmt = select(Client)
-                                conditions = []
-                                if processed_info.get('verified_email'):
-                                    conditions.append(Client.email == processed_info['verified_email'])
-                                if source_reference and 'linkedin.com' in source_reference:
-                                     conditions.append(Client.source_reference == source_reference)
+                                conditions = [Client.email == processed_info['verified_email']]
+                                if source_reference and 'linkedin.com' in source_reference: conditions.append(Client.source_reference == source_reference)
+                                lookup_stmt = lookup_stmt.where(or_(*conditions)).limit(1)
+                                target_client = (await session.execute(lookup_stmt)).scalar_one_or_none()
+                                if target_client: target_client_id = target_client.id
 
-                                if conditions:
-                                    lookup_stmt = lookup_stmt.where(or_(*conditions)).limit(1)
-                                    target_client = (await session.execute(lookup_stmt)).scalar_one_or_none()
-                                    if target_client:
-                                        target_client_id = target_client.id
-                                        self.logger.info(f"Found client ID {target_client_id} via lookup ({'email' if processed_info.get('verified_email') else 'ref'}).")
-
-                            # Update client if found
                             if target_client:
-                                update_values = {}
-                                if not target_client.email and processed_info.get('verified_email'):
-                                    update_values['email'] = processed_info['verified_email']
-                                # Add other fields to update if necessary (e.g., merge interests)
-                                update_values['last_interaction'] = datetime.now(timezone.utc)
+                                update_values = {'last_interaction': datetime.now(timezone.utc)}
+                                if not target_client.email and processed_info.get('verified_email'): update_values['email'] = processed_info['verified_email']
+                                await session.execute(update(Client).where(Client.id == target_client_id).values(**update_values))
+                                self.logger.info(f"Updated Client {target_client_id} with enriched data: {list(update_values.keys())}")
 
-                                if update_values:
-                                    await session.execute(update(Client).where(Client.id == target_client_id).values(**update_values))
-                                    self.logger.info(f"Updated Client {target_client_id} with enriched data: {list(update_values.keys())}")
-
-                            # Log enriched data to KB regardless of client update
-                            fragment = await self.log_knowledge_fragment(
-                                agent_source=self.AGENT_NAME, data_type="clay_enrichment_result",
-                                content=processed_info, tags=["clay", "enrichment", "lead_data", "verified"],
-                                relevance_score=0.9, related_client_id=target_client_id,
-                                source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}"
-                            )
+                            fragment = await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="clay_enrichment_result", content=processed_info, tags=["clay", "enrichment", "lead_data", "verified"], relevance_score=0.9, related_client_id=target_client_id, source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}")
                             self.logger.info(f"Logged Clay enrichment result ({fragment.id if fragment else 'existing'}) for {processed_info.get('linkedin_url')} to KB.")
 
-                            # Generate EmailAgent outreach directive
-                            outreach_directive = StrategicDirective(
-                                source=self.AGENT_NAME,
-                                timestamp=datetime.now(timezone.utc),
-                                target_agent="EmailAgent",
-                                directive_type="initiate_outreach",
-                                content=json.dumps({
-                                    "target_identifier": processed_info['verified_email'], # Use email as identifier
-                                    "client_id": target_client_id, # Pass client ID if available
-                                    "context": f"Enriched lead via Clay. Job: {processed_info.get('job_title', 'N/A')}, Company: {processed_info.get('company_name', 'N/A')}.",
-                                    "goal": "Book sales call for UGC service",
-                                    "enriched_data": processed_info # Pass the full enriched data block
-                                }),
-                                priority=4, # High priority for enriched leads
-                                status='pending'
-                            )
+                            outreach_directive = StrategicDirective(source=self.AGENT_NAME, timestamp=datetime.now(timezone.utc), target_agent="EmailAgent", directive_type="initiate_outreach", content=json.dumps({"target_identifier": processed_info['verified_email'], "client_id": target_client_id, "context": f"Enriched lead via Clay. Job: {processed_info.get('job_title', 'N/A')}, Company: {processed_info.get('company_name', 'N/A')}.", "goal": "Book sales call for UGC service", "enriched_data": processed_info}), priority=4, status='pending')
                             session.add(outreach_directive)
                             self.logger.info(f"Generated outreach directive for EmailAgent for {processed_info['verified_email']}")
 
-                            # Update original directive status
-                            if source_directive_id:
-                                await self.update_directive_status(source_directive_id, 'completed', f"Processed Clay result. Found email: {processed_info.get('verified_email')}")
-
+                            if source_directive_id: await self.update_directive_status(source_directive_id, 'completed', f"Processed Clay result. Found email: {processed_info.get('verified_email')}")
                 except Exception as e:
                     self.logger.error(f"Error processing/storing Clay result for directive {source_directive_id}: {e}", exc_info=True)
                     await self._report_error(f"Error processing Clay result: {e}", task_id=f"Directive_{source_directive_id}")
-                    if source_directive_id:
-                         await self.update_directive_status(source_directive_id, 'failed', f"Error processing result: {e}")
+                    if source_directive_id: await self.update_directive_status(source_directive_id, 'failed', f"Error processing result: {e}")
             else:
                 self.logger.warning(f"Clay result for directive {source_directive_id} did not contain usable email. Logging raw data.")
-                await self.log_knowledge_fragment(
-                    agent_source=self.AGENT_NAME, data_type="clay_enrichment_raw_no_email",
-                    content=clay_data, tags=["clay", "enrichment", "raw_data", "no_email"],
-                    relevance_score=0.3, related_client_id=client_id,
-                    source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}"
-                )
-                if source_directive_id:
-                    await self.update_directive_status(source_directive_id, 'completed', "Processed Clay result, but no usable email found.")
+                await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="clay_enrichment_raw_no_email", content=clay_data, tags=["clay", "enrichment", "raw_data", "no_email"], relevance_score=0.3, related_client_id=client_id, source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}")
+                if source_directive_id: await self.update_directive_status(source_directive_id, 'completed', "Processed Clay result, but no usable email found.")
         else:
              self.logger.warning(f"Received non-dict data for Clay result processing: {type(clay_data)}")
-             if source_directive_id:
-                 await self.update_directive_status(source_directive_id, 'failed', f"Received invalid data type from Clay API: {type(clay_data)}")
+             if source_directive_id: await self.update_directive_status(source_directive_id, 'failed', f"Received invalid data type from Clay API: {type(clay_data)}")
 
 
     async def update_directive_status(self, directive_id: int, status: str, result_summary: Optional[str] = None):
-         """Updates the status of a StrategicDirective."""
+         # (Keep existing implementation)
          if not self.session_maker or directive_id is None: return
          self.logger.info(f"Updating directive {directive_id} status to '{status}'.")
          try:
              async with self.session_maker() as session:
                  async with session.begin():
-                     stmt = update(StrategicDirective).where(StrategicDirective.id == directive_id).values(
-                         status=status,
-                         result_summary=result_summary,
-                         # Optionally update timestamp?
-                     )
+                     stmt = update(StrategicDirective).where(StrategicDirective.id == directive_id).values(status=status, result_summary=result_summary)
                      await session.execute(stmt)
-         except SQLAlchemyError as e:
-             self.logger.error(f"DB Error updating directive {directive_id} status: {e}", exc_info=True)
-         except Exception as e:
-             self.logger.error(f"Unexpected error updating directive {directive_id} status: {e}", exc_info=True)
+         except SQLAlchemyError as e: self.logger.error(f"DB Error updating directive {directive_id} status: {e}", exc_info=True)
+         except Exception as e: self.logger.error(f"Unexpected error updating directive {directive_id} status: {e}", exc_info=True)
 
     async def get_active_directives(self, target_agent: Optional[str] = None, limit: int = 10) -> List[StrategicDirective]:
-        """Fetches active directives from the database."""
+        # (Keep existing implementation)
         if not self.session_maker: return []
         try:
             async with self.session_maker() as session:
                 stmt = select(StrategicDirective).where(StrategicDirective.status.in_(['pending', 'active'])).order_by(StrategicDirective.priority, desc(StrategicDirective.timestamp)).limit(limit)
-                if target_agent:
-                    stmt = stmt.where(StrategicDirective.target_agent == target_agent)
+                if target_agent: stmt = stmt.where(StrategicDirective.target_agent == target_agent)
                 directives = list((await session.execute(stmt)).scalars().all())
                 return directives
-        except SQLAlchemyError as e:
-            self.logger.error(f"DB Error getting active directives: {e}", exc_info=True)
-            return []
-        except Exception as e:
-            self.logger.error(f"Unexpected error getting active directives: {e}", exc_info=True)
-            return []
+        except SQLAlchemyError as e: self.logger.error(f"DB Error getting active directives: {e}", exc_info=True); return []
+        except Exception as e: self.logger.error(f"Unexpected error getting active directives: {e}", exc_info=True); return []
 
 
 # --- End of agents/think_tool.py ---
