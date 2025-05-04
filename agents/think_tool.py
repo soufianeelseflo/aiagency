@@ -1,6 +1,6 @@
  # Filename: agents/think_tool.py
  # Description: Central cognitive engine with Clay.com integration, learning, and reflection.
- # Version: 5.4 (Enhanced Clay Integration & Processing)
+ # Version: 5.5 (Implemented Video Workflow Plan) # <-- Updated Version
 
  import asyncio
  import logging
@@ -36,7 +36,7 @@
 
  from models import (
      KnowledgeFragment, LearnedPattern, StrategicDirective, PromptTemplate,
-     EmailLog, CallLog, Invoice, Client, ExpenseLog # Use correct models
+     EmailLog, CallLog, Invoice, Client, ExpenseLog, ConversationState # Added ConversationState back
  )
  from config.settings import settings
  from utils.database import encrypt_data, decrypt_data
@@ -67,7 +67,7 @@
      """
      ThinkTool (Genius Level): The central cognitive engine. Manages strategy,
      learning, knowledge base (Postgres), Clay.com integration, reflection, and directs other agents.
-     Version: 5.4
+     Version: 5.5
      """
      AGENT_NAME = "ThinkTool"
 
@@ -92,7 +92,7 @@
              # Add more endpoints as needed, e.g., find_company_decision_makers
          }
 
-         self.logger.info("ThinkTool v5.4 initialized.")
+         self.logger.info("ThinkTool v5.5 initialized.")
          # Start learning material synthesis after a short delay
          asyncio.create_task(self._delayed_learning_material_synthesis(delay_seconds=10))
 
@@ -772,7 +772,7 @@
      async def run(self):
          # (Keep existing implementation)
          if self.status == self.STATUS_RUNNING: self.logger.warning("ThinkTool run() called while already running."); return
-         self.logger.info("ThinkTool v5.4 starting run loop...")
+         self.logger.info("ThinkTool v5.5 starting run loop...")
          self._status = self.STATUS_RUNNING
          synthesis_interval = timedelta(seconds=int(self.config.get("THINKTOOL_SYNTHESIS_INTERVAL_SECONDS", 3600)))
          radar_interval = timedelta(seconds=int(self.config.get("THINKTOOL_RADAR_INTERVAL_SECONDS", 21600)))
@@ -806,7 +806,7 @@
 
          try:
              # --- NEW: Add internal reflection step before complex actions ---
-             if action in ['synthesize_insights_and_strategize', 'initiate_video_generation_workflow', 'plan_ugc_workflow', 'call_clay_api']: # Added Clay call here
+             if action in ['synthesize_insights_and_strategize', 'initiate_video_generation_workflow', 'plan_ugc_workflow', 'execute_clay_call']: # Added Clay call here
                   reflection_context = f"About to execute complex action: {action}. Task Details: {json.dumps(task_details, default=str)[:500]}..."
                   reflection_result = await self.reflect_on_action(reflection_context, self.AGENT_NAME, f"Pre-execution check for {action}")
                   if not reflection_result.get('proceed', False):
@@ -891,32 +891,77 @@
 
          return result
 
-     async def _plan_video_workflow(self, params: Dict[str, Any]) -> Optional[List[Dict]]:
-         """Generates the plan for the Descript/AIStudio video workflow."""
-         self.logger.info(f"Planning video generation workflow with params: {params}")
-         await self._internal_think("Planning video workflow: Descript UI + AIStudio Images", details=params)
+         async def _plan_video_workflow(self, params: Dict[str, Any]) -> Optional[List[Dict]]:
+            """Generates a detailed plan for the Descript/AIStudio video workflow using LLM."""
+            self.logger.info(f"Planning detailed video generation workflow with params: {params}")
+            await self._internal_think("Planning detailed video workflow: Descript UI + AIStudio Images", details=params)
 
-         # --- Placeholder Implementation ---
-         # This needs to be replaced with actual logic, potentially using LLM planning
-         # based on the specific script, style, and tool capabilities.
-         self.logger.warning("Video workflow planning is currently a placeholder. Needs full implementation.")
-         # Example stub plan (needs real selectors, logic, error handling)
-         plan = [
-             {"step": 1, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "AIStudio", "goal": "Generate image based on prompt: 'futuristic cityscape'", "output_var": "generated_image_path"}},
-             {"step": 2, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Login and start new project"}},
-             {"step": 3, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Upload base video from /app/assets/base_video.mp4", "input_vars": {"video_path": "/app/assets/base_video.mp4"}}}, # Needs path
-             {"step": 4, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Upload generated image", "input_vars": {"image_path": "$generated_image_path"}}},
-             {"step": 5, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Add image to timeline at 0:05"}},
-             {"step": 6, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Export video (default settings)"}},
-             {"step": 7, "target_agent": "BrowsingAgent", "task_details": {"action": "web_ui_automate", "service": "Descript", "goal": "Download exported video", "output_var": "final_video_path"}},
-             {"step": 8, "target_agent": "Orchestrator", "task_details": {"action": "store_artifact", "source_path": "$final_video_path", "destination": "/app/output/videos/"}},
-         ]
-         await self.log_knowledge_fragment(
-             agent_source=self.AGENT_NAME, data_type="workflow_plan",
-             content={"workflow_type": "video_generation", "plan": plan, "status": "placeholder"},
-             tags=["video", "plan", "placeholder"], relevance_score=0.5
-         )
-         return plan # Return the placeholder plan for now
+            # --- MODIFIED: Use LLM to generate the detailed plan ---
+            # Fetch relevant context (e.g., Descript/AIStudio usage patterns, base video info)
+            kb_context_frags = await self.query_knowledge_base(
+                data_types=['tool_usage_guide', 'workflow_step'],
+                tags=['descript', 'aistudio', 'video_generation'],
+                limit=10
+            )
+            kb_context_str = "\n".join([f"- {f.data_type} (ID {f.id}): {f.content[:150]}..." for f in kb_context_frags])
+
+            # Define base video path (should ideally come from params or config)
+            base_video_path = params.get("base_video_path", "/app/assets/base_video.mp4") # Example path - MAKE SURE THIS EXISTS OR IS PASSED IN PARAMS
+            image_prompt = params.get("image_prompt", "futuristic cityscape") # Example prompt
+            num_videos = params.get("count", 1) # Number of videos to generate
+
+            task_context = {
+                "task": "Generate Detailed Video Workflow Plan",
+                "workflow_goal": params.get("goal", "Generate sample UGC videos"),
+                "num_videos_to_generate": num_videos,
+                "base_video_path": base_video_path,
+                "image_generation_prompt": image_prompt,
+                "knowledge_base_context": kb_context_str or "No specific KB context found on Descript/AIStudio.",
+                "desired_output_format": """JSON list of steps for BrowsingAgent web_ui_automate tasks. Each step MUST include:
+                    'step': int,
+                    'target_agent': 'BrowsingAgent' or 'Orchestrator',
+                    'task_details': {
+                        'action': 'web_ui_automate' or 'store_artifact',
+                        'service': 'AIStudio' or 'Descript' or 'FileSystem',
+                        'goal': 'Specific, clear UI action (e.g., Login to Descript, Click button with selector #upload-button, Input text into AIStudio prompt field, Upload file from $variable_name, Download exported video)',
+                        'params': { ... }, // Optional: Specific parameters for the goal (e.g., text_to_input, file_path - use absolute paths like /app/assets/...)
+                        'input_vars': { ... }, // Optional: Map input variables (e.g., {'image_path': '$generated_image_path'})
+                        'output_var': str? // Optional: Variable name to store output (e.g., 'generated_image_path', 'final_video_path')
+                    }
+                Focus on precise goals for BrowsingAgent. Include login, navigation, uploads, downloads, and export steps. Use variables ($var_name) to pass data between steps."""
+            }
+
+            plan_prompt = await self.generate_dynamic_prompt(task_context)
+            llm_model_pref = settings.OPENROUTER_MODELS.get('think_strategize') # Use a capable model for planning
+
+            plan_json_str = await self._call_llm_with_retry(
+                plan_prompt, model=llm_model_pref,
+                temperature=0.3, max_tokens=3500, is_json_output=True # Allow more tokens for detailed plan
+            )
+
+            if plan_json_str:
+                try:
+                    # Attempt to parse the LLM response as a list
+                    plan_list = self._parse_llm_json(plan_json_str, expect_type=list)
+
+                    if isinstance(plan_list, list) and all(isinstance(step, dict) and 'step' in step and 'task_details' in step for step in plan_list):
+                        self.logger.info(f"Successfully generated detailed video workflow plan with {len(plan_list)} steps.")
+                        # Log the generated plan
+                        await self.log_knowledge_fragment(
+                            agent_source=self.AGENT_NAME, data_type="workflow_plan",
+                            content={"workflow_type": "video_generation", "plan": plan_list, "status": "generated"},
+                            tags=["video", "plan", "generated"], relevance_score=0.8
+                        )
+                        return plan_list
+                    else:
+                        self.logger.error(f"LLM video plan response was not a valid list of step dictionaries: {plan_json_str[:500]}...")
+                        return None
+                except Exception as e:
+                    self.logger.error(f"Failed to parse or validate LLM video plan: {e}. Response: {plan_json_str[:500]}...")
+                    return None
+            else:
+                self.logger.error("LLM failed to generate a video workflow plan.")
+                return None
 
 
      async def learning_loop(self):
@@ -994,6 +1039,8 @@
               prompt_parts.append("Analyze the conversation history. Identify the client's stated and implied needs, goals, pain points, and budget constraints related to UGC video services. Summarize these findings clearly.")
          elif task_type == 'Generate Tailored UGC Offer': # New task type for UGC discovery
               prompt_parts.append(f"Based on the discovered needs summary: {task_context.get('needs_summary', 'N/A')}, construct a specific UGC package offer. Define the number of videos, style, focus, and reiterate the firm price of $7000. Frame it as the ideal solution to their stated needs.")
+         elif task_type == 'Generate Detailed Video Workflow Plan': # New task type for video planning
+              prompt_parts.append("Generate a detailed, step-by-step plan executable by BrowsingAgent for the video generation workflow using Descript and AIStudio. Specify exact UI interactions (goals like 'Click button X', 'Input text Y'), handle logins, uploads, downloads. Use variables ($var_name) to pass data like file paths between steps.")
          else:
              prompt_parts.append("Provide a clear, concise, and actionable response based on the task description.")
 
@@ -1240,3 +1287,4 @@
 
 
  # --- End of agents/think_tool.py ---
+ 

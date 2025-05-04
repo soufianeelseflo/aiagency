@@ -1045,34 +1045,50 @@ class EmailAgent(GeniusAgentBase):
 
     # MODIFICATION START: Added enriched_data handling in prompt generation
     async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
-        """Constructs prompts for LLM calls, incorporating enriched data."""
+        """Constructs prompts for LLM calls, incorporating enriched data more effectively."""
         self.logger.debug(f"Generating dynamic prompt for EmailAgent task: {task_context.get('task')}")
-        prompt_parts = [self.meta_prompt]
+        prompt_parts = [self.meta_prompt] # Use the agent's specific meta prompt
 
         prompt_parts.append("\n--- Current Task Context ---")
-        for key, value in task_context.items():
-            value_str = ""
-            max_len = 1000
-            if key in ['original_content', 'successful_styles', 'enriched_data_available']: max_len = 2000 # Allow more context
-            if isinstance(value, str): value_str = value[:max_len] + ("..." if len(value) > max_len else "")
-            elif isinstance(value, (int, float, bool)): value_str = str(value)
-            elif isinstance(value, dict): value_str = json.dumps(value, default=str, indent=2)[:max_len] + "..."
-            elif isinstance(value, list): value_str = json.dumps(value, default=str)[:max_len] + "..."
-            else: value_str = str(value)[:max_len] + "..."
-            # Use a more descriptive key for enriched data in the prompt
-            prompt_key = "Enriched Prospect Data" if key == 'enriched_data_available' else key.replace('_', ' ').title()
-            prompt_parts.append(f"**{prompt_key}**: {value_str}")
+        # Prioritize key context items for clarity
+        priority_keys = ['task', 'goal', 'client_info', 'enriched_data_available', 'osint_summary', 'successful_styles', 'campaign_id']
+        for key in priority_keys:
+            if key in task_context:
+                value = task_context[key]
+                value_str = ""
+                max_len = 1500 # Default max length
+                if key in ['osint_summary', 'successful_styles', 'enriched_data_available']: max_len = 2500 # Allow more context
+                if isinstance(value, str): value_str = value[:max_len] + ("..." if len(value) > max_len else "")
+                elif isinstance(value, (int, float, bool)): value_str = str(value)
+                elif isinstance(value, dict):
+                    # Special handling for enriched data for better readability in prompt
+                    if key == 'enriched_data_available':
+                         value_str = ", ".join([f"{k}: {v}" for k, v in value.items()])[:max_len] + "..."
+                    else:
+                         try: value_str = json.dumps(value, default=str, indent=2); value_str = value_str[:max_len] + ("..." if len(value_str) > max_len else "")
+                         except TypeError: value_str = str(value)[:max_len] + "..."
+                elif isinstance(value, list): value_str = json.dumps(value, default=str)[:max_len] + "..."
+                else: value_str = str(value)[:max_len] + "..."
+                # Use a more descriptive key for enriched data
+                prompt_key = "Enriched Prospect Data" if key == 'enriched_data_available' else key.replace('_', ' ').title()
+                prompt_parts.append(f"**{prompt_key}**: {value_str}")
+
+        # Add remaining context items concisely
+        other_params = {k: v for k, v in task_context.items() if k not in priority_keys and k not in ['desired_output_format']}
+        if other_params:
+            prompt_parts.append("\n**Other Parameters:**")
+            try: prompt_parts.append(f"```json\n{json.dumps(other_params, default=str, indent=2)}\n```")
+            except TypeError: prompt_parts.append(str(other_params)[:500] + "...")
 
         prompt_parts.append("\n--- Instructions ---")
         task_type = task_context.get('task')
         if task_type == 'Generate personalized email subject and body':
-            prompt_parts.append("1. Deeply personalize using Client Info, OSINT Summary, **and Enriched Prospect Data (if available)**.") # Highlight enriched data usage
-            prompt_parts.append("2. Craft compelling, human-like subject. Consider Successful Styles examples.")
-            prompt_parts.append("3. Write engaging HTML body copy incorporating interests, potentially successful style elements, **and details from Enriched Prospect Data for hyper-personalization (e.g., mention title, company, recent activity if known)**.")
-            prompt_parts.append("4. Ensure tone is professional, persuasive, slightly informal, avoiding AI detection triggers.")
-            prompt_parts.append(f"5. Include a clear Call To Action (CTA) relevant to the goal: '{task_context.get('goal', 'engagement')}'.")
+            prompt_parts.append("1. **Hyper-Personalize:** Use Client Info, OSINT Summary, AND **specifically leverage details from 'Enriched Prospect Data'** (like job title, company name, industry, location) to make the email highly relevant.")
+            prompt_parts.append("2. **Subject Line:** Craft a compelling, human-like subject. Use insights from 'Successful Styles' if applicable.")
+            prompt_parts.append("3. **Body Copy (HTML):** Write engaging HTML body. Weave in client interests/pain points (from Client Info/OSINT) and **reference enriched data points naturally**. Adapt tone based on 'Successful Styles' examples.")
+            prompt_parts.append("4. **Tone:** Professional, persuasive, slightly informal. Avoid sounding robotic or overly salesy.")
+            prompt_parts.append(f"5. **Call To Action (CTA):** Include a clear CTA aligned with the campaign 'Goal': '{task_context.get('goal', 'engagement')}'.")
             prompt_parts.append(f"6. **Output Format:** {task_context.get('desired_output_format')}")
-        # ... (keep other task type instructions as they were) ...
         elif task_type == 'Critique email human-likeness':
              prompt_parts.append("Analyze the provided email draft. Does it sound like a natural human wrote it, or does it sound robotic/AI-generated? Focus on tone, flow, word choice, and common AI patterns.")
              prompt_parts.append(f"**Output Format:** Respond ONLY with 'Human-like' or 'Robotic'.")
@@ -1080,7 +1096,7 @@ class EmailAgent(GeniusAgentBase):
              prompt_parts.append("Rewrite the provided email to sound significantly more human and natural. Improve flow, vary sentence structure, use less formal language where appropriate, but retain the core message and call to action.")
              prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format')}")
         elif task_type == 'Analyze email for spam triggers':
-             prompt_parts.append("Analyze the Subject and Body for potential spam triggers (e.g., excessive caps, spammy words like 'free', 'guarantee', '$$$', misleading claims, excessive links, poor formatting). Assign a spam score (0.0=safe, 1.0=spam). List specific issues found.")
+             prompt_parts.append("Analyze the Subject and Body for potential spam triggers (e.g., excessive caps, spammy words like 'free', 'guarantee', '$', misleading claims, excessive links, poor formatting). Assign a spam score (0.0=safe, 1.0=spam). List specific issues found.")
              prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format')}")
         else:
             prompt_parts.append("Analyze the provided context and generate the required output based on the task description.")
