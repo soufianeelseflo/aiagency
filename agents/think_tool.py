@@ -658,6 +658,24 @@
                      # Handle pattern updates if implemented
                      adjustment_suggestion = synthesis_result.get('scoring_adjustments_suggestion', '').lower()
                      if 'increase' in adjustment_suggestion and 'invoice_paid' in adjustment_suggestion: self.scoring_weights['invoice_paid'] = min(self.scoring_weights.get('invoice_paid', 5.0) * 1.1, 10.0); self.logger.info(f"Synthesizer suggested: Adjusted 'invoice_paid' weight to {self.scoring_weights['invoice_paid']:.2f}")
+                    
+                needs_new_gmail_accounts = True # Placeholder: Assume we always need some for now
+                num_to_create = 2 # Example: Create 2 accounts per cycle
+
+                if needs_new_gmail_accounts:
+                    self.logger.info(f"Need {num_to_create} new Gmail accounts for Gemini trials. Generating directive.")
+                    directive_content = {"count": num_to_create}
+                    # Add this new directive to the list that will be saved later
+                    proposed_directives.append({
+                        "target_agent": "GmailCreatorAgent", # Target the new agent
+                        "directive_type": "create_gmail_accounts", # The action it understands
+                        "content": directive_content,
+                        "priority": 7 # Lower priority than core sales tasks
+                    })
+                # --- END ADDED ---
+
+                # Combine generated Clay directives with LLM proposed directives AND Gmail directives
+                all_directives = proposed_directives + synthesis_result.get('proposed_directives', []) # Now includes Gmail directives
 
                      # Combine generated Clay directives with LLM proposed directives
                      all_directives = proposed_directives + synthesis_result.get('proposed_directives', [])

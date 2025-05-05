@@ -1,3 +1,7 @@
+# Filename: agents/browsing_agent.py
+# Description: Agentic Browsing Agent with enhanced plan execution.
+# Version: 3.4 (Added Input Variable Handling for Plans)
+
 import asyncio
 import logging
 import json
@@ -173,7 +177,7 @@ class BrowsingAgent(GeniusAgentBase):
     Browsing Agent (Genius Level - Fully Autonomous): Handles web scraping, visual UI automation,
     autonomous multi-account management including creation, Google Dorking, credential acquisition,
     and data extraction with human emulation.
-    Version: 3.3 (Fully Autonomous Production)
+    Version: 3.4 (Added Input Variable Handling)
     """
     AGENT_NAME = "BrowsingAgent"
 
@@ -204,7 +208,7 @@ class BrowsingAgent(GeniusAgentBase):
         # Initialize Temp Mail Service (replace with actual implementation/config)
         self.temp_mail_service = TempMailService(api_key=self.config.get("TEMP_MAIL_API_KEY"))
 
-        self.logger.info(f"{self.AGENT_NAME} v3.3 (Fully Autonomous Production) initialized. Max Contexts: {self.internal_state['max_concurrent_contexts']}")
+        self.logger.info(f"{self.AGENT_NAME} v3.4 (Input Var Handling) initialized. Max Contexts: {self.internal_state['max_concurrent_contexts']}")
 
     async def log_operation(self, level: str, message: str):
         """Helper to log to the operational log file."""
@@ -474,7 +478,7 @@ class BrowsingAgent(GeniusAgentBase):
         """Executes a single step, handling account selection/creation and visual UI automation."""
         step_action = step.get('action')
         tool = step.get('tool')
-        params = step.get('params', {}).copy()
+        params = step.get('params', {}).copy() # Base parameters for the step
         step_num = step.get('step', '?')
         result = {"status": "failure", "message": f"Step action '{step_action}' not implemented or failed initialization."}
 
@@ -485,9 +489,8 @@ class BrowsingAgent(GeniusAgentBase):
 
         try:
             # --- Ensure Context and Page ---
-            # This logic now includes account selection/creation if needed by the step
             context, page, context_id, page_id = await self._ensure_context_and_page(step, task_context)
-            task_context["current_context_id"] = context_id
+            task_context["current_context_id"] = context_id # Update task context
             task_context["current_page_id"] = page_id
 
             proxy_url_used = self.internal_state['context_proxy_map'].get(context_id, {}).get('server')
@@ -504,7 +507,6 @@ class BrowsingAgent(GeniusAgentBase):
                     status_code = response.status if response else None
                     self.logger.info(f"Page {page_id} navigated to {url}. Status: {status_code}")
                     if not response or not response.ok:
-                        # Capture content on failure for debugging
                         page_content = await page.content()
                         raise PlaywrightError(f"Failed to load page {url}. Status: {status_code}. Content: {page_content[:500]}...")
                     await self._human_like_delay(page)
@@ -515,6 +517,7 @@ class BrowsingAgent(GeniusAgentBase):
                     selectors = params.get('selectors')
                     extraction_prompt = params.get('extraction_prompt')
                     extract_main = params.get('extract_main_content', False)
+                    output_var = params.get('output_var') # Check if output needs storing
 
                     extracted_data = {}
                     if selectors and isinstance(selectors, dict):
@@ -522,7 +525,6 @@ class BrowsingAgent(GeniusAgentBase):
                         for key, selector in selectors.items():
                             try:
                                 element = page.locator(selector).first
-                                # Try various ways to get content
                                 content = await element.text_content(timeout=15000) or \
                                           await element.inner_text(timeout=15000) or \
                                           await element.input_value(timeout=15000) or \
@@ -540,7 +542,7 @@ class BrowsingAgent(GeniusAgentBase):
                         page_text_content = await page.evaluate("document.body.innerText")
                         llm_task_context = {
                             "task": "Extract structured data from webpage using visual and text context",
-                            "webpage_text_content": page_text_content[:6000], # Provide ample text
+                            "webpage_text_content": page_text_content[:6000],
                             "extraction_instructions": extraction_prompt,
                             "current_url": page.url,
                             "desired_output_format": "JSON containing the extracted data according to instructions."
@@ -549,14 +551,14 @@ class BrowsingAgent(GeniusAgentBase):
                         llm_response_str = await self.orchestrator.call_llm(
                             agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.1,
                             max_tokens=2000, is_json_output=True,
-                            image_data=screenshot_bytes, # Pass screenshot
-                            model_preference=["openai/gpt-4o"] # Prioritize visual model
+                            image_data=screenshot_bytes, model_preference=["openai/gpt-4o"]
                         )
                         if llm_response_str:
                              try:
                                  parsed_data = self._parse_llm_json(llm_response_str)
                                  if parsed_data is not None:
-                                     result = {"status": "success", "message": "Data extracted via Visual LLM.", "extracted_data": parsed_data}
+                                     extracted_data = parsed_data # Store parsed data
+                                     result = {"status": "success", "message": "Data extracted via Visual LLM.", "extracted_data": extracted_data}
                                  else: raise ValueError("LLM response was not valid JSON.")
                              except Exception as parse_err: result = {"status": "failure", "message": f"LLM returned invalid JSON or failed parsing: {parse_err}", "raw_output": llm_response_str}
                         else: result = {"status": "failure", "message": "Visual LLM analysis returned no response."}
@@ -565,17 +567,47 @@ class BrowsingAgent(GeniusAgentBase):
                         self.logger.info(f"Extracting main text content from page {page_id}.")
                         try:
                             body_text = await page.evaluate("document.body.innerText")
-                            result = {"status": "success", "message": "Main content extracted.", "extracted_data": {"main_text": body_text.strip() if body_text else ""}}
+                            extracted_data = {"main_text": body_text.strip() if body_text else ""}
+                            result = {"status": "success", "message": "Main content extracted.", "extracted_data": extracted_data}
                         except Exception as text_err: result = {"status": "failure", "message": f"Error extracting main text: {text_err}"}
                     else:
                         result = {"status": "warning", "message": "No extraction method specified (selectors, prompt, or main_content)."}
 
+                    # Store extracted data in task_context if output_var is specified
+                    if output_var and result.get("status") == "success":
+                        task_context[output_var] = extracted_data
+                        self.logger.info(f"Stored extracted data in task context variable: '{output_var}'")
+                        result["result_data"] = extracted_data # Also return in step result
+
                 # --- Visual UI Automation (Primary Interaction Method) ---
-                elif step_action.startswith('Execute UI Automation') or step_action == 'web_ui_automate': # Handle planned or direct calls
+                elif step_action.startswith('Execute UI Automation') or step_action == 'web_ui_automate':
                     service = params.get('service', 'Unknown Service')
                     goal = params.get('goal', 'Perform UI actions')
-                    automate_params = params.get('params', {}) # Specific inputs for the goal (e.g., login creds, file paths)
-                    max_steps = params.get('max_steps', 25) # Limit number of LLM interactions
+                    # --- MODIFICATION START: Handle input_vars ---
+                    # Get base parameters specific to this automation goal
+                    automate_params = params.get('params', {}).copy()
+                    # Get input variables defined in the step plan
+                    input_vars_map = params.get('input_vars', {})
+                    # Resolve input variables using the main task_context
+                    resolved_input_vars = {}
+                    for param_name, context_var_name in input_vars_map.items():
+                        if isinstance(context_var_name, str) and context_var_name.startswith('$'):
+                            var_key = context_var_name[1:] # Remove '$'
+                            if var_key in task_context:
+                                resolved_input_vars[param_name] = task_context[var_key]
+                                self.logger.debug(f"Resolved input var '{param_name}' from task context key '{var_key}'")
+                            else:
+                                self.logger.warning(f"Input variable '{context_var_name}' requested but not found in task context.")
+                                resolved_input_vars[param_name] = None # Or raise error?
+                        else:
+                             # If not starting with '$', treat as literal value? Or ignore? Let's ignore for now.
+                             self.logger.warning(f"Input variable value '{context_var_name}' for '{param_name}' does not start with '$'. Treating as literal or ignoring.")
+                             # resolved_input_vars[param_name] = context_var_name # Uncomment to treat as literal
+                    # Merge resolved variables into the parameters used by the automation loop
+                    automate_params.update(resolved_input_vars)
+                    # --- MODIFICATION END ---
+
+                    max_steps = params.get('max_steps', 25)
                     current_step_count = 0
                     last_action_summary = "Automation started."
 
@@ -585,46 +617,39 @@ class BrowsingAgent(GeniusAgentBase):
                     while current_step_count < max_steps:
                         current_step_count += 1
                         await self._internal_think(f"UI Automate Step {current_step_count}/{max_steps}: Goal='{goal}'", details={"last_action_result": last_action_summary})
-                        await self._human_like_delay(page, short=True) # Short delay between steps
+                        await self._human_like_delay(page, short=True)
 
-                        # Capture visual and text context
-                        screenshot_bytes = await page.screenshot(full_page=True) # Capture full page
+                        screenshot_bytes = await page.screenshot(full_page=True)
                         page_text_content = await page.evaluate("document.body.innerText")
                         current_url = page.url
 
-                        # Prepare context for Visual LLM
                         automation_task_context = {
                             "task": "Determine next UI action based primarily on visual context",
-                            "service_context": service,
-                            "current_goal": goal,
-                            "automation_parameters": automate_params, # Provide necessary inputs (like username/password if goal is login)
-                            "page_text_content_snippet": page_text_content[:5000], # Text for context
-                            "current_url": current_url,
-                            "last_action_result": last_action_summary,
+                            "service_context": service, "current_goal": goal,
+                            "automation_parameters": automate_params, # Use merged params
+                            "page_text_content_snippet": page_text_content[:5000],
+                            "current_url": current_url, "last_action_result": last_action_summary,
                             "current_step": f"{current_step_count}/{max_steps}",
                             "available_actions": ["click", "input", "upload", "scroll", "wait", "navigate", "download", "solve_captcha", "finish", "error"],
                             "desired_output_format": "JSON: {\"action_type\": \"<chosen_action>\", \"selector\": \"<css_selector_or_xpath>\", \"coordinates\": {\"x\": float, \"y\": float}?, \"text_to_input\": \"<string>\"?, \"file_path_param\": \"<param_name_for_file>\"?, \"scroll_direction\": \"up|down|left|right|top|bottom\"?, \"wait_time_ms\": int?, \"target_url\": \"<string>\"?, \"captcha_type\": \"checkbox|image_challenge|etc\"?, \"reasoning\": \"<Explanation>\", \"error_message\": \"<If action_type is error>\"}"
                         }
-                        # Add specific instructions for CAPTCHA solving if detected previously or part of goal
                         if "captcha" in goal.lower() or "captcha" in last_action_summary.lower():
                              automation_task_context["special_focus"] = "A CAPTCHA might be present. Identify it and determine the interaction needed (e.g., click checkbox, describe image challenge)."
 
                         llm_prompt = await self.generate_dynamic_prompt(automation_task_context)
-                        llm_model_pref = "openai/gpt-4o" # Must be a visual model
+                        llm_model_pref = "openai/gpt-4o"
 
                         action_json_str = await self.orchestrator.call_llm(
-                            agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.05, # Low temp for precision
+                            agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.05,
                             max_tokens=800, is_json_output=True,
-                            image_data=screenshot_bytes, # Crucial: Pass the screenshot
-                            model_preference=[llm_model_pref]
+                            image_data=screenshot_bytes, model_preference=[llm_model_pref]
                         )
 
                         if not action_json_str:
                             last_action_summary = "LLM failed to determine next action."
                             self.logger.error(last_action_summary)
-                            # Optionally retry LLM call or raise error
                             if current_step_count == max_steps: raise RuntimeError(f"UI Automation failed: LLM unresponsive after {max_steps} steps.")
-                            continue # Try again on next loop iteration maybe? Or fail here.
+                            continue
 
                         try:
                             action_data = self._parse_llm_json(action_json_str)
@@ -634,48 +659,55 @@ class BrowsingAgent(GeniusAgentBase):
                             reasoning = action_data.get('reasoning', 'N/A')
                             self.logger.info(f"Attempt {current_step_count}: LLM decided action: {action_type}. Reasoning: {reasoning}")
 
-                            # --- Execute Decided Action ---
                             action_executed_successfully = False
                             action_result_message = f"Action '{action_type}' initiated."
+                            step_output_data = None # To store data produced by this micro-step
 
                             if action_type == 'click':
-                                selector = action_data.get('selector')
-                                coords = action_data.get('coordinates')
+                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
                                 target_element = await self._find_element(page, selector, coords)
-                                if target_element:
-                                    await self._human_click(page, target_element)
-                                    action_executed_successfully = True; action_result_message = f"Clicked element matching '{selector or coords}'."
+                                if target_element: await self._human_click(page, target_element); action_executed_successfully = True; action_result_message = f"Clicked element matching '{selector or coords}'."
                                 else: action_result_message = f"Click failed: Element not found for '{selector or coords}'."
 
                             elif action_type == 'input':
-                                selector = action_data.get('selector')
-                                coords = action_data.get('coordinates') # LLM might give coords for input field
-                                text = action_data.get('text_to_input')
+                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
+                                text_to_input_raw = action_data.get('text_to_input')
+                                text_to_input = None
+                                # Resolve input text from automate_params if it's a key reference
+                                if isinstance(text_to_input_raw, str) and text_to_input_raw.startswith("params."):
+                                    key = text_to_input_raw.split('.')[-1]
+                                    text_to_input = automate_params.get(key)
+                                    if text_to_input is None: action_result_message = f"Input failed: Parameter key '{key}' not found in resolved params.";
+                                    else: self.logger.debug(f"Resolved input text from params key '{key}'")
+                                elif text_to_input_raw is not None:
+                                    text_to_input = text_to_input_raw # Use literal text
+                                else: action_result_message = "Input failed: LLM did not provide text or valid param key."
+
                                 target_element = await self._find_element(page, selector, coords)
-                                if target_element and text is not None:
-                                    await self._human_fill(page, target_element, text)
+                                if target_element and text_to_input is not None:
+                                    await self._human_fill(page, target_element, str(text_to_input)) # Ensure text is string
                                     action_executed_successfully = True; action_result_message = f"Input text into element '{selector or coords}'."
-                                else: action_result_message = f"Input failed: Element not found or text missing for '{selector or coords}'."
+                                elif not target_element: action_result_message = f"Input failed: Element not found for '{selector or coords}'."
+                                # else: message already set above
 
                             elif action_type == 'upload':
-                                selector = action_data.get('selector')
-                                coords = action_data.get('coordinates')
-                                file_path_param_name = action_data.get('file_path_param') # LLM specifies which param holds the path
-                                file_path = automate_params.get(file_path_param_name) if file_path_param_name else None
+                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
+                                file_path_param_name = action_data.get('file_path_param')
+                                file_path = automate_params.get(file_path_param_name) if file_path_param_name else None # Get resolved path from merged params
                                 target_element = await self._find_element(page, selector, coords)
-                                if target_element and file_path and os.path.exists(file_path):
+                                if target_element and file_path and os.path.exists(str(file_path)): # Check existence
                                     async with page.expect_file_chooser() as fc_info:
-                                         await self._human_click(page, target_element, timeout=10000) # Click the upload button/area
+                                         await self._human_click(page, target_element, timeout=10000)
                                     file_chooser = await fc_info.value
-                                    await file_chooser.set_files(file_path)
-                                    action_executed_successfully = True; action_result_message = f"Uploaded file '{os.path.basename(file_path)}' to element '{selector or coords}'."
-                                elif not file_path or not os.path.exists(file_path):
-                                    action_result_message = f"Upload failed: File path '{file_path}' invalid or not found (check param '{file_path_param_name}')."
+                                    await file_chooser.set_files(str(file_path)) # Ensure path is string
+                                    action_executed_successfully = True; action_result_message = f"Uploaded file '{os.path.basename(str(file_path))}' to element '{selector or coords}'."
+                                elif not file_path or not os.path.exists(str(file_path)):
+                                    action_result_message = f"Upload failed: File path '{file_path}' invalid or not found (resolved from param '{file_path_param_name}')."
                                 else: action_result_message = f"Upload failed: Element not found for '{selector or coords}'."
 
                             elif action_type == 'scroll':
                                 direction = action_data.get('scroll_direction', 'down')
-                                selector = action_data.get('selector') # Optional: scroll specific element
+                                selector = action_data.get('selector')
                                 target_element = await self._find_element(page, selector) if selector else None
                                 await self._human_scroll(page, direction, target_element)
                                 action_executed_successfully = True; action_result_message = f"Scrolled {direction}."
@@ -690,53 +722,53 @@ class BrowsingAgent(GeniusAgentBase):
                                 if target_url:
                                     self.logger.info(f"Navigating to URL specified by LLM: {target_url}")
                                     response = await page.goto(target_url, wait_until='domcontentloaded')
-                                    if response and response.ok:
-                                        action_executed_successfully = True; action_result_message = f"Navigated to {target_url}."
+                                    if response and response.ok: action_executed_successfully = True; action_result_message = f"Navigated to {target_url}."
                                     else: action_result_message = f"Navigation failed: Could not load {target_url} (Status: {response.status if response else 'N/A'})."
                                 else: action_result_message = "Navigation failed: LLM did not provide target_url."
 
                             elif action_type == 'download':
-                                selector = action_data.get('selector')
-                                coords = action_data.get('coordinates')
+                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
                                 target_element = await self._find_element(page, selector, coords)
                                 if target_element:
-                                    async with page.expect_download(timeout=180000) as download_info: # Longer timeout for downloads
+                                    async with page.expect_download(timeout=180000) as download_info:
                                         await self._human_click(page, target_element)
                                     download = await download_info.value
                                     download_filename = f"{uuid.uuid4().hex}_{download.suggested_filename}"
                                     download_path = os.path.join(self.temp_dir, download_filename)
                                     await download.save_as(download_path)
                                     self.logger.info(f"File downloaded to: {download_path}")
-                                    output_var_name = params.get("output_var", "last_download_path")
-                                    task_context[output_var_name] = download_path # Store path for subsequent steps
+                                    step_output_data = download_path # Store path as output of this micro-step
                                     action_executed_successfully = True; action_result_message = f"File downloaded to {download_path}"
                                 else: action_result_message = f"Download failed: Element not found for '{selector or coords}'."
 
                             elif action_type == 'solve_captcha':
                                 captcha_type = action_data.get('captcha_type', 'unknown')
-                                selector = action_data.get('selector') # Selector for checkbox or challenge area
-                                coords = action_data.get('coordinates')
+                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
                                 self.logger.info(f"Attempting to solve CAPTCHA (Type: {captcha_type})")
                                 target_element = await self._find_element(page, selector, coords)
                                 if target_element:
                                     if captcha_type == 'checkbox':
                                         await self._human_click(page, target_element)
-                                        await page.wait_for_timeout(random.uniform(3000, 6000)) # Wait for potential challenge
+                                        await page.wait_for_timeout(random.uniform(3000, 6000))
                                         action_executed_successfully = True; action_result_message = "Clicked CAPTCHA checkbox."
-                                        # Re-evaluate page after clicking checkbox
                                     elif captcha_type == 'image_challenge':
-                                        # This requires the LLM to have provided coordinates/instructions based on the image
-                                        # Placeholder for complex visual challenge solving logic
                                         action_result_message = f"Image CAPTCHA solving not fully implemented for element '{selector or coords}'. Requires specific LLM interaction."
                                         self.logger.warning(action_result_message)
-                                        # For now, mark as not successful to potentially retry/error out
                                     else: action_result_message = f"CAPTCHA solving failed: Unknown or unsupported type '{captcha_type}'."
                                 else: action_result_message = f"CAPTCHA solving failed: Element not found for '{selector or coords}'."
 
                             elif action_type == 'finish':
                                 self.logger.info(f"Visual UI Automation goal '{goal}' completed successfully based on LLM decision.")
-                                result = {"status": "success", "message": f"UI Automation goal '{goal}' completed."}
-                                action_executed_successfully = True # Mark as success to break loop
+                                # Check if the original step requested an output variable
+                                output_var_name = params.get("output_var")
+                                if output_var_name:
+                                     # Try to get the final result (e.g., URL, confirmation text) - needs refinement
+                                     final_output_value = page.url # Default to final URL
+                                     self.logger.info(f"Storing final automation output '{final_output_value}' in task context variable: '{output_var_name}'")
+                                     task_context[output_var_name] = final_output_value
+                                     result["result_data"] = final_output_value # Include in step result
+                                result["status"] = "success"; result["message"] = f"UI Automation goal '{goal}' completed."
+                                action_executed_successfully = True
                                 break # Exit the automation loop
 
                             elif action_type == 'error':
@@ -747,16 +779,21 @@ class BrowsingAgent(GeniusAgentBase):
                             else:
                                 action_result_message = f"Unsupported action type from LLM: {action_type}"
                                 self.logger.warning(action_result_message)
-                                # Treat unsupported action as failure for this step
+
+                            # --- Store micro-step output if needed ---
+                            # If the LLM's action produced data AND the original step defined an output_var
+                            # (This is primarily handled by 'download' and 'finish' currently)
+                            # output_var_name = params.get("output_var")
+                            # if output_var_name and step_output_data is not None:
+                            #     task_context[output_var_name] = step_output_data
+                            #     self.logger.info(f"Stored step output in task context variable: '{output_var_name}'")
 
                             # --- Update loop status ---
                             last_action_summary = action_result_message
                             if not action_executed_successfully:
                                 self.logger.warning(f"Attempt {current_step_count}: Action '{action_type}' failed or was not applicable. Message: {action_result_message}")
-                                # Consider if failure should immediately break or allow LLM to retry
                                 if current_step_count == max_steps:
                                      raise RuntimeError(f"UI Automation failed after {max_steps} steps. Last failed action: {action_type}. Message: {last_action_summary}")
-                                # Allow loop to continue, LLM might adapt
 
                         except PlaywrightError as pe_auto:
                             last_action_summary = f"Playwright error executing action '{action_data.get('action_type', 'unknown')}': {pe_auto}"
@@ -1622,7 +1659,7 @@ class BrowsingAgent(GeniusAgentBase):
         task_type = task_context.get('task')
         if task_type == 'Determine next UI action based primarily on visual context' or task_type == 'Determine next UI action for account signup':
             prompt_parts.append(f"Analyze the provided **screenshot** and text snippet. Based *primarily* on the visual layout and the current goal ('{task_context.get('current_goal', 'N/A')}'), determine the single best next action from {task_context.get('available_actions', [])}.")
-            prompt_parts.append("Provide a precise selector (CSS or XPath) or coordinates for the target element. If inputting text, specify the exact text or reference the 'identity.<key>' from parameters.")
+            prompt_parts.append("Provide a precise selector (CSS or XPath) or coordinates for the target element. If inputting text, specify the exact text or reference the 'params.<key>' from parameters.") # MODIFIED: Reference 'params.<key>'
             prompt_parts.append("If a CAPTCHA is visible, use the 'solve_captcha' action and identify its type and target element.")
             prompt_parts.append("If the goal involves email verification, use 'check_email_verification' when appropriate.")
             prompt_parts.append("Use 'finish' only when the goal is definitively achieved. Use 'error' if stuck or encountering an unrecoverable issue.")

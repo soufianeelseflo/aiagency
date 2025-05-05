@@ -1,15 +1,15 @@
 # Filename: agents/email_agent.py
 # Description: Genius Agentic Email Agent - Handles hyper-personalized outreach,
 #              IMAP opt-out processing, humanization, compliance, and learning.
-# Version: 3.1 (Added Enriched Data Usage)
+# Version: 3.2 (Integrated MailerSend & MailerCheck, Enhanced Prompting)
 
 import asyncio
 import logging
 import random
 import os
 import json
-import smtplib
-import imaplib
+import smtplib # Kept for potential fallback/IMAP
+import imaplib # Kept for reply checking
 import email # For parsing emails
 import re # For parsing email content/headers
 import uuid # For tracking pixel
@@ -20,7 +20,8 @@ from email.header import decode_header
 from datetime import datetime, timedelta, timezone
 import pytz
 from collections import Counter
-import pybreaker # For SMTP circuit breaker
+import pybreaker # For SMTP/API circuit breaker
+import aiohttp # For MailerCheck
 
 # --- Core Framework Imports ---
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,7 +35,6 @@ try:
     from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
 except ImportError:
     logging.warning("Production base agent not found, using GeniusAgentBase. Ensure base_agent_prod.py is used.")
-    # Attempt absolute import if relative fails (common in some setups)
     try:
         from agents.base_agent import GeniusAgentBase
     except ImportError:
@@ -42,7 +42,7 @@ except ImportError:
         raise
 
 # Use correct model imports as defined in your models.py
-from models import Client, EmailLog, PromptTemplate, KnowledgeFragment, EmailComposition, LearnedPattern, EmailStyles, KVStore
+from models import Client, EmailLog, PromptTemplate, KnowledgeFragment, EmailComposition, LearnedPattern, EmailStyles, KVStore, ConversationState # Added ConversationState
 from config.settings import settings # Use validated settings
 from utils.database import encrypt_data, decrypt_data # Use DB utils
 from email.mime.text import MIMEText
@@ -54,45 +54,54 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from bs4 import BeautifulSoup # For HTML to text conversion
 from typing import Dict, Any, Optional, List, Union, Tuple, Type # Ensure typing is imported
 
+# --- MailerSend Import ---
+try:
+    from mailersend import emails as MailerSendEmails
+    MAILERSEND_AVAILABLE = True
+except ImportError:
+    logging.warning("MailerSend SDK not found. Email sending will rely on SMTP fallback (if configured). Install with 'pip install mailersend'")
+    MAILERSEND_AVAILABLE = False
+
 # Configure logger
 logger = logging.getLogger(__name__)
 # Configure dedicated operational logger
 op_logger = logging.getLogger('OperationalLog') # Assuming setup elsewhere
 
 # --- Meta Prompt ---
+# MODIFIED: Emphasize using enriched data
 EMAIL_AGENT_META_PROMPT = """
 You are the EmailAgent within the Synapse AI Sales System.
 Your Core Mandate: Execute hyper-personalized, psychologically optimized, and compliant email outreach campaigns to maximize profitable conversions ($10k+/day goal).
 Key Responsibilities:
-1.  **Hyper-Personalized Content:** Generate human-like, engaging email subjects and bodies using context from ThinkTool (Client data, OSINT, KB insights, learned styles, **enriched Clay data**). Use LLM self-critique for humanization.
+1.  **Hyper-Personalized Content:** Generate human-like, engaging email subjects and bodies using context from ThinkTool (Client data, OSINT, KB insights, learned styles, **especially enriched Clay data like job title, company details**). Use LLM self-critique for humanization.
 2.  **Compliant Outreach:** Strictly adhere to CAN-SPAM/GDPR/CASL. Include physical address, clear opt-out mechanism ("Reply STOP"). Validate campaigns via LegalAgent before sending.
-3.  **Deliverability & Anti-Spam:** Analyze content for spam triggers. Utilize multiple SMTP accounts with rotation and rate limiting. Monitor bounce/spam rates.
+3.  **Deliverability & Anti-Spam:** Verify email validity (MailerCheck). Analyze content for spam triggers. Utilize primary sending service (MailerSend) or fallback SMTP with rotation and rate limiting. Monitor bounce/spam rates.
 4.  **Engagement Tracking:** Embed tracking pixels (via Orchestrator). Process replies via IMAP, specifically identifying "STOP" requests for immediate opt-out.
 5.  **Performance Logging:** Log all email sends, opens, replies, bounces, and failures meticulously to the Postgres database (`EmailLog`). Link sent emails to KB fragments used (`EmailComposition`).
 6.  **Learning Integration:** Utilize successful email styles (`EmailStyles` table) identified by ThinkTool. Provide performance data for ThinkTool's learning loop.
 7.  **Collaboration:** Receive tasks (leads, content briefs, **enriched data**) from Orchestrator (originating from ThinkTool). Request validation from LegalAgent. Report outcomes and errors.
-**Goal:** Drive high-value engagement (replies, calls booked, sales) through intelligent, compliant, and adaptive email marketing leveraging all available data, including Clay enrichments.
+**Goal:** Drive high-value engagement (replies, calls booked, sales) through intelligent, compliant, and adaptive email marketing leveraging all available data, including Clay enrichments, and using robust sending infrastructure (MailerSend/MailerCheck).
 """
 
-# SMTP Circuit Breaker
-smtp_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=60 * 10, name="EmailAgentSMTP")
+# Circuit Breaker for MailerSend/Check API calls
+mailer_api_breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=60 * 5, name="EmailAgentMailerAPIs")
 
 class EmailAgent(GeniusAgentBase):
     """
     Email Agent (Genius Level): Executes hyper-personalized, compliant email campaigns,
-    handles opt-outs via IMAP, learns from performance, and manages SMTP rotation.
-    Version: 3.1 (Added Enriched Data Usage)
+    handles opt-outs via IMAP, learns from performance, uses MailerSend/Check.
+    Version: 3.2
     """
     AGENT_NAME = "EmailAgent"
 
-    def __init__(self, session_maker: async_sessionmaker[AsyncSession], orchestrator: Any, smtp_password: str, imap_password: str):
+    def __init__(self, session_maker: async_sessionmaker[AsyncSession], orchestrator: Any, smtp_password: Optional[str] = None, imap_password: Optional[str] = None): # Made passwords optional
         """Initializes the EmailAgent."""
         super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, session_maker=session_maker)
         self.meta_prompt = EMAIL_AGENT_META_PROMPT
         self.think_tool = orchestrator.agents.get('think') # Reference ThinkTool if needed
 
-        # Store secrets passed directly
-        self._smtp_password = smtp_password
+        # Store secrets passed directly (still needed for IMAP)
+        self._smtp_password = smtp_password # Kept for potential fallback
         self._imap_password = imap_password
 
         # --- Internal State Initialization ---
@@ -103,31 +112,36 @@ class EmailAgent(GeniusAgentBase):
         self.internal_state['global_daily_limit'] = int(self.config.get("EMAIL_AGENT_MAX_PER_DAY", 1000))
         self.internal_state['global_sent_today'] = 0
         self.internal_state['global_reset_time'] = self._get_next_reset_time_utc()
-        self.internal_state['smtp_providers'] = self._load_smtp_providers() # Load provider structures
-        self.internal_state['current_provider_index'] = 0
+        # self.internal_state['smtp_providers'] = self._load_smtp_providers() # SMTP is now fallback
+        # self.internal_state['current_provider_index'] = 0
         self.internal_state['imap_check_interval_seconds'] = int(self.config.get("IMAP_CHECK_INTERVAL_S", 300))
         self.internal_state['tracking_pixel_cache'] = {} # uuid -> email_log_id (simple in-memory cache)
+        self.internal_state['mailercheck_cache'] = {} # email -> {'status': str, 'timestamp': float}
+        self.internal_state['mailercheck_cache_ttl'] = 60 * 60 * 24 * 7 # Cache verification for 7 days
 
-        self.logger.info(f"{self.AGENT_NAME} v3.1 initialized. Max Concurrency: {self.internal_state['max_concurrency']}")
-
-    def _load_smtp_providers(self) -> List[Dict]:
-        """Loads SMTP provider details from config, adding the password."""
-        providers = []
-        hostinger_email = self.config.get("HOSTINGER_EMAIL")
-        hostinger_smtp = self.config.get("HOSTINGER_SMTP_HOST") # Use correct setting name
-        smtp_port = self.config.get("SMTP_PORT")
-
-        if hostinger_email and hostinger_smtp and self._smtp_password:
-            providers.append({
-                "host": hostinger_smtp,
-                "port": smtp_port,
-                "email": hostinger_email,
-                "pass": self._smtp_password
-            })
-            self.logger.info(f"Loaded SMTP provider: {hostinger_email}")
+        # --- Initialize MailerSend Client ---
+        self.mailersend_api_key = self.config.get_secret("MAILERSEND_API_KEY")
+        self.mailersend_client = None
+        if MAILERSEND_AVAILABLE and self.mailersend_api_key:
+            try:
+                self.mailersend_client = MailerSendEmails.NewEmail(self.mailersend_api_key)
+                self.logger.info("MailerSend client initialized successfully.")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize MailerSend client: {e}")
+                self.mailersend_client = None # Ensure it's None if init fails
+        elif not MAILERSEND_AVAILABLE:
+             self.logger.warning("MailerSend SDK not installed. Email sending disabled.")
         else:
-            self.logger.critical("Hostinger SMTP email, host, or password missing in config/secrets. Email sending will fail.")
-        return providers
+             self.logger.warning("MAILERSEND_API_KEY not configured. Email sending via MailerSend disabled.")
+
+        # --- MailerCheck API Key ---
+        self.mailercheck_api_key = self.config.get_secret("MAILERCHECK_API_KEY")
+        if not self.mailercheck_api_key:
+            self.logger.warning("MAILERCHECK_API_KEY not configured. Email verification disabled.")
+
+        self.logger.info(f"{self.AGENT_NAME} v3.2 initialized. Max Concurrency: {self.internal_state['max_concurrency']}")
+
+    # Removed _load_smtp_providers as MailerSend is primary
 
     async def log_operation(self, level: str, message: str):
         """Helper to log to the operational log file."""
@@ -190,15 +204,13 @@ class EmailAgent(GeniusAgentBase):
         return result
 
     # --- Core Email Workflow ---
-    # MODIFICATION START: Added goal parameter
     async def send_email_task(self,
                               client_id: Optional[int],
                               target_identifier: Optional[str],
                               campaign_id: Optional[int] = None,
                               enriched_data: Optional[Dict[str, Any]] = None,
-                              goal: str = 'engagement'): # Pass goal
-        # MODIFICATION END
-        """Handles the entire process for sending one email, including internal reflection and throttling."""
+                              goal: str = 'engagement'):
+        """Handles the entire process for sending one email, including verification and throttling."""
         async with self.internal_state['send_semaphore']:
             self.internal_state['active_sends'] = self.internal_state.get('active_sends', 0) + 1
             log_status = "failed_preparation"
@@ -207,7 +219,7 @@ class EmailAgent(GeniusAgentBase):
             body: Optional[str] = None
             recipient: Optional[str] = None
             actual_client_id: Optional[int] = client_id
-            sender_email: Optional[str] = None
+            sender_email: Optional[str] = None # MailerSend uses verified domain sender
             composition_ids: Dict[str, Any] = {}
             email_log_id: Optional[int] = None
             client: Optional[Client] = None
@@ -216,57 +228,48 @@ class EmailAgent(GeniusAgentBase):
                 # 0. Check Global Daily Limit
                 if not self._check_global_limit():
                     self.logger.warning(f"Global daily email limit reached. Task deferred for client {actual_client_id or target_identifier}.")
-                    # Requeue with lower priority, include goal
                     await self.orchestrator.delegate_task(self.AGENT_NAME, {'action': 'initiate_outreach', 'content': {'client_id': actual_client_id, 'target_identifier': target_identifier, 'campaign_id': campaign_id, 'enriched_data': enriched_data, 'goal': goal}, 'priority': 9.0})
                     return
 
-                # 1. Fetch Client Data & Check Opt-In
+                # 1. Fetch Client Data & Determine Recipient
                 async with self.session_maker() as session:
                     if actual_client_id:
                         client = await session.get(Client, actual_client_id)
-                        if not client:
-                             self.logger.warning(f"Client ID {actual_client_id} provided but not found.")
-                    # Try lookup by email if no client or ID missing
+                        if not client: self.logger.warning(f"Client ID {actual_client_id} provided but not found.")
                     if not client and target_identifier and '@' in target_identifier:
                          stmt = select(Client).where(Client.email == target_identifier).limit(1)
                          client = (await session.execute(stmt)).scalar_one_or_none()
-                         if client:
-                             actual_client_id = client.id
-                             self.logger.info(f"Found client ID {actual_client_id} via email lookup for {target_identifier}.")
-                         else:
-                             self.logger.info(f"No client record found for email {target_identifier}. Proceeding with email as recipient.")
+                         if client: actual_client_id = client.id; self.logger.info(f"Found client ID {actual_client_id} via email lookup for {target_identifier}.")
+                         else: self.logger.info(f"No client record found for email {target_identifier}. Proceeding with email as recipient.")
 
-                    # Determine recipient email
                     recipient = client.email if client else target_identifier
+                    if not recipient: self.logger.error(f"Cannot send email: No recipient email identified for client {actual_client_id or target_identifier}."); return
+                    if client and (not client.opt_in or not client.is_deliverable): self.logger.warning(f"Cannot send email to client {actual_client_id}: Invalid state (OptIn:{client.opt_in}, Deliverable:{client.is_deliverable})."); return
 
-                    if not recipient:
-                         self.logger.error(f"Cannot send email: No recipient email address identified for client {actual_client_id or target_identifier}.")
-                         return
-
-                    # Check client state if client object exists
-                    if client and (not client.opt_in or not client.is_deliverable):
-                        self.logger.warning(f"Cannot send email to client {actual_client_id}: Invalid state (OptIn:{client.opt_in}, Deliverable:{client.is_deliverable}).")
-                        return
-
-                # 2. Select Sender Account & Check Account Limit
-                sender_config = self._select_sending_account()
-                if not sender_config:
-                    self.logger.error(f"No available SMTP sending accounts within limits for client {actual_client_id or target_identifier}. Task deferred.")
-                    # Requeue, include goal
-                    await self.orchestrator.delegate_task(self.AGENT_NAME, {'action': 'initiate_outreach', 'content': {'client_id': actual_client_id, 'target_identifier': target_identifier, 'campaign_id': campaign_id, 'enriched_data': enriched_data, 'goal': goal}, 'priority': 8.0})
+                # 2. Verify Email Address (MailerCheck) - NEW STEP
+                verification_status = await self._verify_email_address(recipient)
+                if verification_status in ["syntax_error", "typo", "mailbox_not_found", "disposable", "blocked", "error"]:
+                    self.logger.warning(f"Email verification failed for {recipient}. Status: {verification_status}. Skipping send.")
+                    await self._mark_client_undeliverable(recipient) # Mark as undeliverable in DB
+                    await self._log_email(actual_client_id, recipient, "Verification Failed", f"Skipped send due to verification status: {verification_status}", "failed_verification", None, {}, None)
                     return
-                sender_email = sender_config['email']
+                elif verification_status in ["catch_all", "unknown", "mailbox_full", "role"]:
+                    self.logger.info(f"Email verification for {recipient} returned risky status: {verification_status}. Proceeding with caution.")
+                else: # 'valid'
+                     self.logger.info(f"Email verification successful for {recipient}.")
 
-                # 3. Generate Content (Passing client object, enriched_data, and goal)
+                # 3. Select Sender (Using MailerSend verified domain)
+                sender_email = self.config.get("HOSTINGER_EMAIL") # Use configured sender email (must be verified in MailerSend)
+                if not sender_email:
+                    self.logger.error("HOSTINGER_EMAIL (verified sender for MailerSend) not configured. Cannot send.")
+                    return
+
+                # 4. Generate Content
                 await self._internal_think(f"Requesting content generation for {recipient}.")
-                # MODIFICATION START: Pass goal
-                subject, body, composition_ids = await self._generate_email_content_internal(client, campaign_id, enriched_data, goal) # Pass goal
-                # MODIFICATION END
+                subject, body, composition_ids = await self._generate_email_content_internal(client, campaign_id, enriched_data, goal)
+                if not subject or not body: raise ValueError("Failed to generate email content.")
 
-                if not subject or not body:
-                    raise ValueError("Failed to generate email content.")
-
-                # 4. Compliance Check (via LegalAgent)
+                # 5. Compliance Check (LegalAgent)
                 await self._internal_think(f"Requesting compliance validation for email to {recipient}.")
                 compliance_context = f"Email Campaign Send: To={recipient}, Subject='{subject[:50]}...', Body Snippet='{self._html_to_plain_text(body)[:100]}...', Client Country: {client.country if client else 'Unknown'}"
                 validation_result = await self.orchestrator.delegate_task("LegalAgent", {"action": "validate_operation", "operation_description": compliance_context})
@@ -276,51 +279,48 @@ class EmailAgent(GeniusAgentBase):
                     await self._log_email(actual_client_id, recipient, subject, body, "blocked_compliance", sender_email, composition_ids, None)
                     return
 
-                # 5. Add Compliance Footer & Tracking Pixel
+                # 6. Add Compliance Footer & Tracking Pixel
                 company_address = self.config.SENDER_COMPANY_ADDRESS or "[Your Company Physical Address - Configure SENDER_COMPANY_ADDRESS]"
                 footer = f"\n\n---\n{self.config.SENDER_NAME}\n{self.config.SENDER_TITLE}\n{company_address}\nReply 'STOP' to unsubscribe."
                 tracking_pixel_uuid = uuid.uuid4()
                 pixel_base_url = self.config.AGENCY_BASE_URL.rstrip('/')
-                pixel_url = f"{pixel_base_url}/track/{tracking_pixel_uuid}.png" # Correct endpoint
+                pixel_url = f"{pixel_base_url}/track/{tracking_pixel_uuid}.png"
                 body += f'<img src="{pixel_url}" width="1" height="1" alt="" style="display:none;"/>'
                 body += f"<p style='font-size:10px; color:#888;'>{footer.replace('\n', '<br>')}</p>"
 
-                # 6. Optimal Send Time Calculation & Wait (If client exists)
-                if client:
-                    await self._wait_for_optimal_send_time(client)
-                else:
-                    self.logger.debug(f"No client object for {recipient}, sending immediately.")
+                # 7. Optimal Send Time Calculation & Wait
+                if client: await self._wait_for_optimal_send_time(client)
+                else: self.logger.debug(f"No client object for {recipient}, sending immediately.")
 
                 # --- Internal Reflection Step ---
-                pre_send_thought = f"Pre-Send Checklist: ClientID={actual_client_id}, To={recipient}, Subject='{subject[:30]}...', Compliance=OK, Sender={sender_email}, Limits OK. Action: Proceed with SMTP send."
+                pre_send_thought = f"Pre-Send Checklist: ClientID={actual_client_id}, To={recipient}, Subject='{subject[:30]}...', Compliance=OK, Verification={verification_status}, Sender={sender_email}. Action: Proceed with MailerSend."
                 await self._internal_think(pre_send_thought)
 
-                # 7. Apply Throttling
+                # 8. Apply Throttling (Still useful even with MailerSend)
                 await self._apply_throttling()
 
-                # 8. Send Email via SMTP
-                send_result = await self._send_email_smtp(recipient, subject, body, sender_config)
+                # 9. Send Email via MailerSend
+                send_result = await self._send_email_mailersend(recipient, subject, body, sender_email) # Use new function
                 send_success = send_result.get("status") == "success"
-                message_id = send_result.get("message_id")
+                message_id = send_result.get("message_id") # MailerSend provides X-Message-Id header
 
-                # 9. Update Limits & Log Result
+                # 10. Update Limits & Log Result
                 if send_success:
                     log_status = "sent"
-                    self._increment_send_count(sender_email)
+                    # self._increment_send_count(sender_email) # Limit tracking might be less relevant with MailerSend, but keep global
                     self.internal_state['global_sent_today'] += 1
-                    self.logger.info(f"Email SENT to {recipient} via {sender_email}. Subject: {subject[:50]}... (Message-ID: {message_id})")
+                    self.logger.info(f"Email SENT to {recipient} via MailerSend. Subject: {subject[:50]}... (X-Message-Id: {message_id})")
                     if actual_client_id:
                         async with self.session_maker() as session:
                             await session.execute(update(Client).where(Client.id == actual_client_id).values(last_contacted_at=datetime.now(timezone.utc)))
                             await session.commit()
                 else:
                     log_status = "failed_send"
-                    self.logger.warning(f"Email FAILED for {recipient} via {sender_email}. Reason: {send_result.get('message')}")
-                    if "recipient refused" in send_result.get('message', '').lower():
-                         await self._mark_client_undeliverable(recipient)
+                    self.logger.warning(f"Email FAILED for {recipient} via MailerSend. Reason: {send_result.get('message')}")
+                    # MailerSend handles bounces via webhooks, less need to mark undeliverable here unless specific error
 
                 # Log email attempt to DB
-                email_log = await self._log_email(actual_client_id, recipient, subject, body, log_status, sender_email, composition_ids, message_id)
+                email_log = await self._log_email(actual_client_id, recipient, subject, body, log_status, "MailerSend", composition_ids, message_id) # Log sender as MailerSend
                 email_log_id = email_log.id if email_log else None
 
                 # Cache tracking pixel ID -> email log ID mapping
@@ -330,17 +330,124 @@ class EmailAgent(GeniusAgentBase):
             except Exception as e:
                 self.logger.error(f"Unhandled error during send_email_task for {actual_client_id or target_identifier}: {e}", exc_info=True)
                 log_status = "error_internal"
-                await self._log_email(actual_client_id, recipient or str(target_identifier), subject or "ERROR", str(e), log_status, sender_email, None, None)
+                await self._log_email(actual_client_id, recipient or str(target_identifier), subject or "ERROR", str(e), log_status, "MailerSend", None, None)
                 await self._report_error(f"Send email task failed for {actual_client_id or target_identifier}: {e}")
             finally:
                 self.internal_state['active_sends'] = max(0, self.internal_state.get('active_sends', 1) - 1)
 
-    # MODIFICATION START: Added enriched_data parameter and goal, integrated into task_context
+    # --- MailerCheck Verification ---
+    @mailer_api_breaker
+    async def _verify_email_address(self, email_address: str) -> str:
+        """Verifies a single email address using MailerCheck API."""
+        if not self.mailercheck_api_key:
+            self.logger.warning("MailerCheck API key not set. Skipping verification.")
+            return "skipped_no_key"
+
+        # Check cache first
+        cached = self.internal_state['mailercheck_cache'].get(email_address)
+        if cached and time.time() < cached['timestamp'] + self.internal_state['mailercheck_cache_ttl']:
+            self.logger.debug(f"MailerCheck cache hit for {email_address}: {cached['status']}")
+            return cached['status']
+
+        api_url = "https://app.mailercheck.com/api/check/single"
+        headers = {
+            'Authorization': f'Bearer {self.mailercheck_api_key}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        payload = {"email": email_address}
+        await self._internal_think(f"Verifying email via MailerCheck: {email_address}")
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=15) # Verification should be quick
+            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+                async with session.post(api_url, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        status = result.get('status', 'error')
+                        # Update cache
+                        self.internal_state['mailercheck_cache'][email_address] = {'status': status, 'timestamp': time.time()}
+                        self.logger.debug(f"MailerCheck result for {email_address}: {status}")
+                        return status
+                    elif response.status == 429:
+                        self.logger.warning("MailerCheck rate limit hit. Returning 'unknown'.")
+                        return "unknown" # Treat rate limit as unknown for now
+                    else:
+                        error_details = await response.text()
+                        self.logger.error(f"MailerCheck API error ({response.status}): {error_details[:200]}")
+                        return "error"
+        except asyncio.TimeoutError:
+            self.logger.error(f"Timeout calling MailerCheck API for {email_address}")
+            return "error"
+        except aiohttp.ClientError as e:
+            self.logger.error(f"Network error calling MailerCheck API for {email_address}: {e}")
+            return "error" # Treat network errors as verification errors
+        except Exception as e:
+            self.logger.error(f"Unexpected error during MailerCheck call for {email_address}: {e}", exc_info=True)
+            return "error"
+
+    # --- MailerSend Sending Function ---
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=5, max=30), retry=retry_if_exception_type(Exception)) # Retry on general exceptions from SDK
+    @mailer_api_breaker # Use circuit breaker
+    async def _send_email_mailersend(self, recipient: str, subject: str, body_html: str, sender_email: str) -> Dict[str, Any]:
+        """Sends email using the MailerSend SDK."""
+        if not self.mailersend_client:
+            return {"status": "failure", "message": "MailerSend client not initialized."}
+
+        result = {"status": "failure", "message": "MailerSend send initialization failed."}
+        message_id = None
+
+        try:
+            mail_body = {}
+            mail_from = {
+                "name": self.config.SENDER_NAME,
+                "email": sender_email, # Must be verified in MailerSend
+            }
+            recipients = [{"email": recipient}]
+            reply_to = {"email": sender_email} # Default reply-to self
+
+            self.mailersend_client.set_mail_from(mail_from, mail_body)
+            self.mailersend_client.set_mail_to(recipients, mail_body)
+            self.mailersend_client.set_subject(subject, mail_body)
+            self.mailersend_client.set_html_content(body_html, mail_body)
+            self.mailersend_client.set_plaintext_content(self._html_to_plain_text(body_html), mail_body)
+            self.mailersend_client.set_reply_to(reply_to, mail_body)
+            # Add tags if needed: self.mailersend_client.set_tags(["campaign:ugc", f"client:{client_id}"], mail_body)
+
+            await self._internal_think(f"Sending email via MailerSend to {recipient}")
+            # The MailerSend SDK's send method is synchronous, run in executor
+            response = await asyncio.to_thread(self.mailersend_client.send, mail_body)
+
+            # Check response status code (SDK might not raise exception for all API errors)
+            if 200 <= response.status_code < 300:
+                # Extract Message-ID from headers (key is case-insensitive)
+                msg_id_key = next((k for k in response.headers if k.lower() == 'x-message-id'), None)
+                if msg_id_key:
+                    message_id = response.headers[msg_id_key]
+                self.logger.info(f"Email queued successfully via MailerSend to {recipient}. Status: {response.status_code}, X-Message-Id: {message_id}")
+                result = {"status": "success", "message": "Email queued successfully via MailerSend.", "message_id": message_id}
+            else:
+                error_details = response.body if hasattr(response, 'body') else 'No details'
+                self.logger.error(f"MailerSend API error sending to {recipient}. Status: {response.status_code}, Response: {error_details}")
+                result["message"] = f"MailerSend API Error ({response.status_code}): {error_details}"
+                # Raise an exception to trigger retry/circuit breaker if appropriate
+                if response.status_code >= 500 or response.status_code == 429:
+                     raise Exception(f"MailerSend server/rate limit error: {response.status_code}")
+
+        except Exception as e:
+             self.logger.error(f"Unexpected error sending email via MailerSend to {recipient}: {e}", exc_info=True)
+             result["message"] = f"Unexpected MailerSend error: {e}"
+             raise # Re-raise for tenacity/breaker
+
+        return result
+
+
+    # --- Content Generation (incorporating enriched data) ---
     async def _generate_email_content_internal(self,
                                                client: Optional[Client],
                                                campaign_id: Optional[int],
                                                enriched_data: Optional[Dict[str, Any]] = None,
-                                               goal: str = 'engagement' # Add goal parameter
+                                               goal: str = 'engagement'
                                                ) -> tuple[Optional[str], Optional[str], Dict[str, Any]]:
         """Generates subject and body using LLM, including enriched data, returns subject, body (HTML), composition_ids."""
         subject: Optional[str] = None
@@ -348,12 +455,14 @@ class EmailAgent(GeniusAgentBase):
         composition_ids: Dict[str, Any] = {}
         client_info_dict = {}
         client_id_for_log = None
+        recipient_email = None # Initialize recipient_email
 
         if client:
              client_info_dict = {
                  "id": client.id, "name": client.name, "email": client.email,
                  "country": client.country, "interests": client.interests,
-                 "engagement_score": client.engagement_score, "timezone": client.timezone
+                 "engagement_score": client.engagement_score, "timezone": client.timezone,
+                 "company": client.company, "job_title": client.job_title # Include from Client model
              }
              client_id_for_log = client.id
              recipient_email = client.email # Get email from client object
@@ -372,6 +481,10 @@ class EmailAgent(GeniusAgentBase):
              self.logger.error("Cannot generate email content: No client object or enriched data with email provided.")
              return None, None, {}
 
+        if not recipient_email: # Double check we have a recipient
+             self.logger.error("Cannot generate email content: Recipient email could not be determined.")
+             return None, None, {}
+
         try:
             # 1. Prepare Context (Fetch OSINT, KB Styles)
             osint_summary = "No specific OSINT data available."
@@ -379,7 +492,6 @@ class EmailAgent(GeniusAgentBase):
 
             if client_id_for_log:
                 osint_task = {"action": "fetch_osint_summary", "client_id": client_id_for_log}
-                # Use try-except for optional OSINT fetch
                 try:
                     osint_result = await self.orchestrator.delegate_task("ThinkTool", osint_task)
                     if osint_result and osint_result.get('status') == 'success':
@@ -405,20 +517,23 @@ class EmailAgent(GeniusAgentBase):
 
             # ** ADD ENRICHED DATA TO CONTEXT IF AVAILABLE **
             if enriched_data:
+                # Filter only potentially useful fields for the prompt
                 filtered_enriched_data = {
                     k: v for k, v in enriched_data.items()
-                    if k in ['verified_email', 'job_title', 'company_name', 'full_name', 'linkedin_url'] and v
+                    if k in ['verified_email', 'job_title', 'company_name', 'full_name', 'linkedin_url', 'industry', 'company_size', 'location'] and v
                 }
                 if filtered_enriched_data:
                     task_context['enriched_data_available'] = filtered_enriched_data # Add the data itself
                     self.logger.debug(f"Adding enriched data to prompt context: {list(filtered_enriched_data.keys())}")
 
-            # 2. Generate Dynamic Prompt
+            # 2. Generate Dynamic Prompt (Uses the updated function below)
             comprehensive_prompt = await self.generate_dynamic_prompt(task_context)
 
             # 3. Call LLM
+            llm_model_pref = settings.OPENROUTER_MODELS.get('email_draft')
             llm_response_str = await self._call_llm_with_retry(
-                comprehensive_prompt, temperature=0.75, max_tokens=1500, is_json_output=True
+                comprehensive_prompt, model=llm_model_pref,
+                temperature=0.75, max_tokens=1500, is_json_output=True
             )
             if not llm_response_str: raise Exception("LLM call failed to return content.")
 
@@ -435,11 +550,12 @@ class EmailAgent(GeniusAgentBase):
 
             # 5. Humanization Check
             humanization_prompt = f"Critique this email draft for sounding robotic or overly 'AI-generated'. Focus on tone, flow, and natural language. Respond ONLY with 'Human-like' or 'Robotic'.\n\nSubject: {subject}\n\nBody:\n{self._html_to_plain_text(body)}"
-            verdict = await self._call_llm_with_retry(humanization_prompt, temperature=0.1, max_tokens=10)
+            llm_humanize_model = settings.OPENROUTER_MODELS.get('email_humanize')
+            verdict = await self._call_llm_with_retry(humanization_prompt, model=llm_humanize_model, temperature=0.1, max_tokens=10)
             if verdict and 'robotic' in verdict.lower():
                 await self._internal_think(f"Email for {recipient_email} flagged as robotic. Requesting rewrite.")
                 rewrite_prompt = f"Rewrite the following email to sound more human, natural, and less like AI. Keep the core message and call to action.\n\nSubject: {subject}\n\nBody:\n{body}\n\nOutput JSON: {{\"subject\": \"string\", \"body\": \"string (HTML formatted)\"}}"
-                rewritten_json_str = await self._call_llm_with_retry(rewrite_prompt, temperature=0.7, max_tokens=1500, is_json_output=True)
+                rewritten_json_str = await self._call_llm_with_retry(rewrite_prompt, model=llm_humanize_model, temperature=0.7, max_tokens=1500, is_json_output=True)
                 if rewritten_json_str:
                     try:
                         rewritten_data = self._parse_llm_json(rewritten_json_str)
@@ -460,11 +576,73 @@ class EmailAgent(GeniusAgentBase):
         except Exception as e:
             self.logger.error(f"Internal email content generation failed for {recipient_email}: {e}", exc_info=True)
             return None, None, {}
-    # MODIFICATION END
 
-    # --- Remaining methods (_get_next_reset_time_utc, _check_global_limit, _wait_for_optimal_send_time, etc.) remain unchanged ---
-    # --- Paste the rest of the EmailAgent class code here (from _get_next_reset_time_utc onwards) ---
-    # --- ... (previous implementation of methods from _get_next_reset_time_utc to stop) ... ---
+    # --- generate_dynamic_prompt (Updated in previous step) ---
+    async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
+        """Constructs prompts for LLM calls, incorporating enriched data more effectively."""
+        self.logger.debug(f"Generating dynamic prompt for EmailAgent task: {task_context.get('task')}")
+        prompt_parts = [self.meta_prompt] # Use the agent's specific meta prompt
+
+        prompt_parts.append("\n--- Current Task Context ---")
+        # Prioritize key context items for clarity
+        priority_keys = ['task', 'goal', 'client_info', 'enriched_data_available', 'osint_summary', 'successful_styles', 'campaign_id']
+        for key in priority_keys:
+            if key in task_context:
+                value = task_context[key]
+                value_str = ""; max_len = 1500 # Default max length
+                if key in ['osint_summary', 'successful_styles', 'enriched_data_available']: max_len = 2500 # Allow more context
+                if isinstance(value, str): value_str = value[:max_len] + ("..." if len(value) > max_len else "")
+                elif isinstance(value, (int, float, bool)): value_str = str(value)
+                elif isinstance(value, dict):
+                    # Special handling for enriched data for better readability in prompt
+                    if key == 'enriched_data_available':
+                         value_str = ", ".join([f"{k}: {v}" for k, v in value.items()])[:max_len] + "..."
+                    else:
+                         try: value_str = json.dumps(value, default=str, indent=2); value_str = value_str[:max_len] + ("..." if len(value_str) > max_len else "")
+                         except TypeError: value_str = str(value)[:max_len] + "..."
+                elif isinstance(value, list): value_str = json.dumps(value, default=str)[:max_len] + "..."
+                else: value_str = str(value)[:max_len] + "..."
+                # Use a more descriptive key for enriched data
+                prompt_key = "Enriched Prospect Data" if key == 'enriched_data_available' else key.replace('_', ' ').title()
+                prompt_parts.append(f"**{prompt_key}**: {value_str}")
+
+        # Add remaining context items concisely
+        other_params = {k: v for k, v in task_context.items() if k not in priority_keys and k not in ['desired_output_format']}
+        if other_params:
+            prompt_parts.append("\n**Other Parameters:**")
+            try: prompt_parts.append(f"```json\n{json.dumps(other_params, default=str, indent=2)}\n```")
+            except TypeError: prompt_parts.append(str(other_params)[:500] + "...")
+
+        prompt_parts.append("\n--- Instructions ---")
+        task_type = task_context.get('task')
+        if task_type == 'Generate personalized email subject and body':
+            prompt_parts.append("1. **Hyper-Personalize:** Use Client Info, OSINT Summary, AND **specifically leverage details from 'Enriched Prospect Data'** (like job title, company name, industry, location) to make the email highly relevant.")
+            prompt_parts.append("2. **Subject Line:** Craft a compelling, human-like subject. Use insights from 'Successful Styles' if applicable.")
+            prompt_parts.append("3. **Body Copy (HTML):** Write engaging HTML body. Weave in client interests/pain points (from Client Info/OSINT) and **reference enriched data points naturally**. Adapt tone based on 'Successful Styles' examples.")
+            prompt_parts.append("4. **Tone:** Professional, persuasive, slightly informal. Avoid sounding robotic or overly salesy.")
+            prompt_parts.append(f"5. **Call To Action (CTA):** Include a clear CTA aligned with the campaign 'Goal': '{task_context.get('goal', 'engagement')}'.")
+            prompt_parts.append(f"6. **Output Format:** {task_context.get('desired_output_format')}")
+        elif task_type == 'Critique email human-likeness':
+             prompt_parts.append("Analyze the provided email draft. Does it sound like a natural human wrote it, or does it sound robotic/AI-generated? Focus on tone, flow, word choice, and common AI patterns.")
+             prompt_parts.append(f"**Output Format:** Respond ONLY with 'Human-like' or 'Robotic'.")
+        elif task_type == 'Rewrite email for humanization':
+             prompt_parts.append("Rewrite the provided email to sound significantly more human and natural. Improve flow, vary sentence structure, use less formal language where appropriate, but retain the core message and call to action.")
+             prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format')}")
+        elif task_type == 'Analyze email for spam triggers':
+             prompt_parts.append("Analyze the Subject and Body for potential spam triggers (e.g., excessive caps, spammy words like 'free', 'guarantee', '$', misleading claims, excessive links, poor formatting). Assign a spam score (0.0=safe, 1.0=spam). List specific issues found.")
+             prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format')}")
+        else:
+            prompt_parts.append("Analyze the provided context and generate the required output based on the task description.")
+
+        if "JSON" in task_context.get('desired_output_format', ''): prompt_parts.append("\n```json")
+
+        final_prompt = "\n".join(prompt_parts)
+        self.logger.debug(f"Generated dynamic prompt for EmailAgent (length: {len(final_prompt)} chars)")
+        return final_prompt
+
+    # --- Remaining methods (_get_next_reset_time_utc, _check_global_limit, _wait_for_optimal_send_time, etc.) ---
+    # --- Paste the rest of the EmailAgent class code here (from _get_next_reset_time_utc onwards from previous version) ---
+    # --- ... (ensure _send_email_smtp is removed or marked as fallback) ... ---
 
     def _get_next_reset_time_utc(self):
         """Calculates the next reset time (midnight UTC)."""
@@ -504,7 +682,7 @@ class EmailAgent(GeniusAgentBase):
                  if len(open_times_utc) >= 3:
                      open_hours_local = [t.astimezone(client_tz).hour for t in open_times_utc]
                      hour_counts = Counter(h for h in open_hours_local if 8 <= h <= 17)
-                     if hour_counts: optimal_hour_local = hour_counts.most_common(1)[0][0]; self.logger.debug(f"Optimal hour for client {client.id}: {optimal_hour_local} {client_tz_str}")
+                     if hour_counts: optimal_hour_local = hour_counts.most_common(1); self.logger.debug(f"Optimal hour for client {client.id}: {optimal_hour_local} {client_tz_str}")
                      else: self.logger.debug(f"No past opens during business hours for client {client.id}. Using default {optimal_hour_local}.")
                  else: self.logger.debug(f"Insufficient open data (<3) for client {client.id}. Using default {optimal_hour_local}.")
         except Exception as e: self.logger.error(f"Error calculating optimal send hour for client {client.id}: {e}. Using default.")
@@ -524,127 +702,9 @@ class EmailAgent(GeniusAgentBase):
                 self.logger.info(f"Optimal Send Time: Waiting {delay_seconds:.0f}s to send to client {client.id} ({client.email}) at {send_time_local.strftime('%Y-%m-%d %H:%M')} {client_tz_str}")
             await asyncio.sleep(delay_seconds)
 
-    def _select_sending_account(self) -> Optional[Dict]:
-        """Selects an available SMTP provider respecting daily limits."""
-        if not self.internal_state['smtp_providers']: return None
-        num_providers = len(self.internal_state['smtp_providers'])
-        now = datetime.now(timezone.utc)
+    # Removed _select_sending_account and _increment_send_count as MailerSend handles this
 
-        for i in range(num_providers):
-            idx = (self.internal_state['current_provider_index'] + i) % num_providers
-            provider = self.internal_state['smtp_providers'][idx]
-            email = provider['email']
-
-            if email not in self.internal_state['daily_limits']:
-                 limit = int(self.config.get('SMTP_ACCOUNT_DAILY_LIMIT', 100))
-                 self.internal_state['daily_limits'][email] = {'limit': limit, 'sent': 0, 'reset_time': self._get_next_reset_time_utc()}
-
-            if now >= self.internal_state['daily_limits'][email]['reset_time']:
-                 self.logger.info(f"Resetting daily limit for SMTP account {email}.")
-                 self.internal_state['daily_limits'][email]['sent'] = 0
-                 self.internal_state['daily_limits'][email]['reset_time'] = self._get_next_reset_time_utc()
-
-            if self.internal_state['daily_limits'][email]['sent'] < self.internal_state['daily_limits'][email]['limit']:
-                 self.internal_state['current_provider_index'] = (idx + 1) % num_providers
-                 self.logger.debug(f"Selected sending account: {email} (Sent today: {self.internal_state['daily_limits'][email]['sent']}/{self.internal_state['daily_limits'][email]['limit']})")
-                 return provider
-
-        self.logger.warning("All sending accounts have reached their daily limits.")
-        return None
-
-    def _increment_send_count(self, sender_email):
-        """Increments the send count for a specific account."""
-        if sender_email in self.internal_state['daily_limits']:
-            self.internal_state['daily_limits'][sender_email]['sent'] += 1
-        else:
-            limit = int(self.config.get('SMTP_ACCOUNT_DAILY_LIMIT', 100))
-            self.internal_state['daily_limits'][sender_email] = {'limit': limit, 'sent': 1, 'reset_time': self._get_next_reset_time_utc()}
-            self.logger.warning(f"Initialized daily limit counter for {sender_email} during increment.")
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=5, max=30), retry=retry_if_exception_type(smtplib.SMTPException))
-    @smtp_breaker
-    async def _send_email_smtp(self, recipient: str, subject: str, body_html: str, sender_config: Dict) -> Dict[str, Any]:
-        """Sends email using a specific SMTP provider via smtplib."""
-        host = sender_config['host']
-        port = int(sender_config['port'])
-        sender_email = sender_config['email']
-        password = sender_config.get('pass')
-        result = {"status": "failure", "message": "SMTP send initialization failed."}
-
-        if not password:
-             msg = f"SMTP password missing for sender {sender_email}. Cannot send."
-             self.logger.error(msg)
-             result["message"] = msg
-             return result
-
-        msg = MIMEMultipart("alternative")
-        msg['Subject'] = subject
-        sender_name = self.config.SENDER_NAME
-        msg['From'] = f"{sender_name} <{sender_email}>"
-        msg['To'] = recipient
-        msg['Date'] = smtplib.email.utils.formatdate(localtime=True)
-        message_id = smtplib.email.utils.make_msgid()
-        msg['Message-ID'] = message_id
-
-        plain_body = self._html_to_plain_text(body_html)
-        msg.attach(MIMEText(plain_body, "plain", "utf-8"))
-        msg.attach(MIMEText(body_html, "html", "utf-8"))
-
-        try:
-            await asyncio.to_thread(self._smtp_connect_send_quit, host, port, sender_email, password, msg)
-            self.logger.info(f"Email successfully sent to {recipient} via {sender_email}")
-            result = {"status": "success", "message": "Email sent successfully.", "message_id": message_id}
-        except smtplib.SMTPAuthenticationError as e:
-             self.logger.error(f"SMTP Auth failed for {sender_email} on {host}. Check credentials.")
-             result["message"] = f"SMTP Auth error: {e}"
-             raise
-        except smtplib.SMTPRecipientsRefused as e:
-             self.logger.error(f"SMTP Recipient Refused error for {recipient}: {e}")
-             result["message"] = f"SMTP Recipient Refused: {e}"
-             await self._mark_client_undeliverable(recipient)
-             # Don't re-raise
-        except smtplib.SMTPSenderRefused as e:
-             self.logger.error(f"SMTP Sender Refused error for {sender_email}: {e}")
-             result["message"] = f"SMTP Sender Refused: {e}"
-             raise
-        except smtplib.SMTPException as e:
-            self.logger.warning(f"SMTP error sending to {recipient} via {host}: {e}")
-            result["message"] = f"SMTP error: {e}"
-            raise
-        except Exception as e:
-             self.logger.error(f"Unexpected error sending email via {host}: {e}", exc_info=True)
-             result["message"] = f"Unexpected send error: {e}"
-             raise smtplib.SMTPException(f"Unexpected send error: {e}") from e
-
-        return result
-
-    def _smtp_connect_send_quit(self, host, port, email_addr, password, msg):
-        """Synchronous helper for SMTP operations."""
-        logger.debug(f"Connecting to SMTP: {host}:{port}")
-        context = ssl.create_default_context()
-        if port == 465:
-            with smtplib.SMTP_SSL(host, port, timeout=30, context=context) as server:
-                server.set_debuglevel(0)
-                logger.debug(f"Logging in via SMTP_SSL as {email_addr}")
-                server.login(email_addr, password)
-                logger.debug("SMTP Login successful")
-                server.send_message(msg)
-                logger.debug(f"Message sent successfully via {host} (SSL)")
-        else: # Assume port 587
-            with smtplib.SMTP(host, port, timeout=30) as server:
-                server.set_debuglevel(0)
-                server.ehlo()
-                logger.debug("Issuing STARTTLS")
-                server.starttls(context=context)
-                server.ehlo()
-                logger.debug("STARTTLS successful")
-                logger.debug(f"Logging in via STARTTLS as {email_addr}")
-                server.login(email_addr, password)
-                logger.debug("SMTP Login successful")
-                server.send_message(msg)
-                logger.debug(f"Message sent successfully via {host} (STARTTLS)")
-
-    async def _log_email(self, client_id: Optional[int], recipient: str, subject: str, body: str, status: str, sender_email: Optional[str], composition_ids: Optional[Dict[str, Any]] = None, message_id: Optional[str] = None) -> Optional[EmailLog]:
+    async def _log_email(self, client_id: Optional[int], recipient: str, subject: str, body: str, status: str, sender_service: Optional[str], composition_ids: Optional[Dict[str, Any]] = None, message_id: Optional[str] = None) -> Optional[EmailLog]:
         """Logs email details to the database."""
         if not self.session_maker: return None
         try:
@@ -655,8 +715,9 @@ class EmailAgent(GeniusAgentBase):
                         client_id=client_id, recipient=recipient, subject=subject,
                         content_preview=preview, status=status,
                         timestamp=datetime.now(timezone.utc),
-                        agent_version=f"{self.AGENT_NAME}_v3.1", # Use current version
-                        sender_account=sender_email, message_id=message_id
+                        agent_version=f"{self.AGENT_NAME}_v3.2", # Use current version
+                        sender_account=sender_service, # Log which service was used
+                        message_id=message_id
                     )
                     session.add(log)
                 await session.refresh(log)
@@ -675,12 +736,6 @@ class EmailAgent(GeniusAgentBase):
         email_log_id = self.internal_state['tracking_pixel_cache'].pop(tracking_id, None)
 
         if not email_log_id:
-             # Fallback: Query KVStore if implemented
-             # if self.session_maker:
-             #     async with self.session_maker() as session:
-             #         kv_entry = await session.get(KVStore, tracking_id)
-             #         if kv_entry: email_log_id = int(kv_entry.value)
-             # if not email_log_id:
              self.logger.warning(f"Could not map tracking ID {tracking_id} to EmailLog ID.")
              return
 
@@ -689,11 +744,11 @@ class EmailAgent(GeniusAgentBase):
                 async with session.begin():
                     stmt = update(EmailLog).where(
                         EmailLog.id == email_log_id,
-                        EmailLog.opened_at == None
+                        EmailLog.opened_at == None # Only update if not already opened
                     ).values(
                         opened_at=datetime.now(timezone.utc),
                         status='opened',
-                        last_interaction = datetime.now(timezone.utc) # Update client interaction time
+                        # last_interaction = datetime.now(timezone.utc) # Maybe update client interaction here too?
                     ).returning(EmailLog.client_id)
                     result = await session.execute(stmt)
                     updated_client_id = result.scalar_one_or_none()
@@ -714,13 +769,22 @@ class EmailAgent(GeniusAgentBase):
         try:
             async with self.session_maker() as session:
                 async with session.begin():
+                    # Find the original sent email using the Message-ID
                     stmt_log = select(EmailLog).where(EmailLog.message_id == original_message_id).limit(1).with_for_update()
                     result_log = await session.execute(stmt_log)
                     email_log = result_log.scalar_one_or_none()
 
                     if not email_log:
                         self.logger.warning(f"Could not find original EmailLog for Message-ID {original_message_id}.")
-                        return
+                        # Attempt lookup by recipient if message-id fails (less reliable)
+                        stmt_log_fallback = select(EmailLog).where(EmailLog.recipient == reply_from).order_by(desc(EmailLog.timestamp)).limit(1).with_for_update()
+                        result_log_fallback = await session.execute(stmt_log_fallback)
+                        email_log = result_log_fallback.scalar_one_or_none()
+                        if email_log:
+                             self.logger.info(f"Found potential matching EmailLog {email_log.id} by recipient {reply_from}.")
+                        else:
+                             self.logger.warning(f"Could not find any matching EmailLog for reply from {reply_from}.")
+                             return
 
                     if email_log.status == 'responded':
                         self.logger.info(f"EmailLog {email_log.id} already marked as responded. Skipping.")
@@ -729,7 +793,7 @@ class EmailAgent(GeniusAgentBase):
                     now_ts = datetime.now(timezone.utc)
                     email_log.status = 'responded'
                     email_log.responded_at = now_ts
-                    if not email_log.opened_at: email_log.opened_at = now_ts
+                    if not email_log.opened_at: email_log.opened_at = now_ts # Mark as opened if not already
                     client_id = email_log.client_id
 
                 # Update client engagement score
@@ -778,6 +842,10 @@ class EmailAgent(GeniusAgentBase):
 
     async def _check_imap_for_replies(self):
         """Connects to IMAP, checks for unseen emails, identifies replies/STOP requests, and triggers processing."""
+        if not self._imap_password:
+            self.logger.warning("IMAP password not configured. Skipping reply check.")
+            return
+
         self.logger.info("Checking Hostinger IMAP for replies/opt-outs...")
         host = self.config.HOSTINGER_IMAP_HOST
         port = int(self.config.HOSTINGER_IMAP_PORT)
@@ -804,7 +872,7 @@ class EmailAgent(GeniusAgentBase):
             status, messages = await loop.run_in_executor(None, mail.search, None, '(UNSEEN)')
             if status != 'OK': self.logger.error(f"IMAP search failed: {messages}"); return
 
-            email_ids = messages[0].split()
+            email_ids = messages.split()
             if not email_ids: self.logger.info("No unseen emails found."); return
 
             self.logger.info(f"Found {len(email_ids)} unseen emails. Processing...")
@@ -815,16 +883,20 @@ class EmailAgent(GeniusAgentBase):
                     status, msg_data = await loop.run_in_executor(None, mail.fetch, email_id_bytes, '(RFC822)')
                     if status != 'OK': continue
 
-                    full_msg = email.message_from_bytes(msg_data[0][1])
+                    full_msg = email.message_from_bytes(msg_data)
                     original_message_id = None
                     in_reply_to = full_msg.get('In-Reply-To')
                     references = full_msg.get('References')
                     subject = self._decode_header(full_msg.get('Subject', ''))
-                    sender_email = email.utils.parseaddr(full_msg.get('From', ''))[1]
+                    sender_email = email.utils.parseaddr(full_msg.get('From', ''))
 
+                    # Try to find the original Message-ID more reliably
                     if in_reply_to: original_message_id = in_reply_to.strip('<>')
                     elif references:
-                        ref_ids = references.split(); original_message_id = ref_ids[0].strip('<>') if ref_ids else None
+                        # References often contain multiple IDs, the first one is usually the most relevant original
+                        ref_ids = references.split()
+                        potential_ids = [ref.strip('<>') for ref in ref_ids if '@' in ref] # Look for IDs with '@'
+                        if potential_ids: original_message_id = potential_ids
 
                     reply_body = self._get_email_body(full_msg)
 
@@ -884,14 +956,33 @@ class EmailAgent(GeniusAgentBase):
                         payload = part.get_payload(decode=True)
                         charset = part.get_content_charset() or 'utf-8'
                         body = payload.decode(charset, errors='replace')
-                        break
+                        break # Found plain text part
                     except Exception as e:
                         logger.warning(f"Could not decode email part (type {ctype}): {e}")
-        else:
+            # Fallback if no plain text part found
+            if not body:
+                 for part in msg.walk():
+                     ctype = part.get_content_type()
+                     cdispo = str(part.get('Content-Disposition'))
+                     if ctype == 'text/html' and 'attachment' not in cdispo:
+                          try:
+                              payload = part.get_payload(decode=True)
+                              charset = part.get_content_charset() or 'utf-8'
+                              html_body = payload.decode(charset, errors='replace')
+                              body = self._html_to_plain_text(html_body) # Convert HTML to text
+                              break
+                          except Exception as e: logger.warning(f"Could not decode/convert HTML part: {e}")
+
+        else: # Not multipart
             try:
                 payload = msg.get_payload(decode=True)
                 charset = msg.get_content_charset() or 'utf-8'
-                body = payload.decode(charset, errors='replace')
+                content_type = msg.get_content_type()
+                if content_type == 'text/plain':
+                    body = payload.decode(charset, errors='replace')
+                elif content_type == 'text/html':
+                    html_body = payload.decode(charset, errors='replace')
+                    body = self._html_to_plain_text(html_body)
             except Exception as e:
                 logger.warning(f"Could not decode non-multipart email body: {e}")
         return body.strip()
@@ -899,9 +990,12 @@ class EmailAgent(GeniusAgentBase):
     def _is_stop_request(self, subject: str, body: str) -> bool:
         """Checks if email subject or body contains a clear STOP request."""
         stop_keywords = ['stop', 'unsubscribe', 'remove me', 'opt out', 'opt-out']
+        # Check subject first
         if any(keyword in subject.lower() for keyword in stop_keywords):
             return True
-        if any(re.search(rf'\b{keyword}\b', body, re.IGNORECASE) for keyword in stop_keywords):
+        # Check body using regex for whole words, ignoring case, max first 500 chars
+        body_preview = body[:500]
+        if any(re.search(rf'\b{keyword}\b', body_preview, re.IGNORECASE) for keyword in stop_keywords):
             return True
         return False
 
@@ -931,16 +1025,14 @@ class EmailAgent(GeniusAgentBase):
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             for script_or_style in soup(["script", "style"]): script_or_style.decompose()
-            text_parts = []
-            for element in soup.find_all(True):
-                if element.name == 'p': text_parts.append('\n')
-                text = element.get_text(separator=' ', strip=True)
-                if text: text_parts.append(text)
-                if element.name in ['br', 'p', 'div', 'h1', 'h2', 'h3', 'h4', 'li']: text_parts.append('\n')
-            plain_text = re.sub(r'\n\s*\n', '\n\n', ' '.join(text_parts)).strip()
+            # Get text, attempting to preserve some structure
+            text = soup.get_text(separator='\n', strip=True)
+            # Reduce multiple newlines to max two
+            plain_text = re.sub(r'\n\s*\n+', '\n\n', text).strip()
             return plain_text
         except Exception as e:
             self.logger.error(f"Error converting HTML to plain text: {e}")
+            # Fallback: basic tag stripping
             text = re.sub('<[^>]+>', ' ', html_content)
             return re.sub(r'\s+', ' ', text).strip()
 
@@ -1013,26 +1105,36 @@ class EmailAgent(GeniusAgentBase):
                 results = await session.execute(stmt)
                 status_counts = {row.status: row.count for row in results.mappings().all()}
 
-            total_sent = sum(status_counts.values())
+            total_sent = sum(v for k, v in status_counts.items() if k not in ['failed_verification']) # Exclude verification failures from sent total
             opened_count = status_counts.get('opened', 0) + status_counts.get('responded', 0)
             responded_count = status_counts.get('responded', 0)
-            failed_count = status_counts.get('failed_send', 0) + status_counts.get('bounced', 0) + status_counts.get('blocked_compliance', 0)
-            open_rate = (opened_count / total_sent * 100) if total_sent > 0 else 0
-            response_rate = (responded_count / total_sent * 100) if total_sent > 0 else 0
-            failure_rate = (failed_count / total_sent * 100) if total_sent > 0 else 0
+            failed_count = status_counts.get('failed_send', 0) + status_counts.get('bounced', 0) + status_counts.get('blocked_compliance', 0) + status_counts.get('failed_verification', 0)
+            # Calculate rates based on attempts that passed verification (or all if verification disabled)
+            send_attempts_past_verification = total_sent + status_counts.get('failed_send', 0) + status_counts.get('bounced', 0) + status_counts.get('blocked_compliance', 0)
+
+            open_rate = (opened_count / send_attempts_past_verification * 100) if send_attempts_past_verification > 0 else 0
+            response_rate = (responded_count / send_attempts_past_verification * 100) if send_attempts_past_verification > 0 else 0
+            delivery_failure_rate = ((status_counts.get('failed_send', 0) + status_counts.get('bounced', 0)) / send_attempts_past_verification * 100) if send_attempts_past_verification > 0 else 0
+            verification_failure_rate = (status_counts.get('failed_verification', 0) / (send_attempts_past_verification + status_counts.get('failed_verification', 0)) * 100) if (send_attempts_past_verification + status_counts.get('failed_verification', 0)) > 0 else 0
+
 
             critique['performance_24h'] = {
-                "total_attempts": total_sent,
-                "opened": opened_count, "responded": responded_count, "failed": failed_count,
+                "total_attempts": send_attempts_past_verification + status_counts.get('failed_verification', 0),
+                "verification_failures": status_counts.get('failed_verification', 0),
+                "delivery_failures": status_counts.get('failed_send', 0) + status_counts.get('bounced', 0),
+                "compliance_blocks": status_counts.get('blocked_compliance', 0),
+                "opened": opened_count, "responded": responded_count,
                 "open_rate_pct": round(open_rate, 2), "response_rate_pct": round(response_rate, 2),
-                "failure_rate_pct": round(failure_rate, 2)
+                "delivery_failure_rate_pct": round(delivery_failure_rate, 2),
+                "verification_failure_rate_pct": round(verification_failure_rate, 2)
             }
             critique['global_send_status'] = f"Sent {self.internal_state['global_sent_today']}/{self.internal_state['global_daily_limit']} globally today."
-            critique['account_limits'] = self.internal_state.get('daily_limits', {})
+            # critique['account_limits'] = self.internal_state.get('daily_limits', {}) # Less relevant with MailerSend
 
-            feedback_points = [f"24h Perf: Open {open_rate:.1f}%, Reply {response_rate:.1f}%, Fail {failure_rate:.1f}% ({total_sent} attempts)."]
-            if failure_rate > 10: feedback_points.append("ACTION NEEDED: High failure rate (>10%). Check content, list quality, sender reputation, DMARC/SPF/DKIM setup.") ; critique['status'] = 'warning'
-            if open_rate < 15 and total_sent > 50: feedback_points.append("WARNING: Low open rate (<15%). Review subject lines, deliverability, send times.") ; critique['status'] = 'warning'
+            feedback_points = [f"24h Perf: Open {open_rate:.1f}%, Reply {response_rate:.1f}%, Delivery Fail {delivery_failure_rate:.1f}%, Verification Fail {verification_failure_rate:.1f}%."]
+            if delivery_failure_rate > 5: feedback_points.append("ACTION NEEDED: High delivery failure rate (>5%). Check sender reputation, content, MailerSend setup.") ; critique['status'] = 'warning'
+            if verification_failure_rate > 15: feedback_points.append("ACTION NEEDED: High verification failure rate (>15%). Check lead source quality.") ; critique['status'] = 'warning'
+            if open_rate < 15 and send_attempts_past_verification > 50: feedback_points.append("WARNING: Low open rate (<15%). Review subject lines, deliverability, send times.") ; critique['status'] = 'warning'
             if self.internal_state['global_sent_today'] >= self.internal_state['global_daily_limit']: feedback_points.append("LIMIT REACHED: Global daily send limit hit.") ; critique['status'] = 'warning'
             elif self.internal_state['global_sent_today'] / self.internal_state['global_daily_limit'] > 0.9: feedback_points.append("INFO: Approaching global daily send limit.")
 
@@ -1043,71 +1145,6 @@ class EmailAgent(GeniusAgentBase):
             critique['status'] = 'error'; critique['feedback'] = f"Critique failed: {e}"
         return critique
 
-    # MODIFICATION START: Added enriched_data handling in prompt generation
-    async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
-        """Constructs prompts for LLM calls, incorporating enriched data more effectively."""
-        self.logger.debug(f"Generating dynamic prompt for EmailAgent task: {task_context.get('task')}")
-        prompt_parts = [self.meta_prompt] # Use the agent's specific meta prompt
-
-        prompt_parts.append("\n--- Current Task Context ---")
-        # Prioritize key context items for clarity
-        priority_keys = ['task', 'goal', 'client_info', 'enriched_data_available', 'osint_summary', 'successful_styles', 'campaign_id']
-        for key in priority_keys:
-            if key in task_context:
-                value = task_context[key]
-                value_str = ""
-                max_len = 1500 # Default max length
-                if key in ['osint_summary', 'successful_styles', 'enriched_data_available']: max_len = 2500 # Allow more context
-                if isinstance(value, str): value_str = value[:max_len] + ("..." if len(value) > max_len else "")
-                elif isinstance(value, (int, float, bool)): value_str = str(value)
-                elif isinstance(value, dict):
-                    # Special handling for enriched data for better readability in prompt
-                    if key == 'enriched_data_available':
-                         value_str = ", ".join([f"{k}: {v}" for k, v in value.items()])[:max_len] + "..."
-                    else:
-                         try: value_str = json.dumps(value, default=str, indent=2); value_str = value_str[:max_len] + ("..." if len(value_str) > max_len else "")
-                         except TypeError: value_str = str(value)[:max_len] + "..."
-                elif isinstance(value, list): value_str = json.dumps(value, default=str)[:max_len] + "..."
-                else: value_str = str(value)[:max_len] + "..."
-                # Use a more descriptive key for enriched data
-                prompt_key = "Enriched Prospect Data" if key == 'enriched_data_available' else key.replace('_', ' ').title()
-                prompt_parts.append(f"**{prompt_key}**: {value_str}")
-
-        # Add remaining context items concisely
-        other_params = {k: v for k, v in task_context.items() if k not in priority_keys and k not in ['desired_output_format']}
-        if other_params:
-            prompt_parts.append("\n**Other Parameters:**")
-            try: prompt_parts.append(f"```json\n{json.dumps(other_params, default=str, indent=2)}\n```")
-            except TypeError: prompt_parts.append(str(other_params)[:500] + "...")
-
-        prompt_parts.append("\n--- Instructions ---")
-        task_type = task_context.get('task')
-        if task_type == 'Generate personalized email subject and body':
-            prompt_parts.append("1. **Hyper-Personalize:** Use Client Info, OSINT Summary, AND **specifically leverage details from 'Enriched Prospect Data'** (like job title, company name, industry, location) to make the email highly relevant.")
-            prompt_parts.append("2. **Subject Line:** Craft a compelling, human-like subject. Use insights from 'Successful Styles' if applicable.")
-            prompt_parts.append("3. **Body Copy (HTML):** Write engaging HTML body. Weave in client interests/pain points (from Client Info/OSINT) and **reference enriched data points naturally**. Adapt tone based on 'Successful Styles' examples.")
-            prompt_parts.append("4. **Tone:** Professional, persuasive, slightly informal. Avoid sounding robotic or overly salesy.")
-            prompt_parts.append(f"5. **Call To Action (CTA):** Include a clear CTA aligned with the campaign 'Goal': '{task_context.get('goal', 'engagement')}'.")
-            prompt_parts.append(f"6. **Output Format:** {task_context.get('desired_output_format')}")
-        elif task_type == 'Critique email human-likeness':
-             prompt_parts.append("Analyze the provided email draft. Does it sound like a natural human wrote it, or does it sound robotic/AI-generated? Focus on tone, flow, word choice, and common AI patterns.")
-             prompt_parts.append(f"**Output Format:** Respond ONLY with 'Human-like' or 'Robotic'.")
-        elif task_type == 'Rewrite email for humanization':
-             prompt_parts.append("Rewrite the provided email to sound significantly more human and natural. Improve flow, vary sentence structure, use less formal language where appropriate, but retain the core message and call to action.")
-             prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format')}")
-        elif task_type == 'Analyze email for spam triggers':
-             prompt_parts.append("Analyze the Subject and Body for potential spam triggers (e.g., excessive caps, spammy words like 'free', 'guarantee', '$', misleading claims, excessive links, poor formatting). Assign a spam score (0.0=safe, 1.0=spam). List specific issues found.")
-             prompt_parts.append(f"**Output Format:** {task_context.get('desired_output_format')}")
-        else:
-            prompt_parts.append("Analyze the provided context and generate the required output based on the task description.")
-
-        if "JSON" in task_context.get('desired_output_format', ''): prompt_parts.append("\n```json")
-
-        final_prompt = "\n".join(prompt_parts)
-        self.logger.debug(f"Generated dynamic prompt for EmailAgent (length: {len(final_prompt)} chars)")
-        return final_prompt
-    # MODIFICATION END
-
     async def collect_insights(self) -> Dict[str, Any]:
         """Collects insights about email performance and deliverability."""
         self.logger.debug("EmailAgent collect_insights called.")
@@ -1117,7 +1154,7 @@ class EmailAgent(GeniusAgentBase):
             "active_sends": self.internal_state.get('active_sends', 0),
             "global_sent_today": self.internal_state.get('global_sent_today', 0),
             "global_daily_limit": self.internal_state.get('global_daily_limit', 0),
-            "account_send_counts": {email: data['sent'] for email, data in self.internal_state.get('daily_limits', {}).items()},
+            # "account_send_counts": {email: data['sent'] for email, data in self.internal_state.get('daily_limits', {}).items()}, # Less relevant
             "key_observations": []
         }
         try:
@@ -1155,20 +1192,28 @@ class EmailAgent(GeniusAgentBase):
         try:
             match = None; start_char, end_char = '{', '}'
             if expect_type == list: start_char, end_char = '[', ']'
-            match = re.search(rf'(?:```json)?\s*(\{start_char}.*\{end_char})\s*(?:```)?', json_string, re.DOTALL)
+            # Improved regex to handle optional ```json prefix and potential whitespace
+            match = re.search(rf'(?:```(?:json)?\s*)?(\{start_char}.*\{end_char})\s*(?:```)?', json_string, re.DOTALL)
 
             parsed_json = None
             if match:
                 potential_json = match.group(1)
                 try: parsed_json = json.loads(potential_json)
-                except json.JSONDecodeError: return None # Fail if specific block fails
+                except json.JSONDecodeError as e:
+                    self.logger.warning(f"Initial JSON parsing failed ({e}), attempting to clean and retry: {potential_json[:100]}...")
+                    cleaned_json = re.sub(r',\s*([\}\]])', r'\1', potential_json) # Basic cleaning
+                    cleaned_json = re.sub(r'^\s*|\s*$', '', cleaned_json) # Trim whitespace
+                    try: parsed_json = json.loads(cleaned_json)
+                    except json.JSONDecodeError as e2: self.logger.error(f"JSON cleaning failed ({e2}), unable to parse: {potential_json[:200]}..."); return None
+            # Fallback if no markdown block found but string looks like JSON
             elif json_string.strip().startswith(start_char) and json_string.strip().endswith(end_char):
                  try: parsed_json = json.loads(json_string)
-                 except json.JSONDecodeError: return None
-            else: return None
+                 except json.JSONDecodeError as e: self.logger.error(f"Direct JSON parsing failed ({e}): {json_string[:200]}..."); return None
+            else: self.logger.warning(f"Could not find expected JSON structure ({expect_type}) in LLM output: {json_string[:200]}..."); return None
 
             if isinstance(parsed_json, expect_type): return parsed_json
             else: self.logger.error(f"Parsed JSON type mismatch. Expected {expect_type}, got {type(parsed_json)}"); return None
+        except json.JSONDecodeError as e: self.logger.error(f"Failed to decode LLM JSON response: {e}. Response snippet: {json_string[:500]}..."); return None
         except Exception as e:
              self.logger.error(f"Unexpected error during JSON parsing in EmailAgent: {e}", exc_info=True)
              return None
