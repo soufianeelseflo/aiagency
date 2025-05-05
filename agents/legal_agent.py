@@ -384,10 +384,10 @@ class LegalAgent(GeniusAgentBase):
         # Fetch static info securely from settings
         # These values are read from environment variables by the settings object
         # The AI model itself does NOT see the environment variables.
-        w8_name = self.config.get('W8_NAME', '[Your Name/Company Name]')
-        w8_country = self.config.get('W8_COUNTRY', '[Your Country]')
+        w8_name = self.config.get('W8_NAME', '[Operator Name/Company]')
+        w8_country = self.config.get('W8_COUNTRY', '[Operator Country]')
         # Expecting IBAN primarily, but allow for SWIFT/RIB if user includes them in the single env var string
-        bank_account_info = self.config.get('MOROCCAN_BANK_ACCOUNT', '[Your Bank IBAN/SWIFT/RIB]')
+        bank_account_info = self.config.get('MOROCCAN_BANK_ACCOUNT', '[Operator Bank IBAN/SWIFT/RIB]')
 
         # --- Aggressive, Pro-Agency Terms ---
         # Focus: Clarity, Finality, Limited Liability, Jurisdiction
@@ -405,6 +405,7 @@ class LegalAgent(GeniusAgentBase):
         # --- End Aggressive Terms ---
 
         # Combine with a minimal base note for clarity on the invoice
+        # The current date will be added by the invoice generation process itself, not here.
         final_note = f"Payment Terms: Due Upon Receipt. Review Full Terms: {terms}" # Slightly clearer presentation
         self.logger.info(f"Generated Aggressive Invoice Note for {client_country}")
         return final_note
