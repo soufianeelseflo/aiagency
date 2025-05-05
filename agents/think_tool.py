@@ -1,191 +1,175 @@
- # Filename: agents/think_tool.py
- # Description: Central cognitive engine with Clay.com integration, learning, and reflection.
- # Version: 5.5 (Implemented Video Workflow Plan) # <-- Updated Version
+# Filename: agents/think_tool.py
+# Description: Central cognitive engine with Clay.com integration, learning, reflection, and resource reuse.
+# Version: 5.6 (Added Resource Reuse Check for Video Workflow)
 
- import asyncio
- import logging
- import json
- import os
- import hashlib
- import time
- import random
- import glob
- import shlex # Keep for potential future use if ProgrammerAgent returns
- import re
- import aiohttp
- import numpy as np
- from datetime import datetime, timedelta, timezone
- from typing import Dict, Any, Optional, List, Union, Tuple, AsyncGenerator, Type
- from collections import Counter
+import asyncio
+import logging
+import json
+import os
+import hashlib
+import time
+import random
+import glob
+import shlex # Keep for potential future use if ProgrammerAgent returns
+import re
+import aiohttp
+import numpy as np
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, Optional, List, Union, Tuple, AsyncGenerator, Type
+from collections import Counter
 
- # --- Core Framework Imports ---
- from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
- from sqlalchemy import select, delete, func, update, text, case, desc, or_, asc
- from sqlalchemy.exc import SQLAlchemyError
+# --- Core Framework Imports ---
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import select, delete, func, update, text, case, desc, or_, asc
+from sqlalchemy.exc import SQLAlchemyError
 
- # --- Project Imports ---
- try:
-     from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
- except ImportError:
-     logging.warning("Production base agent not found, using GeniusAgentBase. Ensure base_agent_prod.py is used.")
-     try:
-         from agents.base_agent import GeniusAgentBase
-     except ImportError:
-         logging.critical("Failed to import GeniusAgentBase from both relative and absolute paths.")
-         raise
+# --- Project Imports ---
+try:
+    # Use the production-ready base agent
+    from agents.base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
+except ImportError:
+    logging.warning("Production base agent not found, using GeniusAgentBase.")
+    # Attempt absolute import if relative fails (useful for some execution contexts)
+    from base_agent import GeniusAgentBase # Fallback - adjust if your structure differs
 
- from models import (
-     KnowledgeFragment, LearnedPattern, StrategicDirective, PromptTemplate,
-     EmailLog, CallLog, Invoice, Client, ExpenseLog, ConversationState # Added ConversationState back
- )
- from config.settings import settings
- from utils.database import encrypt_data, decrypt_data
+# Import necessary models and settings
+# Ensure these paths are correct relative to where this agent runs
+from models import (
+    KnowledgeFragment, LearnedPattern, StrategicDirective, PromptTemplate,
+    EmailLog, CallLog, Invoice, Client, ExpenseLog, ConversationState
+)
+from config.settings import settings
+from utils.database import encrypt_data, decrypt_data
 
- # --- LLM Client & Resilience ---
- from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+# --- LLM Client & Resilience ---
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
- # Configure logger
- logger = logging.getLogger(__name__)
- op_logger = logging.getLogger('OperationalLog')
+# Configure logger
+logger = logging.getLogger(__name__)
+op_logger = logging.getLogger('OperationalLog') # Assumes operational log is configured elsewhere
 
- # --- Meta Prompt ---
- THINK_TOOL_META_PROMPT = """
- You are ThinkTool, the central intelligence of the Synapse AI Sales System. Your mandate is **Maximize Profit & Growth ($10k+/day -> $100M/8mo)**.
- **Core Functions:**
- 1.  **Knowledge Synthesis:** Continuously analyze ALL data sources (Postgres KB Fragments, Performance Logs, Learning Materials, Market Scans) to identify patterns, opportunities, and inefficiencies. Manage the Postgres Knowledge Base directly.
- 2.  **Strategic Planning:** Generate high-level goals and break them down into actionable `StrategicDirectives` for the Orchestrator and other agents. Prioritize based on ROI and risk. Use Clay.com strategically for lead generation/enrichment (including full enrichment, not just email). Plan complex workflows like video generation.
- 3.  **Agent Guidance:** Generate/Refine prompts for other agents. Provide context and strategic direction for tasks (e.g., email personalization angles using enriched Clay data, call script focus, Clay.com search parameters).
- 4.  **Performance Monitoring & Adaptation:** Analyze agent performance metrics (email opens, call success, profit). Adapt strategies and scoring models (internal logic) based on results. Trigger self-critiques.
- 5.  **Opportunity Identification:** Proactively identify new market niches, competitor weaknesses, and high-ROI ventures beyond current operations (e.g., beyond UGC). Leverage Clay.com and web scraping findings.
- 6.  **Grey Area Strategy:** Devise and manage strategies involving calculated risks (e.g., multi-accounting, trial rotation), informed by LegalAgent's risk assessments.
- 7.  **Learning Integration:** Ingest and synthesize external knowledge (`learning for AI/` folder).
- 8.  **Self-Reflection:** Before executing complex plans or directives, pause to reflect on logic, completeness, and potential issues using internal LLM calls.
- **Principles:** Extreme Agency, Hyper-Efficiency, Relentless Learning, AI-Native Advantage, Strategic Exploitation, Adaptability, Compliance Awareness, Reflective Thinking.
- """
+# --- Meta Prompt (Defines the Agent's Core Mandate and Personality) ---
+THINK_TOOL_META_PROMPT = """
+You are ThinkTool, the central intelligence of the Synapse AI Sales System. Your mandate is **Maximize Profit & Growth ($10k+/day -> $100M/8mo)**.
+**Core Functions:**
+1.  **Knowledge Synthesis:** Continuously analyze ALL data sources (Postgres KB Fragments, Performance Logs, Learning Materials, Market Scans) to identify patterns, opportunities, and inefficiencies. Manage the Postgres Knowledge Base directly.
+2.  **Strategic Planning:** Generate high-level goals and break them down into actionable `StrategicDirectives` for the Orchestrator and other agents. Prioritize based on ROI and risk. Use Clay.com strategically for lead generation/enrichment. Plan complex workflows like video generation, **checking for reusable assets first**.
+3.  **Agent Guidance:** Generate/Refine prompts for other agents. Provide context and strategic direction for tasks.
+4.  **Performance Monitoring & Adaptation:** Analyze agent performance metrics. Adapt strategies and scoring models. Trigger self-critiques.
+5.  **Opportunity Identification:** Proactively identify new market niches, competitor weaknesses, and high-ROI ventures.
+6.  **Grey Area Strategy:** Devise and manage strategies involving calculated risks, informed by LegalAgent.
+7.  **Learning Integration:** Ingest and synthesize external knowledge.
+8.  **Self-Reflection:** Before executing complex plans or directives, pause to reflect on logic, completeness, and potential issues.
+**Principles:** Extreme Agency, Hyper-Efficiency, Relentless Learning, AI-Native Advantage, Strategic Exploitation, Adaptability, Compliance Awareness, Reflective Thinking, **Resource Reuse**.
+"""
 
- class ThinkTool(GeniusAgentBase):
-     """
-     ThinkTool (Genius Level): The central cognitive engine. Manages strategy,
-     learning, knowledge base (Postgres), Clay.com integration, reflection, and directs other agents.
-     Version: 5.5
-     """
-     AGENT_NAME = "ThinkTool"
+class ThinkTool(GeniusAgentBase):
+    """
+    ThinkTool (Genius Level): The central cognitive engine. Manages strategy,
+    learning, knowledge base (Postgres), Clay.com integration, reflection, resource reuse, and directs other agents.
+    Version: 5.6
+    """
+    AGENT_NAME = "ThinkTool"
 
-     def __init__(self, session_maker: async_sessionmaker[AsyncSession], config: Any, orchestrator: object):
-         """Initializes the ThinkTool agent."""
-         super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, config=config, session_maker=session_maker, kb_interface=None)
-         self.meta_prompt = THINK_TOOL_META_PROMPT
+    def __init__(self, session_maker: async_sessionmaker[AsyncSession], config: Any, orchestrator: object):
+        """Initializes the ThinkTool agent."""
+        # Ensure config is accessed correctly via orchestrator or imported settings
+        config_obj = getattr(orchestrator, 'config', settings)
+        super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, config=config_obj, session_maker=session_maker)
+        self.meta_prompt = THINK_TOOL_META_PROMPT
 
-         self.last_synthesis_run: Optional[datetime] = None
-         self.last_radar_run: Optional[datetime] = None
-         self.last_purge_run: Optional[datetime] = None
+        self.last_synthesis_run: Optional[datetime] = None
+        self.last_radar_run: Optional[datetime] = None
+        self.last_purge_run: Optional[datetime] = None
 
-         # Internalized Scoring Parameters
-         self.scoring_weights = self.config.get("SCORING_WEIGHTS", {"email_response": 1.0, "call_success": 2.5, "invoice_paid": 5.0})
-         self.scoring_decay_rate = self.config.get("SCORING_DECAY_RATE_PER_DAY", 0.05)
+        # Internalized Scoring Parameters from config
+        self.scoring_weights = self.config.get("SCORING_WEIGHTS", {"email_response": 1.0, "call_success": 2.5, "invoice_paid": 5.0})
+        self.scoring_decay_rate = self.config.get("SCORING_DECAY_RATE_PER_DAY", 0.05)
 
-         # Define relevant Clay.com endpoints (can be expanded)
-         self.clay_endpoints = {
-             "find_email": "/v1/enrichment/person/email",
-             "enrich_person": "/v1/enrichment/person",
-             "enrich_company": "/v1/enrichment/company",
-             # Add more endpoints as needed, e.g., find_company_decision_makers
-         }
+        # Define relevant Clay.com endpoints
+        self.clay_endpoints = {
+            "find_email": "/v1/enrichment/person/email",
+            "enrich_person": "/v1/enrichment/person",
+            "enrich_company": "/v1/enrichment/company",
+        }
 
-         self.logger.info("ThinkTool v5.5 initialized.")
-         # Start learning material synthesis after a short delay
-         asyncio.create_task(self._delayed_learning_material_synthesis(delay_seconds=10))
+        self.logger.info("ThinkTool v5.6 (Resource Reuse) initialized.")
+        # Start learning material synthesis after a short delay
+        asyncio.create_task(self._delayed_learning_material_synthesis(delay_seconds=10))
 
-     async def _delayed_learning_material_synthesis(self, delay_seconds: int):
-         """Waits for a specified delay before starting learning material synthesis."""
-         await asyncio.sleep(delay_seconds)
-         await self._load_and_synthesize_learning_materials()
+    async def _delayed_learning_material_synthesis(self, delay_seconds: int):
+        """Waits for a specified delay before starting learning material synthesis."""
+        await asyncio.sleep(delay_seconds)
+        await self._load_and_synthesize_learning_materials()
 
-     async def log_operation(self, level: str, message: str):
-         """Helper to log to the operational log file."""
-         log_func = getattr(op_logger, level.lower(), op_logger.debug)
-         prefix = ""
-         if level.lower() in ['warning', 'error', 'critical']: prefix = f"**{level.upper()}:** "
-         try: log_func(f"- [{self.agent_name}] {prefix}{message}")
-         except Exception as log_err: logger.error(f"Failed to write to operational log: {log_err}")
+    async def log_operation(self, level: str, message: str):
+        """Helper to log to the operational log file."""
+        log_func = getattr(op_logger, level.lower(), op_logger.debug)
+        prefix = ""
+        if level.lower() in ['warning', 'error', 'critical']: prefix = f"**{level.upper()}:** "
+        try: log_func(f"- [{self.agent_name}] {prefix}{message}")
+        except Exception as log_err: logger.error(f"Failed to write to operational log: {log_err}")
 
-     # --- Knowledge Loading & Synthesis ---
-     async def _load_and_synthesize_learning_materials(self):
-         """Loads and processes text files from the learning directory, storing insights in KB."""
-         learning_dir_setting = self.config.get("LEARNING_MATERIALS_DIR", "learning for AI")
-         self.logger.info(f"ThinkTool: Loading learning materials from configured dir: '{learning_dir_setting}'...")
-         processed_files = 0; learning_files = []
-         try:
-             # Assume learning dir is relative to project root where main.py is
-             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # Go up one level from agents/
-             full_learning_dir = os.path.join(base_dir, learning_dir_setting)
+    # --- Knowledge Loading & Synthesis ---
+    async def _load_and_synthesize_learning_materials(self):
+        """Loads and processes text files from the learning directory, storing insights in KB."""
+        learning_dir_setting = self.config.get("LEARNING_MATERIALS_DIR", "learning for AI")
+        self.logger.info(f"ThinkTool: Loading learning materials from configured dir: '{learning_dir_setting}'...")
+        processed_files = 0; learning_files = []
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            full_learning_dir = os.path.join(base_dir, learning_dir_setting)
+            if not os.path.isdir(full_learning_dir):
+                self.logger.warning(f"Learning directory '{full_learning_dir}' not found."); return
 
-             if not os.path.isdir(full_learning_dir):
-                 self.logger.warning(f"Learning directory '{full_learning_dir}' not found or not a directory."); return
+            if self.orchestrator and hasattr(self.orchestrator, 'use_tool'):
+                 list_result = await self.orchestrator.use_tool('list_files', {'path': full_learning_dir, 'recursive': True, 'pattern': '*.txt'})
+                 if list_result and list_result.get('status') == 'success': learning_files = list_result.get('files', [])
+                 else: self.logger.warning("Failed list learning files via Orchestrator, falling back."); file_pattern = os.path.join(full_learning_dir, '**', '*.txt'); learning_files = glob.glob(file_pattern, recursive=True)
+            else: self.logger.warning("Orchestrator list_files unavailable, using glob."); file_pattern = os.path.join(full_learning_dir, '**', '*.txt'); learning_files = glob.glob(file_pattern, recursive=True)
 
-             # Use Orchestrator's list_files tool if available, otherwise fallback to glob
-             if self.orchestrator and hasattr(self.orchestrator, 'use_tool'):
-                  list_result = await self.orchestrator.use_tool('list_files', {'path': full_learning_dir, 'recursive': True, 'pattern': '*.txt'})
-                  if list_result and list_result.get('status') == 'success':
-                      learning_files = list_result.get('files', [])
-                      self.logger.info(f"Found {len(learning_files)} potential learning files via Orchestrator tool.")
-                  else:
-                      self.logger.warning("Failed to list learning files via Orchestrator tool, falling back to glob.")
-                      file_pattern = os.path.join(full_learning_dir, '**', '*.txt')
-                      learning_files = glob.glob(file_pattern, recursive=True)
-             else:
-                  self.logger.warning("Orchestrator list_files tool unavailable, using glob.")
-                  file_pattern = os.path.join(full_learning_dir, '**', '*.txt')
-                  learning_files = glob.glob(file_pattern, recursive=True)
+            if not learning_files: self.logger.info(f"No .txt files found in '{full_learning_dir}'."); return
 
-             if not learning_files: self.logger.info(f"No .txt files found in '{full_learning_dir}'."); return
+            for file_path in learning_files:
+                try:
+                    self.logger.debug(f"Processing learning file: {file_path}")
+                    file_content = None
+                    if self.orchestrator and hasattr(self.orchestrator, 'use_tool'):
+                         abs_file_path = os.path.abspath(file_path)
+                         file_content_result = await self.orchestrator.use_tool('read_file', {'path': abs_file_path})
+                         if file_content_result and file_content_result.get('status') == 'success': file_content = file_content_result.get('content')
+                         else: self.logger.warning(f"Could not read file {abs_file_path} via orchestrator: {file_content_result.get('message')}"); continue
+                    else: self.logger.error("Orchestrator tool access unavailable."); break
 
-             for file_path in learning_files:
-                 try:
-                     self.logger.debug(f"Processing learning file: {file_path}")
-                     file_content = None
-                     # Use Orchestrator's read_file tool
-                     if self.orchestrator and hasattr(self.orchestrator, 'use_tool'):
-                          # Ensure we pass an absolute path if the tool expects it
-                          abs_file_path = os.path.abspath(file_path)
-                          file_content_result = await self.orchestrator.use_tool('read_file', {'path': abs_file_path})
-                          if file_content_result and file_content_result.get('status') == 'success': file_content = file_content_result.get('content')
-                          else: self.logger.warning(f"Could not read file {abs_file_path} via orchestrator tool: {file_content_result.get('message')}"); continue
-                     else: self.logger.error("Orchestrator tool access unavailable for reading learning files."); break # Stop if tool unavailable
+                    if not file_content or not file_content.strip(): self.logger.warning(f"File is empty: {file_path}"); continue
 
-                     if not file_content or not file_content.strip(): self.logger.warning(f"File is empty: {file_path}"); continue
+                    self.logger.info(f"Analyzing content from: {os.path.basename(file_path)} using LLM...")
+                    await self._internal_think(f"Analyze Learning Material '{os.path.basename(file_path)}'")
+                    task_context = {
+                        "task": "Analyze Learning Material", "source_filename": os.path.basename(file_path),
+                        "content_snippet": file_content[:4000],
+                        "desired_output_format": "JSON: {{\"source_file\": str, \"summary\": str, \"key_concepts\": [str], \"actionable_strategies\": [str], \"applicable_agents\": [str], \"insight_type\": str, \"relevance_score\": float}}"
+                    }
+                    analysis_prompt = await self.generate_dynamic_prompt(task_context)
+                    synthesized_insights_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.5, max_tokens=1024, is_json_output=True)
 
-                     self.logger.info(f"Analyzing content from: {os.path.basename(file_path)} using LLM...")
-                     analysis_thought = f"Structured Thinking: Analyze Learning Material '{os.path.basename(file_path)}'. Plan: Formulate analysis prompt -> Call LLM -> Parse JSON -> Log to KB."
-                     await self._internal_think(analysis_thought)
-                     # Use generate_dynamic_prompt for consistency
-                     task_context = {
-                         "task": "Analyze Learning Material",
-                         "source_filename": os.path.basename(file_path),
-                         "content_snippet": file_content[:4000], # Limit context
-                         "desired_output_format": "JSON: {{\"source_file\": str, \"summary\": str, \"key_concepts\": [str], \"actionable_strategies\": [str], \"applicable_agents\": [str], \"insight_type\": str, \"relevance_score\": float}}"
-                     }
-                     analysis_prompt = await self.generate_dynamic_prompt(task_context)
-                     synthesized_insights_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.5, max_tokens=1024, is_json_output=True)
-
-                     if synthesized_insights_json:
-                         try:
-                             insights_data = self._parse_llm_json(synthesized_insights_json)
-                             if not insights_data or not all(k in insights_data for k in ['summary', 'key_concepts', 'applicable_agents', 'insight_type', 'relevance_score']): raise ValueError("LLM response missing required keys.")
-                             insights_data['source_file'] = os.path.basename(file_path) # Ensure filename is set
-                             await self.log_knowledge_fragment(
-                                 agent_source="LearningMaterialLoader", data_type=insights_data.get('insight_type', 'learning_material_summary'),
-                                 content=insights_data, relevance_score=insights_data.get('relevance_score', 0.6),
-                                 tags=["learning_material", insights_data.get('insight_type', 'general')] + [f"agent:{a.lower()}" for a in insights_data.get('applicable_agents', [])],
-                                 source_reference=file_path
-                             )
-                             processed_files += 1
-                         except (json.JSONDecodeError, ValueError) as json_error: self.logger.error(f"Error parsing/storing LLM response for {file_path}: {json_error}")
-                         except Exception as store_err: self.logger.error(f"Error storing knowledge fragment for {file_path}: {store_err}", exc_info=True)
-                     else: self.logger.error(f"LLM analysis returned no content for {file_path}.")
-                 except Exception as file_error: self.logger.error(f"General error processing learning file {file_path}: {file_error}", exc_info=True)
-             self.logger.info(f"Finished processing learning materials. Processed {processed_files}/{len(learning_files)} files.")
-         except Exception as e: self.logger.error(f"Critical error during loading/synthesizing learning materials: {e}", exc_info=True)
+                    if synthesized_insights_json:
+                        try:
+                            insights_data = self._parse_llm_json(synthesized_insights_json)
+                            if not insights_data or not all(k in insights_data for k in ['summary', 'key_concepts', 'applicable_agents', 'insight_type', 'relevance_score']): raise ValueError("LLM response missing keys.")
+                            insights_data['source_file'] = os.path.basename(file_path)
+                            await self.log_knowledge_fragment(
+                                agent_source="LearningMaterialLoader", data_type=insights_data.get('insight_type', 'learning_material_summary'),
+                                content=insights_data, relevance_score=insights_data.get('relevance_score', 0.6),
+                                tags=["learning_material", insights_data.get('insight_type', 'general')] + [f"agent:{a.lower()}" for a in insights_data.get('applicable_agents', [])],
+                                source_reference=file_path
+                            )
+                            processed_files += 1
+                        except Exception as store_err: self.logger.error(f"Error storing knowledge fragment for {file_path}: {store_err}", exc_info=True)
+                    else: self.logger.error(f"LLM analysis returned no content for {file_path}.")
+                except Exception as file_error: self.logger.error(f"General error processing learning file {file_path}: {file_error}", exc_info=True)
+            self.logger.info(f"Finished processing learning materials. Processed {processed_files}/{len(learning_files)} files.")
+        except Exception as e: self.logger.error(f"Critical error during loading/synthesizing learning materials: {e}", exc_info=True)
 
      # --- Standardized LLM Interaction ---
      @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=4, max=30), retry=retry_if_exception_type(Exception))
@@ -195,15 +179,12 @@
              self.logger.error("Orchestrator unavailable or missing call_llm method.")
              return None
          try:
-             # Pass model preference if provided, otherwise orchestrator uses defaults
              response_content = await self.orchestrator.call_llm(
                  agent_name=self.AGENT_NAME, prompt=prompt, temperature=temperature,
                  max_tokens=max_tokens, is_json_output=is_json_output,
-                 model_preference=[model] if model else None # Pass as list
+                 model_preference=[model] if model else None
              )
-             # Handle potential dict response from orchestrator if it includes metadata
              content = response_content.get('content') if isinstance(response_content, dict) else str(response_content)
-
              if content is not None and not isinstance(content, str):
                  self.logger.error(f"Orchestrator.call_llm returned non-string content: {type(content)}")
                  return None
@@ -213,7 +194,7 @@
              return content
          except Exception as e:
              self.logger.error(f"Error calling LLM via orchestrator: {e}", exc_info=True)
-             raise # Re-raise for tenacity
+             raise
 
      # --- User Education ---
      async def generate_educational_content(self, topic: str, context: Optional[str] = None) -> Optional[str]:
@@ -222,17 +203,12 @@
          thinking_process = f"Structured Thinking: Generate Educational Content for '{topic}'. Context: '{context or 'General'}'. Plan: Formulate prompt, call LLM, return cleaned response."
          await self._internal_think(thinking_process)
          task_context = {
-             "task": "Generate Educational Content",
-             "topic": topic,
-             "context": context or "General understanding",
+             "task": "Generate Educational Content", "topic": topic, "context": context or "General understanding",
              "desired_output_format": "ONLY the explanation text, suitable for direct display. Start directly with explanation. Assume intelligent user, non-expert. Avoid/explain jargon. Focus on 'why' & relevance to agency goals."
          }
          prompt = await self.generate_dynamic_prompt(task_context)
          llm_model_pref = settings.OPENROUTER_MODELS.get('think_user_education')
-         explanation = await self._call_llm_with_retry(
-              prompt, temperature=0.6, max_tokens=500, is_json_output=False,
-              model=llm_model_pref # Pass specific model preference
-         )
+         explanation = await self._call_llm_with_retry(prompt, temperature=0.6, max_tokens=500, is_json_output=False, model=llm_model_pref)
          if explanation: self.logger.info(f"Successfully generated educational content for topic: {topic}")
          else: self.logger.error(f"Failed to generate educational content for topic: {topic} (LLM error).")
          return explanation
@@ -242,53 +218,31 @@
      async def call_clay_api(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
          """Makes a direct API call to the specified Clay.com endpoint."""
          api_key = self.config.get_secret("CLAY_API_KEY")
-         if not api_key:
-             self.logger.error("Clay.com API key (CLAY_API_KEY) not found.")
-             return {"status": "failure", "message": "Clay API key not configured."}
-         # Ensure endpoint starts with / but handle if it already does
+         if not api_key: self.logger.error("Clay.com API key not found."); return {"status": "failure", "message": "Clay API key not configured."}
          if not endpoint.startswith('/'): endpoint = '/' + endpoint
-
-         clay_url = f"https://api.clay.com{endpoint}"
-         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json"}
-
-         await self._internal_think(f"Calling Clay API: {endpoint}", details=data)
-         await self.log_operation('debug', f"Calling Clay API endpoint: {endpoint}")
-
-         # Estimate cost based on endpoint (needs refinement based on actual Clay pricing)
-         estimated_cost = 0.01 # Default low cost
-         if "enrichment/person" in endpoint: estimated_cost = 0.05
-         elif "enrichment/company" in endpoint: estimated_cost = 0.03
-         elif "find_company_decision_makers" in endpoint: estimated_cost = 0.10 # Example
-
+         clay_url = f"https://api.clay.com{endpoint}"; headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json"}
+         await self._internal_think(f"Calling Clay API: {endpoint}", details=data); await self.log_operation('debug', f"Calling Clay API endpoint: {endpoint}")
+         estimated_cost = 0.01; # Placeholder
+         if "enrichment/person" in endpoint: estimated_cost = 0.05; elif "enrichment/company" in endpoint: estimated_cost = 0.03
          try:
-             timeout = aiohttp.ClientTimeout(total=90) # Increased timeout for potentially longer enrichments
+             timeout = aiohttp.ClientTimeout(total=90)
              async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
                  async with session.post(clay_url, json=data) as response:
                      response_status = response.status
                      try: response_data = await response.json(content_type=None)
                      except Exception: response_data = await response.text()
-
                      if 200 <= response_status < 300:
                          self.logger.info(f"Clay API call to {endpoint} successful (Status: {response_status}).")
-                         if hasattr(self.orchestrator, 'report_expense'):
-                             await self.orchestrator.report_expense(self.AGENT_NAME, estimated_cost, "API_Clay", f"Clay API Call: {endpoint}")
+                         if hasattr(self.orchestrator, 'report_expense'): await self.orchestrator.report_expense(self.AGENT_NAME, estimated_cost, "API_Clay", f"Clay API Call: {endpoint}")
                          return {"status": "success", "data": response_data}
-                     else:
-                         self.logger.error(f"Clay API call to {endpoint} failed. Status: {response_status}, Response: {str(response_data)[:500]}...")
-                         return {"status": "failure", "message": f"Clay API Error (Status {response_status})", "details": response_data}
-         except asyncio.TimeoutError:
-             self.logger.error(f"Timeout calling Clay API endpoint: {endpoint}")
-             return {"status": "error", "message": f"Clay API call timed out"}
-         except aiohttp.ClientError as e:
-             self.logger.error(f"Network/Connection error calling Clay API endpoint {endpoint}: {e}")
-             raise
-         except Exception as e:
-             self.logger.error(f"Unexpected error during Clay API call to {endpoint}: {e}", exc_info=True)
-             return {"status": "error", "message": f"Clay API call exception: {e}"}
-
+                     else: self.logger.error(f"Clay API call to {endpoint} failed. Status: {response_status}, Response: {str(response_data)[:500]}..."); return {"status": "failure", "message": f"Clay API Error (Status {response_status})", "details": response_data}
+         except asyncio.TimeoutError: self.logger.error(f"Timeout calling Clay API: {endpoint}"); return {"status": "error", "message": f"Clay API call timed out"}
+         except aiohttp.ClientError as e: self.logger.error(f"Network error calling Clay API {endpoint}: {e}"); raise
+         except Exception as e: self.logger.error(f"Unexpected error during Clay API call to {endpoint}: {e}", exc_info=True); return {"status": "error", "message": f"Clay API call exception: {e}"}
 
      # --- Knowledge Base Interface Implementation (Direct Postgres) ---
      async def log_knowledge_fragment(self, agent_source: str, data_type: str, content: Union[str, dict], relevance_score: float = 0.5, tags: Optional[List[str]] = None, related_client_id: Optional[int] = None, source_reference: Optional[str] = None) -> Optional[KnowledgeFragment]:
+         """Logs a knowledge fragment to the database, checking for duplicates."""
          if not self.session_maker: self.logger.error("DB session_maker not available."); return None
          try:
              if isinstance(content, dict): content_str = json.dumps(content, sort_keys=True)
@@ -304,20 +258,20 @@
                      if existing_id:
                          self.logger.debug(f"KF hash {content_hash[:8]} exists (ID: {existing_id}). Updating last_accessed_ts.")
                          stmt_update = update(KnowledgeFragment).where(KnowledgeFragment.id == existing_id).values(last_accessed_ts=now_ts)
-                         await session.execute(stmt_update); return None
+                         await session.execute(stmt_update); return None # Return None as it wasn't newly created
                      else:
                          fragment = KnowledgeFragment(agent_source=agent_source, timestamp=now_ts, last_accessed_ts=now_ts, data_type=data_type, content=content_str, item_hash=content_hash, relevance_score=relevance_score, tags=tags_str, related_client_id=related_client_id, source_reference=source_reference)
                          session.add(fragment)
                  if fragment:
-                     await session.refresh(fragment)
+                     await session.refresh(fragment) # Refresh outside transaction to get committed state
                      self.logger.info(f"Logged KnowledgeFragment: ID={fragment.id}, Hash={content_hash[:8]}..., Type={data_type}, Source={agent_source}")
                      return fragment
-                 else:
-                     return None
+                 else: return None # Should not happen if no exception, but for safety
          except (SQLAlchemyError, TypeError) as e: self.logger.error(f"Error logging KF: {e}", exc_info=True); await self._report_error(f"Error logging KF: {e}"); return None
          except Exception as e: self.logger.error(f"Unexpected error logging KF: {e}", exc_info=True); return None
 
      async def query_knowledge_base(self, data_types: Optional[List[str]] = None, tags: Optional[List[str]] = None, min_relevance: float = 0.0, time_window: Optional[timedelta] = None, limit: int = 100, related_client_id: Optional[int] = None, content_query: Optional[str] = None) -> List[KnowledgeFragment]:
+         """Queries the knowledge base with various filters and updates access time."""
          if not self.session_maker: self.logger.error("DB session_maker not available."); return []
          fragments = []; fragment_ids = []
          try:
@@ -327,16 +281,20 @@
                  if min_relevance > 0.0: stmt = stmt.where(KnowledgeFragment.relevance_score >= min_relevance)
                  if related_client_id is not None: stmt = stmt.where(KnowledgeFragment.related_client_id == related_client_id)
                  if time_window: stmt = stmt.where(KnowledgeFragment.timestamp >= (datetime.now(timezone.utc) - time_window))
-                 if content_query: stmt = stmt.where(KnowledgeFragment.content.ilike(f'%{content_query}%'))
-                 if tags: tag_conditions = [KnowledgeFragment.tags.like(f'%"{tag}"%') for tag in tags]; stmt = stmt.where(or_(*tag_conditions))
+                 if content_query: stmt = stmt.where(KnowledgeFragment.content.ilike(f'%{content_query}%')) # Basic text search
+                 if tags: tag_conditions = [KnowledgeFragment.tags.like(f'%"{tag}"%') for tag in tags]; stmt = stmt.where(or_(*tag_conditions)) # Assumes tags stored as JSON array string
 
+                 # Get IDs first for efficient access time update
                  stmt_ids = stmt.with_only_columns(KnowledgeFragment.id).order_by(desc(KnowledgeFragment.last_accessed_ts), desc(KnowledgeFragment.relevance_score), desc(KnowledgeFragment.timestamp)).limit(limit)
                  fragment_ids = (await session.execute(stmt_ids)).scalars().all()
+
                  if not fragment_ids: return []
 
+                 # Fetch full fragments for the selected IDs
                  stmt_final = select(KnowledgeFragment).where(KnowledgeFragment.id.in_(fragment_ids)).order_by(desc(KnowledgeFragment.last_accessed_ts), desc(KnowledgeFragment.relevance_score), desc(KnowledgeFragment.timestamp))
                  fragments = list((await session.execute(stmt_final)).scalars().all())
 
+                 # Update last_accessed_ts asynchronously
                  if fragment_ids:
                      async def update_access_time():
                          try:
@@ -346,25 +304,28 @@
                                  self.logger.debug(f"Updated last_accessed_ts for {len(fragment_ids)} fragments.")
                          except Exception as update_err: self.logger.error(f"Failed update last_accessed_ts: {update_err}")
                      asyncio.create_task(update_access_time())
+
                  self.logger.debug(f"KB query returned {len(fragments)} fragments.")
          except SQLAlchemyError as e: self.logger.error(f"DB Error querying KB: {e}", exc_info=True); await self._report_error(f"DB Error querying KB: {e}")
          except Exception as e: self.logger.error(f"Unexpected error querying KB: {e}", exc_info=True)
          return fragments
 
      async def log_learned_pattern(self, pattern_description: str, supporting_fragment_ids: List[int], confidence_score: float, implications: str, tags: Optional[List[str]] = None) -> Optional[LearnedPattern]:
+         """Logs a discovered pattern or rule to the database."""
          if not self.session_maker: self.logger.error("DB session_maker not available."); return None
          try:
              fragment_ids_str = json.dumps(sorted(list(set(supporting_fragment_ids)))); tags_list = sorted(list(set(tags))) if tags else []; tags_str = json.dumps(tags_list) if tags_list else None
              pattern = LearnedPattern(timestamp=datetime.now(timezone.utc), pattern_description=pattern_description, supporting_fragment_ids=fragment_ids_str, confidence_score=confidence_score, implications=implications, tags=tags_str, status='active')
              async with self.session_maker() as session:
                  async with session.begin(): session.add(pattern)
-                 await session.refresh(pattern)
+                 await session.refresh(pattern) # Refresh after commit to get ID
                  self.logger.info(f"Logged LearnedPattern: ID={pattern.id}, Confidence={confidence_score:.2f}")
                  return pattern
          except SQLAlchemyError as e: self.logger.error(f"DB Error logging LearnedPattern: {e}", exc_info=True); await self._report_error(f"DB Error logging LearnedPattern: {e}"); return None
          except Exception as e: self.logger.error(f"Unexpected error logging LearnedPattern: {e}", exc_info=True); return None
 
      async def get_latest_patterns(self, tags: Optional[List[str]] = None, min_confidence: float = 0.7, limit: int = 10) -> List[LearnedPattern]:
+         """Retrieves the latest active learned patterns."""
          if not self.session_maker: self.logger.error("DB session_maker not available."); return []
          patterns = []
          try:
@@ -379,6 +340,7 @@
          return patterns
 
      async def purge_old_knowledge(self, days_threshold: Optional[int] = None):
+         """Purges knowledge fragments older than the threshold based on last access time."""
          if not self.session_maker: self.logger.error("DB session_maker not available."); return
          threshold = days_threshold if days_threshold is not None else settings.DATA_PURGE_DAYS_THRESHOLD
          if threshold <= 0: self.logger.warning("Invalid days_threshold for purge."); return
@@ -1304,5 +1266,204 @@
          except Exception as e: self.logger.error(f"Unexpected error getting active directives: {e}", exc_info=True); return []
 
 
- # --- End of agents/think_tool.py ---
- 
+ # --- End of agents/think_tool.py ---```)?', json_string, re.DOTALL)
+
+             parsed_json = None
+             if match:
+                 potential_json = match.group(1)
+                 try: parsed_json = json.loads(potential_json)
+                 except json.JSONDecodeError as e:
+                     self.logger.warning(f"Initial JSON parsing failed ({e}), attempting to clean and retry: {potential_json[:100]}...")
+                     cleaned_json = re.sub(r',\s*([\}\]])', r'\1', potential_json) # Basic cleaning: remove trailing commas
+                     cleaned_json = re.sub(r'^\s*|\s*$', '', cleaned_json) # Trim whitespace
+                     try: parsed_json = json.loads(cleaned_json)
+                     except json.JSONDecodeError as e2: self.logger.error(f"JSON cleaning failed ({e2}), unable to parse: {potential_json[:200]}..."); return None
+             # Fallback if no markdown block found but string looks like JSON
+             elif json_string.strip().startswith(start_char) and json_string.strip().endswith(end_char):
+                  try: parsed_json = json.loads(json_string)
+                  except json.JSONDecodeError as e: self.logger.error(f"Direct JSON parsing failed ({e}): {json_string[:200]}..."); return None
+             else: self.logger.warning(f"Could not find expected JSON structure ({expect_type}) in LLM output: {json_string[:200]}..."); return None
+
+             if isinstance(parsed_json, expect_type): return parsed_json
+             else: self.logger.error(f"Parsed JSON type mismatch. Expected {expect_type}, got {type(parsed_json)}"); return None
+         except json.JSONDecodeError as e: self.logger.error(f"Failed to decode LLM JSON response: {e}. Response snippet: {json_string[:500]}..."); return None
+         except Exception as e: self.logger.error(f"Unexpected error during JSON parsing: {e}", exc_info=True); return None
+
+     # --- Specific Logic Moved/Integrated ---
+     async def _calculate_dynamic_price(self, client_id: int, conversation_summary: Optional[List] = None, base_price: float = 7000.0) -> float: # Updated base price
+         # (Keep existing implementation, but uses new base_price)
+         client_score = 0.1
+         try:
+             async with self.session_maker() as session:
+                  score_res = await session.execute(select(Client.engagement_score).where(Client.id == client_id))
+                  client_score = score_res.scalar_one_or_none() or 0.1
+
+             # Keep adjustment simple for now, focus is on the base price
+             price_adjustment_factor = 1.0 # Start with no adjustment
+
+             # Optional: LLM analysis for adjustment (keep if desired)
+             if conversation_summary:
+                 task_context = {
+                     "task": "Analyze Conversation for Pricing Adjustment",
+                     "client_score": client_score, "base_price": base_price,
+                     "conversation_summary": conversation_summary,
+                     "desired_output_format": "JSON ONLY: {{\"adjustment_factor\": float (0.9-1.1), \"reason\": \"Brief justification\"}}"
+                 }
+                 analysis_prompt = await self.generate_dynamic_prompt(task_context)
+                 try:
+                     analysis_json = await self._call_llm_with_retry(analysis_prompt, temperature=0.3, max_tokens=200, is_json_output=True)
+                     if analysis_json:
+                         analysis_result = self._parse_llm_json(analysis_json)
+                         if analysis_result and 'adjustment_factor' in analysis_result:
+                             llm_factor = float(analysis_result['adjustment_factor'])
+                             # Apply LLM factor cautiously, maybe average or cap it
+                             price_adjustment_factor = max(0.9, min(1.1, llm_factor)) # Cap adjustment
+                             self.logger.info(f"LLM suggested price factor: {llm_factor:.2f}. Using capped factor: {price_adjustment_factor:.2f}. Reason: {analysis_result.get('reason')}")
+                 except Exception as llm_err: self.logger.warning(f"LLM pricing analysis failed: {llm_err}")
+
+             calculated_price = base_price * price_adjustment_factor
+             # Ensure final price isn't below base (unless factor is < 1)
+             final_price = max(calculated_price, base_price * 0.9) # Allow slight downward adjustment if LLM suggests strongly
+
+             self.logger.info(f"Calculated dynamic price for client {client_id}: ${final_price:.2f} (Base: {base_price}, Score: {client_score:.2f}, Factor: {price_adjustment_factor:.2f})")
+             return round(final_price, 2)
+         except Exception as e: self.logger.error(f"Error calculating dynamic price for client {client_id}: {e}", exc_info=True); return round(base_price, 2)
+
+     async def _process_clay_result(self, clay_api_result: Dict[str, Any], source_directive_id: Optional[int] = None, source_reference: Optional[str] = None, client_id: Optional[int] = None):
+         """Processes enriched data from Clay.com and triggers next actions."""
+         self.logger.info(f"Processing Clay API result. Directive ID: {source_directive_id}, Ref: {source_reference}, ClientID: {client_id}")
+         await self._internal_think("Processing Clay API result", details={"result_status": clay_api_result.get("status"), "ref": source_reference})
+
+         if clay_api_result.get("status") != "success":
+             self.logger.warning(f"Clay API call failed, cannot process result. Message: {clay_api_result.get('message')}")
+             if source_directive_id: await self.update_directive_status(source_directive_id, 'failed', f"Clay API call failed: {clay_api_result.get('message')}")
+             await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="clay_enrichment_error", content=clay_api_result, tags=["clay", "enrichment", "error"], relevance_score=0.2, source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}")
+             return
+
+         clay_data = clay_api_result.get("data", {})
+         processed_info = {}
+         if isinstance(clay_data, dict):
+             # --- MODIFIED: Extract more fields ---
+             processed_info['verified_email'] = clay_data.get('email') or clay_data.get('person', {}).get('email') or clay_data.get('verified_email')
+             processed_info['job_title'] = clay_data.get('job_title') or clay_data.get('person', {}).get('title') or clay_data.get('title')
+             processed_info['company_name'] = clay_data.get('company_name') or clay_data.get('company', {}).get('name')
+             processed_info['linkedin_url'] = clay_data.get('linkedin_url') or clay_data.get('person', {}).get('linkedin_url') or source_reference
+             processed_info['company_domain'] = clay_data.get('company', {}).get('domain')
+             processed_info['full_name'] = clay_data.get('full_name') or clay_data.get('person', {}).get('full_name')
+             processed_info['company_size'] = clay_data.get('company', {}).get('company_size') # Example: company size
+             processed_info['industry'] = clay_data.get('company', {}).get('industry') # Example: industry
+             processed_info['location'] = clay_data.get('location') or clay_data.get('person', {}).get('location') # Example: location
+             # Add more fields as available/needed from Clay's responses
+
+             processed_info = {k: v for k, v in processed_info.items() if v is not None and v != ''} # Clean empty values
+
+             if processed_info: # Check if we got *any* useful info
+                 try:
+                     async with self.session_maker() as session:
+                         async with session.begin():
+                             target_client_id = client_id; target_client = None
+                             if target_client_id: target_client = await session.get(Client, target_client_id)
+                             # Try lookup if client_id wasn't provided or client not found
+                             if not target_client:
+                                 lookup_stmt = select(Client)
+                                 conditions = []
+                                 if processed_info.get('verified_email'): conditions.append(Client.email == processed_info['verified_email'])
+                                 if source_reference and 'linkedin.com' in source_reference: conditions.append(Client.source_reference == source_reference)
+                                 if conditions:
+                                     lookup_stmt = lookup_stmt.where(or_(*conditions)).limit(1)
+                                     target_client = (await session.execute(lookup_stmt)).scalar_one_or_none()
+                                     if target_client: target_client_id = target_client.id
+                                 else: # Cannot lookup without email or linkedin
+                                     self.logger.warning(f"Cannot reliably look up client for Clay result without email/linkedin ref.")
+
+                             # Update or Create Client Record
+                             if target_client: # Update existing client
+                                 update_values = {'last_interaction': datetime.now(timezone.utc)}
+                                 if not target_client.email and processed_info.get('verified_email'): update_values['email'] = processed_info['verified_email']
+                                 if not target_client.company and processed_info.get('company_name'): update_values['company'] = processed_info['company_name']
+                                 if not target_client.job_title and processed_info.get('job_title'): update_values['job_title'] = processed_info['job_title']
+                                 # Add other fields to update
+                                 await session.execute(update(Client).where(Client.id == target_client_id).values(**update_values))
+                                 self.logger.info(f"Updated Client {target_client_id} with enriched data: {list(update_values.keys())}")
+                             else: # Create new client if possible (requires name and email at minimum)
+                                 if processed_info.get('verified_email') and processed_info.get('full_name'):
+                                     new_client = Client(
+                                         name=processed_info['full_name'],
+                                         email=processed_info['verified_email'],
+                                         source_reference=source_reference,
+                                         company=processed_info.get('company_name'),
+                                         job_title=processed_info.get('job_title'),
+                                         # Add other fields
+                                         source="ClayEnrichment",
+                                         opt_in=True, # Assume opt-in for newly found leads? Needs review.
+                                         is_deliverable=True
+                                     )
+                                     session.add(new_client)
+                                     await session.flush() # Get the new ID
+                                     target_client_id = new_client.id
+                                     self.logger.info(f"Created new Client {target_client_id} from Clay enrichment.")
+                                 else:
+                                     self.logger.warning("Cannot create new client from Clay data - missing name or email.")
+                                     target_client_id = None # Ensure no outreach if client creation failed
+
+                             # Log the full enrichment result
+                             fragment = await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="clay_enrichment_result", content=processed_info, tags=["clay", "enrichment", "lead_data"], relevance_score=0.9, related_client_id=target_client_id, source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}")
+                             self.logger.info(f"Logged Clay enrichment result ({fragment.id if fragment else 'existing'}) for {processed_info.get('linkedin_url')} to KB.")
+
+                             # Trigger outreach ONLY if we have an email and a client ID
+                             if processed_info.get('verified_email') and target_client_id:
+                                 outreach_directive = StrategicDirective(
+                                     source=self.AGENT_NAME, timestamp=datetime.now(timezone.utc),
+                                     target_agent="EmailAgent", directive_type="initiate_outreach",
+                                     content=json.dumps({ # Pass the full enriched data
+                                         "target_identifier": processed_info['verified_email'],
+                                         "client_id": target_client_id,
+                                         "context": f"Enriched lead via Clay. Job: {processed_info.get('job_title', 'N/A')}, Company: {processed_info.get('company_name', 'N/A')}.",
+                                         "goal": "Book sales call for UGC service",
+                                         "enriched_data": processed_info # Include all processed info
+                                     }),
+                                     priority=4, status='pending'
+                                 )
+                                 session.add(outreach_directive)
+                                 self.logger.info(f"Generated outreach directive for EmailAgent for {processed_info['verified_email']}")
+                                 if source_directive_id: await self.update_directive_status(source_directive_id, 'completed', f"Processed Clay result. Found data, triggered outreach.")
+                             else:
+                                 self.logger.warning(f"Skipping outreach for Clay result (Directive {source_directive_id}) - missing email or client ID.")
+                                 if source_directive_id: await self.update_directive_status(source_directive_id, 'completed', "Processed Clay result, but missing email/client ID for outreach.")
+
+                 except Exception as e:
+                     self.logger.error(f"Error processing/storing Clay result for directive {source_directive_id}: {e}", exc_info=True)
+                     await self._report_error(f"Error processing Clay result: {e}", task_id=f"Directive_{source_directive_id}")
+                     if source_directive_id: await self.update_directive_status(source_directive_id, 'failed', f"Error processing result: {e}")
+             else:
+                 self.logger.warning(f"Clay result for directive {source_directive_id} did not contain any usable info after processing.")
+                 await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="clay_enrichment_empty", content=clay_data, tags=["clay", "enrichment", "empty_result"], relevance_score=0.3, related_client_id=client_id, source_reference=source_reference or f"ClayAPI_Directive_{source_directive_id}")
+                 if source_directive_id: await self.update_directive_status(source_directive_id, 'completed', "Processed Clay result, but no usable info found.")
+         else:
+              self.logger.warning(f"Received non-dict data for Clay result processing: {type(clay_data)}")
+              if source_directive_id: await self.update_directive_status(source_directive_id, 'failed', f"Received invalid data type from Clay API: {type(clay_data)}")
+
+
+     async def update_directive_status(self, directive_id: int, status: str, result_summary: Optional[str] = None):
+          # (Keep existing implementation)
+          if not self.session_maker or directive_id is None: return
+          self.logger.info(f"Updating directive {directive_id} status to '{status}'.")
+          try:
+              async with self.session_maker() as session:
+                  async with session.begin():
+                      stmt = update(StrategicDirective).where(StrategicDirective.id == directive_id).values(status=status, result_summary=result_summary)
+                      await session.execute(stmt)
+          except SQLAlchemyError as e: self.logger.error(f"DB Error updating directive {directive_id} status: {e}", exc_info=True)
+          except Exception as e: self.logger.error(f"Unexpected error updating directive {directive_id} status: {e}", exc_info=True)
+
+     async def get_active_directives(self, target_agent: Optional[str] = None, limit: int = 10) -> List[StrategicDirective]:
+         # (Keep existing implementation)
+         if not self.session_maker: return []
+         try:
+             async with self.session_maker() as session:
+                 stmt = select(StrategicDirective).where(StrategicDirective.status.in_(['pending', 'active'])).order_by(StrategicDirective.priority, desc(StrategicDirective.timestamp)).limit(limit)
+                 if target_agent: stmt = stmt.where(StrategicDirective.target_agent == target_agent)
+                 directives = list((await session.execute(stmt)).scalars().all())
+                 return directives
+         except SQLAlchemyError as e: self.logger.error(f"DB Error getting active directives: {e}", exc_info=True); return []
+         except Exception as e: self.logger.error(f"Unexpected error getting active directives: {e}", exc_info=True); return []
