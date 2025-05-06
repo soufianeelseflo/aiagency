@@ -1,6 +1,7 @@
+
 # Filename: agents/orchestrator.py
 # Description: Central coordinator for the AI Agency, managing core agents, workflows, and resources.
-# Version: 3.1 (Added MailerSend Webhook Handler)
+# Version: 3.2 (Removed Optional API Key Logic)
 
 import os
 import asyncio
@@ -11,7 +12,9 @@ import json
 import uuid
 import random
 import re
-import base64  # For tracking pixel response
+import base64
+import hashlib # Added for caching
+import glob # Added for list_files tool
 from collections import deque
 from typing import Dict, Optional, Tuple, Any, List, AsyncGenerator, Callable, Type
 
@@ -21,9 +24,8 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
 )
-# Make sure all needed SQLAlchemy components are imported
 from sqlalchemy import select, delete, func, update, text, case, or_
-from quart import Quart, request, jsonify, websocket, send_file, url_for, Response # Added Response
+from quart import Quart, request, jsonify, websocket, send_file, url_for, Response
 import psutil
 from openai import AsyncOpenAI as AsyncLLMClient
 import pybreaker
@@ -34,7 +36,6 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
-from prometheus_client import Counter, Gauge, start_http_server
 
 # --- Project Imports ---
 from config.settings import settings
@@ -44,7 +45,7 @@ from utils.database import (
     get_session,
     get_session_maker,
 )
-from utils.notifications import send_notification # Assuming this utility exists
+from utils.notifications import send_notification
 
 # Import ALL agent classes
 try:
@@ -59,34 +60,21 @@ from agents.email_agent import EmailAgent
 from agents.voice_sales_agent import VoiceSalesAgent
 from agents.legal_agent import LegalAgent
 from agents.social_media_manager import SocialMediaManager
-from agents.gmail_creator_agent import GmailCreatorAgent # Import the new agent
+from agents.gmail_creator_agent import GmailCreatorAgent
 
 # Import database models
 from models import (
     Base, Client, Metric, ExpenseLog, MigrationStatus, KnowledgeFragment,
-    AccountCredentials, CallLog, Invoice, StrategicDirective, PromptTemplate # Added PromptTemplate
+    AccountCredentials, CallLog, Invoice, StrategicDirective, PromptTemplate
 )
 
 # --- Logging Configuration ---
 logger = logging.getLogger(__name__)
 op_logger = logging.getLogger("OperationalLog")
 
-# --- Metrics & Circuit Breakers ---
-agent_status_gauge = Gauge(
-    "agent_status", "Status of agents (1=running, 0=stopped/error)", ["agent_name"]
-)
-error_counter = Counter(
-    "agent_errors_total", "Total number of errors per agent", ["agent_name"]
-)
-tasks_processed_counter = Counter(
-    "tasks_processed_total", "Total number of tasks processed by agent", ["agent_name"]
-)
-llm_client_breaker = pybreaker.CircuitBreaker(
-    fail_max=3, reset_timeout=60 * 5, name="LLMClientBreaker"
-)
-# Add breakers for other external services if needed
-# clay_breaker = pybreaker.CircuitBreaker(...)
-# mailer_breaker = pybreaker.CircuitBreaker(...)
+# --- Global Shutdown Event ---
+# Used to signal shutdown across async tasks
+shutdown_event = asyncio.Event()
 
 
 # --- Orchestrator Class ---
@@ -102,29 +90,20 @@ class Orchestrator:
         )
         self.setup_routes() # Call route setup here
 
-        # Prometheus setup (keep existing)
-        try:
-            start_http_server(8001)
-            logger.info("Prometheus metrics server started on port 8001.")
-        except OSError as e: logger.warning(f"Could not start Prometheus server on port 8001: {e}")
-        except Exception as e: logger.error(f"Failed to start Prometheus server: {e}", exc_info=True)
-
         self.meta_prompt = self.config.META_PROMPT
         self.approved = False
 
-        # LLM Client Management State
-        self._llm_client_cache: Dict[str, AsyncLLMClient] = {}
-        self._llm_client_status: Dict[str, Dict[str, Any]] = {}
-        self._llm_client_keys: List[str] = []
-        self._llm_client_round_robin_index = 0
+        # LLM Client Management State (Simplified)
+        self._llm_client: Optional[AsyncLLMClient] = None
+        self._llm_client_status: Dict[str, Any] = {"status": "unavailable", "reason": "Not initialized"}
 
-        # In-memory Cache (Simple)
+        # In-memory Cache
         self._cache: Dict[str, Tuple[Any, float]] = {}
-        self.cache_ttl_default = 3600 # 1 hour default cache
+        self.cache_ttl_default = 3600
 
         # Deepgram WebSocket Registry
         self.deepgram_connections: Dict[str, Any] = {}
-        self.temp_audio_dir = self.config.TEMP_AUDIO_DIR # Use path from settings
+        self.temp_audio_dir = self.config.TEMP_AUDIO_DIR
         os.makedirs(self.temp_audio_dir, exist_ok=True)
 
         # Periodic Task Timing
@@ -135,21 +114,23 @@ class Orchestrator:
 
         self.running: bool = False
         self.background_tasks = set()
-        self.status = "initializing" # Add status attribute
+        self.status = "initializing"
 
-        # Secure Storage Interface (Conceptual - replace with actual Vault/KMS if needed)
-        # For now, it uses the DB with encryption
+        # Secure Storage Interface
         self.secure_storage = self._DatabaseSecureStorage(self.session_maker)
 
-        logger.info("Orchestrator v3.1 (Webhook Handler) initialized.")
-        # Initialization sequence called from run()
+        logger.info("Orchestrator v3.2 (Removed Optional API Key Logic) initialized.")
 
     # --- Initialization Methods ---
     async def initialize_database(self):
         """Initialize or update the database schema."""
         logger.info("Initializing database schema...")
         try:
-            engine = create_async_engine(self.config.DATABASE_URL.unicode_string(), echo=False) # Use unicode_string() for Pydantic v2 DSN
+            # Ensure DATABASE_URL is accessed correctly
+            db_url_str = str(self.config.DATABASE_URL) if self.config.DATABASE_URL else None
+            if not db_url_str: raise ValueError("DATABASE_URL is not configured.")
+
+            engine = create_async_engine(db_url_str, echo=False)
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
             await engine.dispose()
@@ -160,41 +141,29 @@ class Orchestrator:
             return False
 
     async def initialize_clients(self):
-        """Initialize LLM API clients from settings (env vars)."""
-        logger.info("Initializing LLM clients...")
-        self._llm_client_keys = []
-        self._llm_client_cache = {}
-        self._llm_client_status = {}
-        keys_found = []
+        """Initialize the primary LLM API client."""
+        logger.info("Initializing primary LLM client...")
+        self._llm_client = None
+        self._llm_client_status = {"status": "unavailable", "reason": "Initialization failed"}
 
-        # Load primary OpenRouter key
         primary_key = self.config.get_secret("OPENROUTER_API_KEY")
-        if primary_key: keys_found.append(("OR_Primary", primary_key))
-
-        # Load additional keys
-        i = 1
-        while True:
-            add_key = self.config.get_secret(f"OPENROUTER_API_KEY_{i}")
-            if not add_key: break
-            keys_found.append((f"OR_Extra{i}", add_key))
-            i += 1
-
-        for key_name_prefix, api_key in keys_found:
+        if primary_key:
             try:
-                key_id = f"{key_name_prefix}_{api_key[-4:]}"
-                if key_id not in self._llm_client_cache:
-                    self._llm_client_cache[key_id] = AsyncLLMClient(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-                    self._llm_client_status[key_id] = {"status": "available", "reason": None, "unavailable_until": 0}
-                    self._llm_client_keys.append(key_id)
-                    logger.info(f"Initialized OpenRouter client (Key ID: {key_id}).")
-            except Exception as e: logger.error(f"Failed to initialize OpenRouter client {key_name_prefix}: {e}", exc_info=True)
-
-        if not self._llm_client_keys: logger.critical("CRITICAL: No LLM API clients initialized."); return False
-        logger.info(f"LLM Client Initialization complete. Total usable keys: {len(self._llm_client_keys)}")
-        return True
+                self._llm_client = AsyncLLMClient(api_key=primary_key, base_url="https://openrouter.ai/api/v1")
+                self._llm_client_status = {"status": "available", "reason": None, "unavailable_until": 0}
+                logger.info(f"Initialized OpenRouter client (Primary Key: ...{primary_key[-4:]}).")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to initialize primary OpenRouter client: {e}", exc_info=True)
+                self._llm_client_status["reason"] = f"Initialization Error: {e}"
+                return False
+        else:
+            logger.critical("CRITICAL: OPENROUTER_API_KEY not set. LLM functionality disabled.")
+            self._llm_client_status["reason"] = "API Key Missing"
+            return False
 
     async def initialize_agents(self):
-        """Initialize the CORE agents + kept agents, passing necessary secrets."""
+        """Initialize the CORE agents, passing necessary secrets."""
         logger.info("Initializing CORE agents...")
         initialization_failed = False
         try:
@@ -208,7 +177,7 @@ class Orchestrator:
             # EmailAgent
             imap_pass = self.config.get_secret("HOSTINGER_IMAP_PASS")
             if not imap_pass: logger.critical("Hostinger IMAP password missing. EmailAgent reply checking will fail."); initialization_failed = True
-            self.agents["email"] = EmailAgent(self.session_maker, self, imap_password=imap_pass) # Only pass IMAP pass
+            self.agents["email"] = EmailAgent(self.session_maker, self, imap_password=imap_pass)
 
             # VoiceSalesAgent
             twilio_token = self.config.get_secret("TWILIO_AUTH_TOKEN")
@@ -236,10 +205,6 @@ class Orchestrator:
                 except ImportError: logger.warning("Found programmer_agent.py but failed to import ProgrammerAgent class.")
             else: logger.info("ProgrammerAgent file not found, skipping initialization.")
 
-
-            # Set Prometheus gauges
-            for name in self.agents.keys(): agent_status_gauge.labels(agent_name=name).set(0) # idle
-
             if initialization_failed: raise RuntimeError("Failed to initialize critical agents due to missing secrets.")
 
             logger.info(f"Core agents initialized: {list(self.agents.keys())}")
@@ -247,40 +212,37 @@ class Orchestrator:
 
         except Exception as e: logger.error(f"Core agent initialization failed: {e}", exc_info=True); return False
 
-    # --- LLM Client Management ---
+    # --- LLM Client Management (Simplified) ---
     @llm_client_breaker
-    async def get_available_llm_clients(self) -> List[AsyncLLMClient]:
-        # ... (Implementation remains the same as v3.0) ...
-        now = time.time(); available_keys = []
-        for key_id in self._llm_client_keys:
-            status_info = self._llm_client_status.get(key_id, {"status": "available", "unavailable_until": 0})
-            if status_info["status"] == "available" or now >= status_info.get("unavailable_until", 0):
-                if status_info["status"] == "unavailable": status_info["status"] = "available"; status_info["reason"] = None; status_info["unavailable_until"] = 0; logger.info(f"LLM client key {key_id} available after cooldown.")
-                available_keys.append(key_id)
-        if not available_keys: logger.error("No available LLM clients!"); return []
-        selected_key_id = available_keys[self._llm_client_round_robin_index % len(available_keys)]; self._llm_client_round_robin_index += 1
-        selected_client = self._llm_client_cache.get(selected_key_id)
-        if not selected_client:
-            logger.error(f"Client instance not found for key ID {selected_key_id}. Init issue.");
-            if selected_key_id in self._llm_client_keys: self._llm_client_keys.remove(selected_key_id)
-            self._llm_client_status.pop(selected_key_id, None); self._llm_client_cache.pop(selected_key_id, None)
-            return await self.get_available_llm_clients() # Retry
-        logger.debug(f"Selected LLM client key ID: {selected_key_id}")
-        return [selected_client]
+    async def get_available_llm_client(self) -> Optional[AsyncLLMClient]:
+        """Returns the primary LLM client if available."""
+        now = time.time()
+        status_info = self._llm_client_status
+        if status_info["status"] == "available" or now >= status_info.get("unavailable_until", 0):
+            if status_info["status"] == "unavailable":
+                status_info["status"] = "available"
+                status_info["reason"] = None
+                status_info["unavailable_until"] = 0
+                logger.info("Primary LLM client available after cooldown.")
+            return self._llm_client
+        else:
+            logger.error(f"Primary LLM client unavailable. Reason: {status_info.get('reason', 'Unknown')}")
+            return None
 
-
-    async def report_client_issue(self, api_key_identifier: str, issue_type: str):
-        # ... (Implementation remains the same as v3.0) ...
-        if api_key_identifier not in self._llm_client_status: logger.warning(f"Attempted report issue for unknown LLM client: {api_key_identifier}"); return
+    async def report_client_issue(self, issue_type: str):
+        """Reports an issue with the primary LLM client."""
         now = time.time(); cooldown_seconds = 60 * 5; status = "unavailable"; reason = issue_type
-        if issue_type == "auth_error": cooldown_seconds = 60 * 60 * 24 * 365; reason = "Authentication Error"; logger.critical(f"LLM client key {api_key_identifier} marked permanently unavailable (auth error).")
+        if issue_type == "auth_error":
+            cooldown_seconds = 60 * 60 * 24 * 365 # Effectively permanent
+            reason = "Authentication Error"
+            logger.critical("Primary LLM client marked permanently unavailable (auth error).")
         elif issue_type == "rate_limit": cooldown_seconds = 60 * 2; reason = "Rate Limited"
         elif issue_type == "timeout_error": cooldown_seconds = 60 * 3; reason = "Timeout"
         else: reason = "General Error"
-        self._llm_client_status[api_key_identifier] = {"status": status, "reason": reason, "unavailable_until": now + cooldown_seconds}
-        logger.warning(f"LLM client key {api_key_identifier} marked unavailable until {datetime.fromtimestamp(now + cooldown_seconds)}. Reason: {reason}")
 
-    # MODIFIED: Added image_data parameter
+        self._llm_client_status = {"status": status, "reason": reason, "unavailable_until": now + cooldown_seconds}
+        logger.warning(f"Primary LLM client marked unavailable until {datetime.fromtimestamp(now + cooldown_seconds)}. Reason: {reason}")
+
     @llm_client_breaker
     async def call_llm(
         self,
@@ -289,69 +251,63 @@ class Orchestrator:
         temperature: float = 0.5,
         max_tokens: int = 1024,
         is_json_output: bool = False,
-        model_preference: Optional[List[str]] = None,
-        image_data: Optional[bytes] = None, # Added for multimodal
+        model_preference: Optional[List[str]] = None, # Still accept preference, but use settings value
+        image_data: Optional[bytes] = None,
         timeout: Optional[float] = None
-    ) -> Optional[Dict[str, Any]]: # Return dict including content and usage
-        """Handles selecting an available client and making the LLM call, now with multimodal support."""
-        selected_clients = await self.get_available_llm_clients()
-        if not selected_clients: logger.error(f"Agent '{agent_name}' failed to get an available LLM client."); return None
-        llm_client = selected_clients[0]; api_key_identifier = "unknown"
-        for key_id, client_instance in self._llm_client_cache.items():
-            if client_instance == llm_client: api_key_identifier = key_id; break
+    ) -> Optional[Dict[str, Any]]:
+        """Handles making the LLM call using the primary client."""
+        llm_client = await self.get_available_llm_client()
+        if not llm_client:
+            logger.error(f"Agent '{agent_name}' failed: Primary LLM client unavailable.")
+            return None
 
-        # Determine model
-        # Prioritize model_preference if provided and valid
+        # Determine model name from settings based on agent/task type
         model_name = None
-        if model_preference:
-            for pref in model_preference:
-                if pref in self.config.OPENROUTER_MODELS.values(): # Check if it's a known valid model value
-                    model_name = pref
-                    break
-                elif pref in self.config.OPENROUTER_MODELS: # Check if it's a known key
-                    model_name = self.config.OPENROUTER_MODELS[pref]
-                    break
-            if model_name: logger.debug(f"Using preferred model: {model_name}")
-            else: logger.warning(f"Model preference {model_preference} not found in config, using default.")
+        if agent_name == "ThinkTool": model_key = "think_general" # Default for ThinkTool
+        elif agent_name == "EmailAgent": model_key = "email_draft"
+        elif agent_name == "VoiceSalesAgent": model_key = "voice_response"
+        elif agent_name == "LegalAgent": model_key = "legal_validation"
+        elif agent_name == "BrowsingAgent": model_key = "browsing_visual_analysis" if image_data else "browsing_summarize"
+        else: model_key = "default_llm" # Fallback
 
-        # Fallback to agent-specific or default model
-        if not model_name:
-            model_key = "default_llm"
-            # Agent specific model selection logic...
-            if agent_name == "ThinkTool": model_key = "think_general"
-            elif agent_name == "EmailAgent": model_key = "email_draft"
-            elif agent_name == "VoiceSalesAgent": model_key = "voice_response"
-            elif agent_name == "LegalAgent": model_key = "legal_validation"
-            elif agent_name == "BrowsingAgent": model_key = "browsing_visual_analysis" if image_data else "browsing_summarize" # Choose visual model if image provided
-            # ... add other agents
-            model_name = self.config.OPENROUTER_MODELS.get(model_key, self.config.OPENROUTER_MODELS["default_llm"])
+        # Allow task context to override the default model key for the agent
+        task_specific_model_key = None
+        if isinstance(prompt, str): # Basic check if prompt might contain task info
+             if "synthesize" in prompt.lower() or "strategize" in prompt.lower(): task_specific_model_key = "think_strategize"
+             elif "critique" in prompt.lower(): task_specific_model_key = "think_critique"
+             elif "radar" in prompt.lower() or "scouting" in prompt.lower(): task_specific_model_key = "think_radar"
+             elif "validate" in prompt.lower(): task_specific_model_key = "think_validate"
+             elif "educational content" in prompt.lower(): task_specific_model_key = "think_user_education"
+             elif "humanize" in prompt.lower(): task_specific_model_key = "email_humanize"
+             elif "intent" in prompt.lower(): task_specific_model_key = "voice_intent"
+             # Add more specific task checks if needed
 
-        # Caching Logic (remains the same)
+        final_model_key = task_specific_model_key or model_key
+        model_name = self.config.OPENROUTER_MODELS.get(final_model_key, self.config.OPENROUTER_MODELS["default_llm"])
+        logger.debug(f"Selected model '{model_name}' for agent '{agent_name}' task (key: {final_model_key}).")
+
+
+        # Caching Logic
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-        cache_key_parts = ["llm_call", prompt_hash, model_name, str(temperature), str(max_tokens), str(is_json_output), str(image_data is not None)] # Added image flag to key
+        cache_key_parts = ["llm_call", prompt_hash, model_name, str(temperature), str(max_tokens), str(is_json_output), str(image_data is not None)]
         cache_key = ":".join(cache_key_parts); cache_ttl = self.cache_ttl_default
         cached_result = self.get_from_cache(cache_key)
-        if cached_result is not None: logger.debug(f"LLM call cache hit (Orchestrator) for key: {cache_key[:20]}..."); return cached_result # Return cached dict
+        if cached_result is not None: logger.debug(f"LLM call cache hit (Orchestrator) for key: {cache_key[:20]}..."); return cached_result
 
         try:
             response_format = {"type": "json_object"} if is_json_output else None
-            # --- MODIFIED: Construct messages for multimodal ---
             messages = []
             content_parts = [{"type": "text", "text": prompt}]
             if image_data:
-                # Encode image to base64
                 base64_image = base64.b64encode(image_data).decode('utf-8')
                 content_parts.append({
                     "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{base64_image}" # Assuming PNG, adjust if needed
-                    }
+                    "image_url": {"url": f"data:image/png;base64,{base64_image}"}
                 })
                 logger.debug("Image data included in LLM request.")
             messages.append({"role": "user", "content": content_parts})
-            # --- END MODIFICATION ---
 
-            logger.debug(f"Orchestrator making LLM Call: Agent={agent_name}, Model={model_name}, Key=...{api_key_identifier[-4:]}, Multimodal={image_data is not None}")
+            logger.debug(f"Orchestrator making LLM Call: Agent={agent_name}, Model={model_name}, Multimodal={image_data is not None}")
 
             api_timeout = timeout or settings.OPENROUTER_API_TIMEOUT_S or 120.0
             response = await llm_client.chat.completions.create(
@@ -364,7 +320,6 @@ class Orchestrator:
             input_tokens = response.usage.prompt_tokens if response.usage else 0
             output_tokens = response.usage.completion_tokens if response.usage else 0
             total_tokens = input_tokens + output_tokens
-            # TODO: Get actual costs per model from OpenRouter or estimate
             cost_per_million_input = 0.50; cost_per_million_output = 1.50 # Example costs
             cost = (input_tokens / 1_000_000 * cost_per_million_input + output_tokens / 1_000_000 * cost_per_million_output)
             logger.debug(f"LLM Call Usage: Model={model_name}, Tokens={total_tokens}, Est. Cost=${cost:.6f}")
@@ -379,9 +334,9 @@ class Orchestrator:
             if "rate limit" in error_str or "quota" in error_str: issue_type = "rate_limit"
             elif "authentication" in error_str: issue_type = "auth_error"
             elif "timeout" in error_str: issue_type = "timeout_error"
-            logger.warning(f"Orchestrator LLM call failed: Agent={agent_name}, Model={model_name}, Key=...{api_key_identifier[-4:]}, Type={issue_type}, Error={e}")
-            await self.report_client_issue(api_key_identifier, issue_type)
-            raise # Re-raise for tenacity/caller handling
+            logger.warning(f"Orchestrator LLM call failed: Agent={agent_name}, Model={model_name}, Type={issue_type}, Error={e}")
+            await self.report_client_issue(issue_type) # Report issue for the primary client
+            raise
 
     # --- Route Setup ---
     def setup_routes(self):
@@ -389,7 +344,6 @@ class Orchestrator:
 
         @self.app.route("/")
         async def index():
-            # ... (index route handler remains the same) ...
             try:
                 template_path = os.path.join(os.path.dirname(__file__), "..", "ui", "templates", "index.html")
                 if os.path.exists(template_path):
@@ -399,7 +353,6 @@ class Orchestrator:
 
         @self.app.route("/api/approve", methods=["POST"])
         async def approve():
-            # ... (approve route handler remains the same) ...
             if self.approved: return jsonify({"status": "already_approved"}), 200
             self.approved = True; logger.info("!!! AGENCY APPROVED FOR FULL OPERATION via API !!!")
             await self.send_notification("Agency Approved", "Agency approved via API.")
@@ -407,25 +360,27 @@ class Orchestrator:
 
         @self.app.route("/api/status", methods=["GET"])
         async def api_status():
-            # ... (api_status route handler remains the same) ...
             agent_statuses = { name: agent.get_status_summary() for name, agent in self.agents.items() if hasattr(agent, "get_status_summary") }
-            llm_status = { key: info["status"] for key, info in self._llm_client_status.items() }
-            return jsonify({ "orchestrator_status": self.status if hasattr(self, "status") else "unknown", "approved_for_operation": self.approved, "agent_statuses": agent_statuses, "llm_client_status": llm_status, })
+            llm_status = self._llm_client_status.get("status", "unavailable") # Simplified status
+            return jsonify({
+                "orchestrator_status": self.status if hasattr(self, "status") else "unknown",
+                "approved_for_operation": self.approved,
+                "agent_statuses": agent_statuses,
+                "llm_client_status": {"primary": llm_status} # Show only primary status
+            })
 
         @self.app.route("/api/start_ugc", methods=["POST"])
         async def handle_start_ugc():
-            # ... (handle_start_ugc route handler remains the same) ...
             try:
                 data = await request.get_json(); client_industry = data.get("client_industry")
                 if not client_industry: return jsonify({"error": "Missing 'client_industry'"}), 400
                 task = { "action": "plan_ugc_workflow", "client_industry": client_industry, "num_videos": int(data.get("num_videos", 1)), "initial_script": data.get("script"), "target_services": data.get("target_services"), }
                 await self.delegate_task("ThinkTool", task)
-                return jsonify({ "status": "UGC workflow planning initiated via ThinkTool" }), 202,
+                return jsonify({ "status": "UGC workflow planning initiated via ThinkTool" }), 202
             except Exception as e: logger.error(f"Failed initiate UGC workflow planning: {e}", exc_info=True); return jsonify({"status": "error", "message": str(e)}), 500
 
         @self.app.route("/hosted_audio/<path:filename>")
         async def serve_hosted_audio(filename):
-            # ... (serve_hosted_audio route handler remains the same) ...
             if ".." in filename or filename.startswith("/"): return "Forbidden", 403
             try:
                 safe_path = os.path.join(self.temp_audio_dir, filename)
@@ -435,7 +390,6 @@ class Orchestrator:
 
         @self.app.websocket("/twilio_call")
         async def handle_twilio_websocket():
-            # ... (handle_twilio_websocket remains the same) ...
             call_sid = None; deepgram_live_client = None
             try:
                 while True:
@@ -458,7 +412,6 @@ class Orchestrator:
 
         @self.app.route("/track/<tracking_id>.png")
         async def handle_tracking_pixel(tracking_id):
-            # ... (handle_tracking_pixel remains the same) ...
             logger.info(f"Tracking pixel hit: {tracking_id}")
             email_agent = self.agents.get("email");
             if email_agent and hasattr(email_agent, "process_email_open"): asyncio.create_task(email_agent.process_email_open(tracking_id))
@@ -466,7 +419,6 @@ class Orchestrator:
             pixel_data = base64.b64decode("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==")
             return (pixel_data, 200, {"Content-Type": "image/gif", "Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0",})
 
-        # --- ADDED: MailerSend Webhook Handler ---
         @self.app.route("/webhooks/mailersend", methods=["POST"])
         async def handle_mailersend_webhook():
             """Handles incoming webhooks from MailerSend for bounces, complaints, etc."""
@@ -530,9 +482,7 @@ class Orchestrator:
 
             except Exception as e:
                 logger.error(f"Error processing MailerSend webhook: {e}", exc_info=True)
-                # Still return 200 to MailerSend if possible, to avoid retries,
-                # unless it's a fundamental error processing the request itself.
-                return jsonify({"status": "error", "message": "Internal server error"}), 500 # Or 200 if you want MailerSend to stop retrying
+                return jsonify({"status": "error", "message": "Internal server error"}), 500
         # --- END ADDED ---
 
         logger.info("Quart routes configured.")
@@ -542,7 +492,7 @@ class Orchestrator:
         """Initializes and runs the AI Agency Orchestrator."""
         logger.info("Orchestrator starting full initialization sequence...")
         self.running = False
-        self.status = "initializing" # Set initial status
+        self.status = "initializing"
         try:
             if not await self.initialize_database(): raise RuntimeError("Database initialization failed.")
             if not await self.initialize_clients(): raise RuntimeError("LLM Client initialization failed.")
@@ -555,12 +505,10 @@ class Orchestrator:
                 if hasattr(agent, "run") and callable(agent.run):
                     task = asyncio.create_task(agent.run(), name=f"AgentLoop_{agent_name}")
                     self.background_tasks.add(task)
-                # --- MODIFIED: Start agent if it has start() method ---
                 elif hasattr(agent, "start") and callable(agent.start):
                     task = asyncio.create_task(agent.start(), name=f"AgentStart_{agent_name}")
-                    self.background_tasks.add(task) # Track start task if needed, or just launch
+                    self.background_tasks.add(task)
                     logger.info(f"Called start() for agent {agent_name}")
-                # --- END MODIFICATION ---
                 else: logger.warning(f"Agent {agent_name} does not have a callable run or start method.")
 
             self.background_tasks.add(asyncio.create_task(self._run_periodic_data_purge(), name="PeriodicDataPurge"))
@@ -569,7 +517,7 @@ class Orchestrator:
 
             logger.info("Orchestrator entering main operational state (API/Event driven).")
             self.running = True
-            self.status = "running" # Update status
+            self.status = "running"
             self.last_feedback_time = time.time()
             self.last_purge_time = time.time()
 
@@ -603,9 +551,10 @@ class Orchestrator:
             logger.info("Initiating graceful shutdown sequence...")
             self.running = False
             self.status = "stopping"
+            shutdown_event.set() # Signal shutdown to periodic tasks
 
             # Cancel any remaining background tasks
-            all_tasks = list(self.background_tasks) # Copy set before iterating
+            all_tasks = list(self.background_tasks)
             if all_tasks:
                 logger.info(f"Cancelling {len(all_tasks)} running background tasks...")
                 for task in all_tasks:
@@ -617,7 +566,6 @@ class Orchestrator:
             agent_stop_tasks = []
             for agent_name, agent in self.agents.items():
                 if hasattr(agent, 'stop') and callable(agent.stop):
-                    # Check agent status before stopping
                     agent_status = getattr(agent, 'status', 'unknown')
                     if agent_status not in [agent.STATUS_STOPPING, agent.STATUS_STOPPED]:
                         logger.info(f"Calling stop() for agent {agent_name}...")
@@ -633,8 +581,8 @@ class Orchestrator:
 
             self.status = "stopped"
             logger.info("-------------------- Application Stopping --------------------")
-            logging.shutdown() # Ensure all logs are flushed before exiting
-            print("[INFO] Orchestrator: Process stopped.") # Final print statement
+            logging.shutdown()
+            print("[INFO] Orchestrator: Process stopped.")
 
     # --- Agent Interaction & Tooling ---
     async def delegate_task(self, agent_name: str, task_details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -649,24 +597,18 @@ class Orchestrator:
             return {"status": "error", "message": f"Agent '{agent_name}' cannot execute tasks."}
 
         task_id = task_details.get('id', str(uuid.uuid4()))
-        task_details['id'] = task_id # Ensure task has an ID
+        task_details['id'] = task_id
         logger.info(f"Delegating task {task_id} ({task_details.get('action', 'N/A')}) to {agent_name}.")
         try:
-            # Use asyncio.create_task for true background execution if execute_task is long-running
-            # result = await asyncio.create_task(agent.execute_task(task_details))
-            # For now, await directly, assuming execute_task handles backgrounding if needed
             result = await agent.execute_task(task_details)
-            tasks_processed_counter.labels(agent_name=agent_name).inc()
             return result
         except Exception as e:
             logger.error(f"Error during task delegation to {agent_name} (Task ID: {task_id}): {e}", exc_info=True)
-            error_counter.labels(agent_name=agent_name).inc()
             await self.report_error(agent_name, f"Task delegation failed: {e}", task_id)
             return {"status": "error", "message": f"Exception during task execution: {e}"}
 
     async def use_tool(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Allows agents to request tool usage via the orchestrator."""
-        # This is a placeholder - expand with actual tool implementations
         logger.info(f"Orchestrator received tool use request: {tool_name} with params: {params}")
         if tool_name == "read_file":
             file_path = params.get('path')
@@ -698,13 +640,10 @@ class Orchestrator:
         log_msg = f"ERROR reported by {agent_name}: {error_message}"
         if task_id: log_msg += f" (Task: {task_id})"
         logger.error(log_msg)
-        error_counter.labels(agent_name=agent_name).inc()
-        # Optionally send notification on critical errors
         # await self.send_notification(f"Agent Error: {agent_name}", log_msg)
 
     async def send_notification(self, title: str, message: str, level: str = "info"):
         """Sends notifications (e.g., email, Slack) using the utility function."""
-        # Use the imported send_notification function
         await send_notification(title, message, level, self.config)
 
     # --- Cache Methods ---
@@ -750,17 +689,12 @@ class Orchestrator:
     async def host_temporary_audio(self, audio_data: bytes, filename: str) -> Optional[str]:
         """Saves audio data temporarily and returns a publicly accessible URL."""
         try:
-            # Ensure filename is safe
             safe_filename = re.sub(r'[^\w\.\-]', '_', filename)
             filepath = os.path.join(self.temp_audio_dir, safe_filename)
-            with open(filepath, 'wb') as f:
-                f.write(audio_data)
-            # Construct URL using AGENCY_BASE_URL and the Quart route
-            # Use url_for if Quart context is available, otherwise construct manually
-            base_url = self.config.AGENCY_BASE_URL.rstrip('/')
+            with open(filepath, 'wb') as f: f.write(audio_data)
+            base_url = str(self.config.AGENCY_BASE_URL).rstrip('/') # Ensure string conversion
             audio_url = f"{base_url}/hosted_audio/{safe_filename}"
             logger.info(f"Hosted temporary audio at: {audio_url}")
-            # TODO: Add cleanup mechanism for old audio files
             return audio_url
         except Exception as e:
             logger.error(f"Failed to host temporary audio {filename}: {e}", exc_info=True)
@@ -770,18 +704,12 @@ class Orchestrator:
     async def request_invoice_generation(self, client_id: int, amount: float, source_call_sid: str):
         """Sends a directive to ThinkTool/LegalAgent to generate an invoice."""
         logger.info(f"Requesting invoice generation for Client {client_id}, Amount ${amount:.2f}, Source Call {source_call_sid}")
-        # Decide which agent handles invoice creation (e.g., ThinkTool plans, Legal adds notes?)
-        # For now, send directive to ThinkTool to coordinate
         directive_content = {
-            "client_id": client_id,
-            "amount": amount,
-            "source_reference": f"CallLog:{source_call_sid}",
-            "due_date_days": 14 # Example: Due in 14 days
+            "client_id": client_id, "amount": amount,
+            "source_reference": f"CallLog:{source_call_sid}", "due_date_days": 14
         }
-        await self.delegate_task("ThinkTool", { # Or maybe LegalAgent?
-            "action": "generate_invoice", # Define this action
-            "content": directive_content,
-            "priority": 3 # High priority after successful call
+        await self.delegate_task("ThinkTool", {
+            "action": "generate_invoice", "content": directive_content, "priority": 3
         })
 
     # --- Periodic Tasks ---
@@ -829,30 +757,24 @@ class Orchestrator:
             try:
                 async with self.session_maker() as session:
                     async with session.begin():
-                        # Check if account already exists
                         stmt_check = select(AccountCredentials.id).where(AccountCredentials.service == service, AccountCredentials.account_identifier == identifier).limit(1)
                         existing = await session.scalar(stmt_check)
                         if existing:
                             self.logger.warning(f"Account {identifier} for {service} already exists (ID: {existing}). Updating status/notes.")
-                            stmt_update = update(AccountCredentials).where(AccountCredentials.id == existing).values(status=status, notes=notes_str, last_used=None) # Reset last_used?
+                            stmt_update = update(AccountCredentials).where(AccountCredentials.id == existing).values(status=status, notes=notes_str, last_used=None)
                             await session.execute(stmt_update)
-                            # Fetch updated details (excluding password)
                             stmt_get = select(AccountCredentials.id, AccountCredentials.service, AccountCredentials.account_identifier, AccountCredentials.status).where(AccountCredentials.id == existing)
                             updated_details = (await session.execute(stmt_get)).mappings().first()
                             return dict(updated_details) if updated_details else None
                         else:
                             new_account = AccountCredentials(
-                                service=service,
-                                account_identifier=identifier,
-                                password=encrypted_password, # Store encrypted password
-                                status=status,
-                                notes=notes_str
+                                service=service, account_identifier=identifier,
+                                password=encrypted_password, status=status, notes=notes_str
                             )
                             session.add(new_account)
-                            await session.flush() # Get the ID before commit finishes
+                            await session.flush()
                             account_id = new_account.id
                             self.logger.info(f"Stored new account credentials for {service}/{identifier} (ID: {account_id}).")
-                            # Return details (excluding password)
                             return {"id": account_id, "service": service, "account_identifier": identifier, "status": status}
             except Exception as e:
                 self.logger.error(f"Error storing account credentials for {service}/{identifier}: {e}", exc_info=True)
@@ -866,7 +788,6 @@ class Orchestrator:
                     stmt = select(AccountCredentials).where(AccountCredentials.id == account_id)
                     account = await session.scalar(stmt)
                     if account:
-                        # Return as dict, excluding password
                         return {c.name: getattr(account, c.name) for c in AccountCredentials.__table__.columns if c.name != 'password'}
                     else: return None
             except Exception as e: self.logger.error(f"Error fetching account details ID {account_id}: {e}"); return None
@@ -879,25 +800,21 @@ class Orchestrator:
                     stmt = select(AccountCredentials).where(
                         AccountCredentials.service == service,
                         AccountCredentials.status == 'active'
-                    ).order_by(func.random()).limit(1) # Random selection for basic rotation
+                    ).order_by(func.random()).limit(1)
                     account = await session.scalar(stmt)
                     if account:
-                        # Update last used time
-                        async with session.begin(): # Start new transaction for update
+                        async with session.begin():
                                 account.last_used = datetime.now(timezone.utc)
                                 await session.merge(account)
-                        # Return details excluding password
                         return {c.name: getattr(account, c.name) for c in AccountCredentials.__table__.columns if c.name != 'password'}
                     else: return None
             except Exception as e: self.logger.error(f"Error finding active account for {service}: {e}"); return None
 
         async def get_secret(self, identifier: str) -> Optional[str]:
             """Retrieves and decrypts a secret (e.g., password) using identifier."""
-            # This assumes identifier uniquely maps to one secret (e.g., account ID or vault path)
-            # For account passwords, use identifier = account_id
             if not self.session_maker: self.logger.error("DB session_maker unavailable."); return None
             try:
-                account_id = int(identifier) # Assume identifier is account ID for now
+                account_id = int(identifier)
                 async with self.session_maker() as session:
                     stmt = select(AccountCredentials.password).where(AccountCredentials.id == account_id)
                     encrypted_pw = await session.scalar(stmt)
@@ -908,3 +825,5 @@ class Orchestrator:
                     else: self.logger.warning(f"No password found for account ID {account_id}."); return None
             except ValueError: self.logger.error(f"Invalid identifier for get_secret (expected account ID): {identifier}"); return None
             except Exception as e: self.logger.error(f"Error retrieving secret for ID {identifier}: {e}"); return None
+
+# --- End of agents/orchestrator.py ---

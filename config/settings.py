@@ -1,7 +1,7 @@
 # Filename: config/settings.py
 # Description: Configuration settings for the Synapse AI Sales System,
 #              validated using Pydantic. Secrets loaded from environment variables.
-# Version: 2.4 (Removed Redundant Validator, User Models)
+# Version: 2.5 (Removed Optional API Keys, Pydantic V2 Fix, User Models)
 
 import os
 import json
@@ -14,9 +14,6 @@ from typing import Dict, List, Optional, Any, Union
 
 # Configure logger for settings loading issues
 logger = logging.getLogger(__name__)
-
-# --- Helper Functions ---
-# Removed get_env_variable as BaseSettings handles it
 
 class Settings(BaseSettings):
     """
@@ -35,8 +32,7 @@ class Settings(BaseSettings):
 
     # --- LLM / OpenRouter Configuration ---
     OPENROUTER_API_KEY: Optional[str] = Field(default=None, description="Primary OpenRouter API Key. Load from env var 'OPENROUTER_API_KEY'.")
-    OPENROUTER_API_KEY_1: Optional[str] = Field(default=None, description="Additional OpenRouter API Key 1. Load from env var 'OPENROUTER_API_KEY_1'.")
-    OPENROUTER_API_KEY_2: Optional[str] = Field(default=None, description="Additional OpenRouter API Key 2. Load from env var 'OPENROUTER_API_KEY_2'.")
+    # REMOVED OPENROUTER_API_KEY_1 and OPENROUTER_API_KEY_2
     # --- USING MODELS FROM USER'S <fgh> tag ---
     OPENROUTER_MODELS: Dict[str, str] = {
         # --- High Power ---
@@ -148,13 +144,13 @@ class Settings(BaseSettings):
     )
 
     # --- Custom Validators (Pydantic V2 Syntax) ---
-    # REMOVED load_from_env_first validator - BaseSettings handles precedence
+    # REMOVED load_from_env_first validator
 
     @field_validator(
         'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY', 'HOSTINGER_IMAP_PASS',
         'TWILIO_AUTH_TOKEN', 'DEEPGRAM_API_KEY', 'SENDER_COMPANY_ADDRESS',
         'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY', 'CLAY_API_KEY', 'SMARTPROXY_PASSWORD',
-        'OPENROUTER_API_KEY_1', 'OPENROUTER_API_KEY_2',
+        # REMOVED OPENROUTER_API_KEY_1, OPENROUTER_API_KEY_2 from list
         mode='before', check_fields=False
     )
     @classmethod
@@ -163,7 +159,6 @@ class Settings(BaseSettings):
         field_name = info.field_name
         if not field_name: return v
         env_var_name = field_name.upper()
-        # Value 'v' already includes the value loaded from environment by BaseSettings
         value = v
 
         essential_secrets = {
@@ -172,14 +167,15 @@ class Settings(BaseSettings):
         }
         optional_secrets = {
             'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY', 'CLAY_API_KEY',
-            'SMARTPROXY_PASSWORD', 'OPENROUTER_API_KEY_1', 'OPENROUTER_API_KEY_2'
+            'SMARTPROXY_PASSWORD'
+            # REMOVED OPENROUTER_API_KEY_1, OPENROUTER_API_KEY_2
         }
 
         if field_name in essential_secrets and not value:
             raise ValueError(f"CRITICAL: Required secret '{field_name}' (env var '{env_var_name}') is not set.")
         elif field_name in optional_secrets and not value:
             logger.warning(f"Optional secret '{field_name}' (env var '{env_var_name}') is not set. Related features will be disabled.")
-        elif field_name == 'DATABASE_ENCRYPTION_KEY' and value and len(str(value)) < 32: # Ensure value is treated as string for len check
+        elif field_name == 'DATABASE_ENCRYPTION_KEY' and value and len(str(value)) < 32:
             raise ValueError(f"CRITICAL: '{field_name}' must be at least 32 characters long.")
 
         return value
@@ -195,7 +191,6 @@ class Settings(BaseSettings):
         field_name = info.field_name
         if not field_name: return v
         env_var_name = field_name.upper()
-        # Value 'v' already includes the value loaded from environment by BaseSettings
         if not v:
             raise ValueError(f"CRITICAL: Required setting '{field_name}' (env var '{env_var_name}') is not set.")
         return v
@@ -218,13 +213,13 @@ class Settings(BaseSettings):
             'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY',
             'HOSTINGER_IMAP_PASS', 'TWILIO_AUTH_TOKEN', 'DEEPGRAM_API_KEY',
             'SENDER_COMPANY_ADDRESS', 'CLAY_API_KEY', 'SMARTPROXY_PASSWORD',
-            'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY',
-            'OPENROUTER_API_KEY_1', 'OPENROUTER_API_KEY_2'
+            'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY'
+            # REMOVED OPENROUTER_API_KEY_1, OPENROUTER_API_KEY_2
         }
         if hasattr(self, secret_name):
             value = getattr(self, secret_name)
             if secret_name in secret_fields and value:
-                return str(value) # Ensure return value is string
+                return str(value)
             elif secret_name not in secret_fields:
                  logger.warning(f"Attempted to get non-secret attribute '{secret_name}' via get_secret.")
                  return str(value) if value is not None else None
@@ -233,8 +228,9 @@ class Settings(BaseSettings):
         else:
             logger.warning(f"Attempted to get non-existent attribute '{secret_name}' via get_secret.")
             return None
-
+        
 # --- Instantiate Settings ---
+
 try:
     settings = Settings()
     logger.info(f"Settings loaded for App: {settings.APP_NAME} v{settings.APP_VERSION}")
@@ -249,3 +245,5 @@ except ValueError as e:
 except Exception as e:
     logger.critical(f"CRITICAL ERROR: Unexpected error during settings initialization: {e}", exc_info=True)
     raise SystemExit(f"Unexpected settings initialization error: {e}")
+
+# --- End of config/settings.py ---
