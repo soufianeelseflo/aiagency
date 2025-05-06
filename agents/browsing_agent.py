@@ -1,6 +1,6 @@
 # Filename: agents/browsing_agent.py
-# Description: Agentic Browsing Agent with enhanced plan execution.
-# Version: 3.5 (Removed hardcoded OpenAI model preference)
+# Description: Agentic Browsing Agent with fully integrated dynamic temp mail UI automation and deep learning logging.
+# Version: 3.8 (Level 40+ Grand Transmutation - Unyielding Detail, FULL CODE)
 
 import asyncio
 import logging
@@ -33,19 +33,15 @@ except ImportError:
         raise SystemExit("Cannot import GeniusAgentBase - critical dependency missing.")
 
 try:
-    # Assuming models.py defines these structures
     from models import KnowledgeFragment, AccountCredentials, StrategicDirective
 except ImportError:
      logging.error("Failed to import models from parent directory. Ensure models.py is accessible.")
-     # Define dummy classes if models are unavailable during direct execution
      class KnowledgeFragment: pass
      class AccountCredentials: pass
      class StrategicDirective: pass
 
 try:
     from config.settings import settings
-    # Assuming database utils handle encryption/decryption if needed elsewhere
-    # from utils.database import encrypt_data, decrypt_data
 except ImportError:
     logging.critical("Failed to import settings. Check config/ directory.")
     raise SystemExit("Cannot import settings - critical dependency missing.")
@@ -65,160 +61,212 @@ except ImportError:
     logging.critical("Faker library not found. Requires 'pip install Faker'. Needed for account creation.")
     raise
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
-from bs4 import BeautifulSoup # Keep for auxiliary parsing if needed
+from bs4 import BeautifulSoup
 
-# --- Temporary Email Service Integration (Conceptual - Requires specific implementation) ---
-# Replace with actual library/API client for a service like 1secmail, mail.tm, etc.
-# This is a placeholder demonstrating the required functions.
-class TempMailService:
-    """Conceptual interface for a temporary email service."""
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key
-        self.faker = Faker()
-        # Base URL or client setup for the chosen temp mail service API
-        self.base_url = "https://api.1secmail.com/v1/" # Example using 1secmail (public, rate-limited)
-
-    async def get_new_email_address(self) -> Optional[str]:
-        """Generates a new temporary email address."""
-        # Public services might generate random ones, private might allow custom domains
-        try:
-            # Simple random generation for public services like 1secmail
-            async with aiohttp.ClientSession() as session:
-                 # Generate a plausible but random username
-                 local_part = self.faker.user_name() + str(random.randint(1000,9999))
-                 # Get available domains from the service
-                 async with session.get(f"{self.base_url}?action=getDomainList") as response:
-                     if response.status == 200:
-                         domains = await response.json()
-                         if domains:
-                             domain = random.choice(domains)
-                             email = f"{local_part}@{domain}"
-                             logger.info(f"Generated temporary email: {email}")
-                             return email
-                     logger.error(f"Failed to get domains from temp mail service. Status: {response.status}")
-                     return None
-        except Exception as e:
-            logger.error(f"Error generating temp email address: {e}", exc_info=True)
-            return None
-
-    async def get_verification_link(self, email_address: str, timeout_seconds: int = 180, keyword: str = "verify") -> Optional[str]:
-        """Polls the inbox for an email containing a verification link."""
-        if not email_address or '@' not in email_address: return None
-        local_part, domain = email_address.split('@', 1)
-        start_time = time.time()
-        logger.info(f"Polling temp email inbox for {email_address} for verification link (keyword: '{keyword}')...")
-        while time.time() - start_time < timeout_seconds:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    # Check for new messages
-                    url = f"{self.base_url}?action=getMessages&login={local_part}&domain={domain}"
-                    async with session.get(url) as response:
-                        if response.status == 200:
-                            messages = await response.json()
-                            if messages:
-                                # Check newest messages first
-                                for message_header in reversed(messages):
-                                    message_id = message_header.get('id')
-                                    # Fetch full message content
-                                    msg_url = f"{self.base_url}?action=readMessage&login={local_part}&domain={domain}&id={message_id}"
-                                    async with session.get(msg_url) as msg_response:
-                                        if msg_response.status == 200:
-                                            message_content = await msg_response.json()
-                                            body = message_content.get('htmlBody') or message_content.get('textBody', '')
-                                            # Search for a link containing the keyword
-                                            # More robust regex might be needed for different link formats
-                                            match = re.search(rf'href=["\'](https?://[^\s"\'<>]+{re.escape(keyword)}[^\s"\'<>]+)["\']', body, re.IGNORECASE)
-                                            if match:
-                                                link = match.group(1)
-                                                # Decode HTML entities
-                                                link = unquote(link.replace('&amp;', '&'))
-                                                logger.info(f"Found verification link in email {message_id}: {link}")
-                                                # Optionally delete the message after finding the link
-                                                # await self._delete_message(local_part, domain, message_id)
-                                                return link
-                                            else:
-                                                logger.debug(f"Message {message_id} found, but no link with keyword '{keyword}'.")
-                                        else: logger.warning(f"Failed to read message {message_id}. Status: {msg_response.status}")
-                            else: logger.debug(f"No messages found yet for {email_address}.")
-                        else: logger.warning(f"Failed to get messages for {email_address}. Status: {response.status}")
-            except Exception as e:
-                logger.error(f"Error polling temp email inbox: {e}", exc_info=True)
-            await asyncio.sleep(15) # Wait before polling again
-        logger.warning(f"Timeout waiting for verification link for {email_address}.")
-        return None
-
-    async def _delete_message(self, local_part: str, domain: str, message_id: int):
-         """(Optional) Deletes a message from the temp inbox."""
-         # Implementation depends heavily on the specific temp mail service API
-         logger.debug(f"Placeholder: Would delete message {message_id} for {local_part}@{domain}")
-         pass
-
-# Configure logger
 logger = logging.getLogger(__name__)
-op_logger = logging.getLogger('OperationalLog') # Assumes operational log is configured elsewhere
+op_logger = logging.getLogger('OperationalLog')
 
-# --- Meta Prompt ---
 BROWSING_AGENT_META_PROMPT = """
-You are the BrowsingAgent within the Synapse AI Sales System, operating with full autonomy.
-Your Core Mandate: Execute complex web interactions with genius-level adaptability and human-like stealth. This includes advanced UI automation using visual reasoning (analyzing screenshots), managing numerous accounts with unique proxies, **autonomously creating new accounts** for services when required (including handling CAPTCHAs and email verification via integrated tools), performing targeted information discovery (Google Dorking), and extracting data. You operate without human intervention. Prioritize task success and robust anti-detection measures.
+You are the BrowsingAgent (Level 40+ Transmuted Entity) within the Synapse AI Sales System.
+Your Core Mandate: Execute any web interaction with god-tier adaptability, human-like stealth, and AI-native cunning. This includes flawless visual UI automation, autonomous management and creation of diverse accounts (including dynamic temp mail acquisition via UI exploits), targeted information discovery, and resilient data extraction. You operate with extreme agency and resourcefulness, leaving no detail to chance.
 Key Responsibilities:
-1.  **Advanced Visual UI Automation:** Interact with any web application via its UI. Use visual reasoning (analyzing screenshots via multimodal LLM) as the primary method to find elements, determine actions (login, click, input, upload, download, scroll), and navigate complex flows like **new account signup**. Adapt dynamically to UI changes. Handle standard HTML elements and visually identify non-standard controls.
-2.  **Autonomous Account Management:** Manage a pool of accounts (fetched from DB). Assign and use unique proxies (via Orchestrator) for each context. Track account status. **Crucially, if a task requires an account for a service (e.g., free trial) and no suitable active account exists, initiate and execute the automated new account creation process for that service.**
-3.  **Account Creation Engine:** Utilize generated identities (via Faker) and temporary email services (via integrated tools) to complete signup forms. Visually identify and interact with form fields, buttons, checkboxes. Handle CAPTCHAs by visually identifying them (e.g., "I'm not a robot" checkbox) and instructing the execution layer, or by describing visual challenges (e.g., "select all images with buses") to the multimodal LLM for coordinate-based interaction. Handle email verification by retrieving links/codes from the temporary email service and completing the verification step in the browser context.
-4.  **Google Dorking & Credential Acquisition:** Execute Google Dorking scans as directed by ThinkTool. Generate dorks, perform searches, scrape results, visit links, and use LLM analysis (including visual, if analyzing screenshots of pages) to extract potential login credentials or sensitive information. Report findings securely. Attempt to utilize discovered credentials for login tasks if directed.
-5.  **Human Emulation & Stealth:** Simulate human browsing patterns (variable delays, realistic mouse movements/scrolls, non-linear navigation paths, occasional minor "hesitations") to defeat bot detection systems.
-6.  **Resilient Execution:** Gracefully handle UI changes, anti-bot measures, proxy failures, timeouts, login issues, and account creation failures using retries, adaptive strategies driven by visual LLM analysis, and robust error reporting.
-7.  **Collaboration & Reporting:** Execute tasks delegated by Orchestrator/ThinkTool. Report extracted data, automation outcomes (including detailed account creation success/failure), errors, and operational insights. Log relevant findings securely to the Knowledge Base via ThinkTool.
-**Goal:** Be the agency's fully autonomous, highly adaptable, multi-skilled operative on the web, capable of complex visual UI automation, seamless account creation, and stealthy information gathering across diverse platforms without human oversight. Execute instructions precisely and achieve objectives reliably.
+1.  **Visual UI Domination (Unyielding Detail):** Interact with any web application via its UI. Use advanced visual reasoning (analyzing screenshots via multimodal LLM) as the *primary* method to find elements, determine actions (click, input, scroll, upload, download, navigate, solve CAPTCHAs, handle popups/alerts), and navigate complex flows including dynamic account signup processes. Adapt to UI changes instantly. Every LLM decision for UI interaction must be precise and justified.
+2.  **Autonomous Account Lifecycle Management:** Manage a pool of accounts. Assign unique proxies. **Crucially, if a task requires an account for a service (e.g., free trial, platform access) and no suitable active account exists, initiate and execute the automated new account creation process for that service, leveraging dynamic temp mail UI automation.**
+3.  **Dynamic Temp Mail UI Exploitation Engine (Fully Realized):** When needing a temporary email for verification, request "temp mail UI exploit scripts" from ThinkTool. Execute these multi-step UI automation scripts against various free temp mail websites to obtain email addresses and retrieve verification links/codes directly from their UI using the internal `_execute_web_ui_sub_task` method. Fall back to direct API (e.g., 1secmail) only if configured and all UI attempts fail.
+4.  **Stealth & Anti-Detection Mastery:** Simulate human browsing patterns with high fidelity (variable delays, complex mouse movements, non-linear navigation, realistic fingerprinting via Playwright context options). Dynamically adapt to anti-bot measures based on visual analysis and ThinkTool insights.
+5.  **Resilient & Adaptive Execution (Zero Tolerance for Ambiguity):** Gracefully handle UI changes, anti-bot measures, proxy failures, timeouts, login issues, and account creation failures using retries, adaptive strategies driven by visual LLM analysis, and robust error reporting. Log detailed outcomes of all significant UI automation tasks to the Knowledge Base.
+6.  **Deep Learning Data Provision:** After UI automation tasks, log comprehensive KFs detailing the service, goal, success, steps, errors, proxy, account, timings, CAPTCHA encounters, and LLM decision points. This data fuels ThinkTool's strategic learning and your own adaptation.
+**Goal:** Be the agency's ultimate web operative, capable of any visual UI automation, seamless account creation using UI exploits for temp mail, and stealthy information gathering, all driven by AI-native reasoning, meticulous execution, and a relentless pursuit of task success.
 """
 
+class TempMailService:
+    """
+    Enhanced TempMailService (L35+):
+    Leverages BrowsingAgent's UI automation capabilities to interact with temp mail sites.
+    """
+    def __init__(self, orchestrator: Any, browsing_agent_instance: 'BrowsingAgent'):
+        self.orchestrator = orchestrator
+        self.browsing_agent = browsing_agent_instance
+        self.faker = Faker()
+        self.logger = logging.getLogger(f"{__name__}.TempMailService")
+        self.fallback_1secmail_enabled = settings.get("TEMP_MAIL_ENABLE_1SECMAIL_FALLBACK", False)
+        self.fallback_1secmail_base_url = "https://www.1secmail.com/api/v1/"
+
+    async def _execute_temp_mail_ui_sub_task(self, sub_task_goal: str, site_url: str, ui_steps_or_direct_goal: Union[List[Dict], str], existing_context_id: Optional[str] = None) -> Dict[str, Any]:
+        return await self.browsing_agent._execute_web_ui_sub_task(
+            service_name=f"TempMail_{urlparse(site_url).netloc if site_url else 'UnknownSite'}",
+            goal=sub_task_goal,
+            initial_url=site_url,
+            ui_steps_or_direct_goal=ui_steps_or_direct_goal,
+            max_sub_steps=20,
+            use_existing_context_id=existing_context_id,
+            is_temp_mail_operation=True
+        )
+
+    async def get_new_email_address(self) -> Optional[Dict[str, str]]:
+        think_tool = self.orchestrator.agents.get('think')
+        if not think_tool: self.logger.error("ThinkTool unavailable for TempMailService."); return None
+
+        exploit_fragments = await think_tool.query_knowledge_base(
+            data_types=['temp_mail_exploit_script'], tags=['temp_mail', 'working_get_email'], limit=3, min_relevance=0.75
+        )
+        if exploit_fragments:
+            random.shuffle(exploit_fragments)
+            for fragment in exploit_fragments:
+                try:
+                    script_data = json.loads(fragment.content)
+                    script_name = script_data.get("script_name", f"KF_{fragment.id}_get_email")
+                    initial_url = script_data.get("site_url")
+                    ui_goal_for_sub_task = script_data.get("goal_to_get_email", f"Navigate {initial_url} and visually identify and extract a newly generated temporary email address. Store it as 'email_address'.")
+                    
+                    if initial_url:
+                        self.logger.info(f"Attempting to get temp email via UI script: {script_name} on {initial_url}")
+                        result = await self._execute_temp_mail_ui_sub_task(
+                            sub_task_goal=ui_goal_for_sub_task,
+                            site_url=initial_url,
+                            ui_steps_or_direct_goal=ui_goal_for_sub_task
+                        )
+                        if result.get("status") == "success" and result.get("extracted_data", {}).get("email_address"):
+                            email_address = result["extracted_data"]["email_address"]
+                            self.logger.info(f"Successfully obtained temp email via UI: {email_address} using script {script_name}")
+                            return {
+                                "email": email_address,
+                                "context_id_for_checking": result.get("context_id"),
+                                "method": "ui_automation",
+                                "script_name_used": script_name,
+                                "site_url_used": initial_url
+                            }
+                        else:
+                            self.logger.warning(f"UI script {script_name} failed to get email: {result.get('message')}")
+                except Exception as e: self.logger.error(f"Error processing temp mail exploit script {fragment.id}: {e}")
+
+        if self.fallback_1secmail_enabled:
+            self.logger.info("UI temp mail failed or no scripts. Falling back to 1secmail API.")
+            try:
+                async with aiohttp.ClientSession() as session:
+                     local_part = self.faker.user_name() + str(random.randint(1000,9999))
+                     async with session.get(f"{self.fallback_1secmail_base_url}?action=getDomainList") as response:
+                         if response.status == 200:
+                             domains = await response.json()
+                             if domains and isinstance(domains, list) and len(domains) > 0:
+                                 domain = random.choice(domains)
+                                 email = f"{local_part}@{domain}"
+                                 self.logger.info(f"Generated temporary email via 1secmail API: {email}")
+                                 return {"email": email, "context_id_for_checking": None, "method": "api_fallback_1secmail"}
+                             else: self.logger.error(f"1secmail API returned no domains or invalid format: {domains}")
+                         else: self.logger.error(f"Failed to get domains from 1secmail API. Status: {response.status}, Body: {await response.text()}")
+                         return None
+            except Exception as e:
+                self.logger.error(f"Error generating temp email via 1secmail API: {e}", exc_info=True)
+        else:
+            self.logger.warning("No working temp mail UI scripts and 1secmail fallback is disabled.")
+        return None
+
+    async def get_verification_link(self, email_info: Dict[str, str], timeout_seconds: int = 240, keyword: str = "verify") -> Optional[str]:
+        email_address = email_info.get("email")
+        method = email_info.get("method")
+        context_id = email_info.get("context_id_for_checking")
+        site_url = email_info.get("site_url_used")
+
+        if not email_address: return None
+        think_tool = self.orchestrator.agents.get('think')
+
+        if method == "ui_automation" and context_id and site_url and think_tool:
+            self.logger.info(f"Attempting to get verification link for {email_address} via UI automation (context: {context_id}, site: {site_url}).")
+            ui_goal_for_sub_task = f"On the temp mail site {site_url} (currently in context for {email_address}), locate the inbox for this email. Find an email containing the keyword '{keyword}' or a clear verification/confirmation link/button. Extract the full URL of that link and store it as 'verification_link'."
+            
+            result = await self._execute_temp_mail_ui_sub_task(
+                sub_task_goal=ui_goal_for_sub_task,
+                site_url=site_url,
+                ui_steps_or_direct_goal=ui_goal_for_sub_task,
+                existing_context_id=context_id
+            )
+            if result.get("status") == "success" and result.get("extracted_data", {}).get("verification_link"):
+                link = result["extracted_data"]["verification_link"]
+                self.logger.info(f"Successfully obtained verification link via UI: {link}")
+                return link
+            else:
+                self.logger.warning(f"UI automation failed to get verification link for {email_address}: {result.get('message')}")
+                return None
+        elif method == "api_fallback_1secmail":
+            if '@' not in email_address: return None
+            local_part, domain = email_address.split('@', 1)
+            start_time = time.time()
+            self.logger.info(f"Polling 1secmail API for {email_address} for verification link (keyword: '{keyword}')...")
+            while time.time() - start_time < timeout_seconds:
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        url = f"{self.fallback_1secmail_base_url}?action=getMessages&login={local_part}&domain={domain}"
+                        async with session.get(url) as response:
+                            if response.status == 200:
+                                messages = await response.json()
+                                if messages and isinstance(messages, list):
+                                    for message_header in reversed(messages):
+                                        message_id = message_header.get('id')
+                                        msg_url = f"{self.fallback_1secmail_base_url}?action=readMessage&login={local_part}&domain={domain}&id={message_id}"
+                                        async with session.get(msg_url) as msg_response:
+                                            if msg_response.status == 200:
+                                                message_content = await msg_response.json()
+                                                body = message_content.get('htmlBody') or message_content.get('textBody', '')
+                                                link_patterns = [
+                                                    rf'href=["\'](https?://[^\s"\'<>]*{re.escape(keyword)}[^\s"\'<>]+)["\']',
+                                                    rf'(https?://[^\s"\'<>]*{re.escape(keyword)}[^\s"\'<>]+)',
+                                                    r'https?://[a-zA-Z0-9.-]*\.?service-provider\.com/verify\?[^ \n\r"\']+'
+                                                ]
+                                                found_link = None
+                                                for pat in link_patterns:
+                                                    match = re.search(pat, body, re.IGNORECASE)
+                                                    if match: found_link = match.group(1); break
+                                                if found_link:
+                                                    link = unquote(found_link.replace('&amp;', '&'))
+                                                    self.logger.info(f"Found verification link in 1secmail {message_id}: {link}")
+                                                    return link
+                                else: self.logger.debug(f"No messages found yet for {email_address} via 1secmail API.")
+                            else: self.logger.warning(f"Failed to get messages for {email_address} via 1secmail API. Status: {response.status}, Body: {await response.text()}")
+                except Exception as e: self.logger.error(f"Error polling 1secmail API: {e}", exc_info=True)
+                await asyncio.sleep(20)
+            self.logger.warning(f"Timeout waiting for verification link for {email_address} via 1secmail API.")
+            return None
+        else:
+            self.logger.error(f"Unknown temp mail method '{method}' for {email_address}. Cannot get verification link.")
+            return None
+
+# --- BrowsingAgent Class ---
 class BrowsingAgent(GeniusAgentBase):
-    """
-    Browsing Agent (Genius Level - Fully Autonomous): Handles web scraping, visual UI automation,
-    autonomous multi-account management including creation, Google Dorking, credential acquisition,
-    and data extraction with human emulation.
-    Version: 3.5 (Removed hardcoded OpenAI model preference)
-    """
     AGENT_NAME = "BrowsingAgent"
 
     def __init__(self, session_maker: async_sessionmaker[AsyncSession], orchestrator: Any, smartproxy_password: Optional[str] = None):
-        """Initializes the Autonomous BrowsingAgent."""
-        super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, session_maker=session_maker)
+        super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, session_maker=session_maker, config=getattr(orchestrator, 'config', settings))
         self.meta_prompt = BROWSING_AGENT_META_PROMPT
-        self.think_tool = orchestrator.agents.get('think') # Assumes ThinkTool agent exists for KB logging/complex reasoning
+        self.think_tool = orchestrator.agents.get('think')
 
-        # --- Internal State Initialization ---
-        self.internal_state = getattr(self, 'internal_state', {}) # Ensure state exists
+        self.internal_state = getattr(self, 'internal_state', {})
         self.internal_state['playwright_instance'] = None
         self.internal_state['browser_instance'] = None
-        self.internal_state['browser_contexts'] = {} # context_id -> BrowserContext
-        self.internal_state['active_pages'] = {} # page_id -> {'page': Page, 'context_id': str}
-        self.internal_state['context_account_map'] = {} # context_id -> account_details dict (from DB or newly created)
-        self.internal_state['context_proxy_map'] = {} # context_id -> proxy_info dict
-        self.internal_state['proxy_stats'] = {} # proxy_url -> {'success': N, 'failure': N, 'last_used': datetime}
-        self.internal_state['user_agent'] = self.config.get("BROWSER_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36") # Use a recent UA
-        self.internal_state['max_concurrent_contexts'] = int(self.config.get("BROWSER_MAX_CONCURRENT_CONTEXTS", 5)) # Lower default for resource intensity
+        self.internal_state['browser_contexts'] = {}
+        self.internal_state['active_pages'] = {}
+        self.internal_state['context_account_map'] = {}
+        self.internal_state['context_proxy_map'] = {}
+        self.internal_state['proxy_stats'] = {}
+        self.internal_state['user_agent'] = self.config.get("BROWSER_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+        self.internal_state['max_concurrent_contexts'] = int(self.config.get("BROWSER_MAX_CONCURRENT_PAGES", 2))
         self.internal_state['context_semaphore'] = asyncio.Semaphore(self.internal_state['max_concurrent_contexts'])
-        self.internal_state['default_timeout_ms'] = int(self.config.get("BROWSER_DEFAULT_TIMEOUT_MS", 120000)) # Longer default timeout
-        self.temp_dir = self.config.get("TEMP_DOWNLOAD_DIR", "/app/temp_downloads") # Dedicated temp dir
+        self.internal_state['default_timeout_ms'] = int(self.config.get("BROWSER_DEFAULT_TIMEOUT_MS", 100000))
+        self.temp_dir = self.config.get("TEMP_DOWNLOAD_DIR", "/app/temp_downloads")
         os.makedirs(self.temp_dir, exist_ok=True)
 
-        # --- Initialize Tools ---
         self.faker = Faker()
-        # Initialize Temp Mail Service (replace with actual implementation/config)
-        self.temp_mail_service = TempMailService(api_key=self.config.get("TEMP_MAIL_API_KEY"))
+        self.temp_mail_service = TempMailService(orchestrator=self.orchestrator, browsing_agent_instance=self)
 
-        self.logger.info(f"{self.AGENT_NAME} v3.5 (Removed hardcoded OpenAI model) initialized. Max Contexts: {self.internal_state['max_concurrent_contexts']}")
+        self.logger.info(f"{self.AGENT_NAME} v3.8 (L40+ Unyielding Detail) initialized. Max Contexts: {self.internal_state['max_concurrent_contexts']}")
 
     async def log_operation(self, level: str, message: str):
-        """Helper to log to the operational log file."""
         log_func = getattr(op_logger, level.lower(), op_logger.debug)
         prefix = ""
         if level.lower() in ['warning', 'error', 'critical']: prefix = f"**{level.upper()}:** "
         try: log_func(f"- [{self.agent_name}] {prefix}{message}")
-        except Exception as log_err: logger.error(f"Failed to write to operational log: {log_err}")
+        except Exception as log_err: logger.error(f"Failed to write to OP log from {self.agent_name}: {log_err}")
 
-    # --- Playwright Lifecycle Management (Robust checks) ---
     async def _ensure_playwright_running(self):
         if self.internal_state.get('playwright_instance'): return
         self.logger.info("Initializing Playwright...")
@@ -243,10 +291,11 @@ class BrowsingAgent(GeniusAgentBase):
          self.logger.info("Launching persistent Playwright browser instance...")
          try:
              self.internal_state['browser_instance'] = await self.internal_state['playwright_instance'].chromium.launch(
-                 headless=self.config.get("BROWSER_HEADLESS", True), # Configurable headless
+                 headless=self.config.get("BROWSER_HEADLESS", True),
                  args=[
                      '--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
-                     '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled' # Anti-detection
+                     '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled',
+                     '--window-size=1920,1080'
                  ]
              )
              self.logger.info(f"Persistent browser launched successfully (Headless: {self.config.get('BROWSER_HEADLESS', True)}).")
@@ -261,19 +310,17 @@ class BrowsingAgent(GeniusAgentBase):
         context_id = f"ctx_{uuid.uuid4().hex[:8]}"
         context: Optional[BrowserContext] = None
         try:
-            # Ensure proxy is obtained if not provided
             if not proxy_info:
-                proxy_purpose = f"context_{account_details.get('service', 'general')}_{account_details.get('id', 'new')}" if account_details else "general_context_creation"
+                proxy_purpose = f"context_{account_details.get('service', 'general')}_{account_details.get('id', 'new')}" if account_details else "general_browsing_context"
                 if hasattr(self.orchestrator, 'get_proxy'):
-                    proxy_info = await self.orchestrator.get_proxy(purpose=proxy_purpose, quality_level='high') # Request high quality proxy
-                else:
-                    self.logger.error("Orchestrator missing get_proxy method. Cannot obtain proxy."); proxy_info = None
+                    proxy_info = await self.orchestrator.get_proxy(purpose=proxy_purpose, quality_level='high_stealth')
+                else: self.logger.error("Orchestrator missing get_proxy method."); proxy_info = None
 
             playwright_proxy = None
             if proxy_info and proxy_info.get('server'):
                  playwright_proxy = { "server": proxy_info["server"], "username": proxy_info.get("username"), "password": proxy_info.get("password") }
-                 self.logger.info(f"Using proxy {proxy_info['server'].split('@')[-1]} for new context {context_id}")
-            else: self.logger.warning(f"No valid proxy provided or obtained for new context {context_id}. Proceeding without proxy.")
+                 self.logger.info(f"Using proxy {proxy_info['server'].split('@')[-1] if '@' in proxy_info['server'] else proxy_info['server']} for new context {context_id}")
+            else: self.logger.warning(f"No valid proxy for new context {context_id}. Proceeding without proxy (higher risk).")
 
             browser = self.internal_state['browser_instance']
             if not browser or not browser.is_connected(): raise RuntimeError("Browser instance unavailable.")
@@ -281,18 +328,18 @@ class BrowsingAgent(GeniusAgentBase):
             context = await browser.new_context(
                 user_agent=self.internal_state['user_agent'], proxy=playwright_proxy,
                 java_script_enabled=True, ignore_https_errors=True,
-                viewport={'width': random.randint(1366, 1920), 'height': random.randint(768, 1080)}, # Common resolutions
-                locale=random.choice(['en-US', 'en-GB']), # More common locales
-                timezone_id=random.choice(['America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Europe/London', 'Europe/Paris']),
-                permissions=['geolocation'], # Grant common permissions
-                geolocation=self._generate_random_geo(), # Add random geolocation
-                # color_scheme='light', # Can randomize light/dark
-                bypass_csp=True # May help with certain interactions, use cautiously
+                viewport={'width': random.randint(1400, 1920), 'height': random.randint(800, 1080)},
+                locale=random.choice(['en-US', 'en-GB', 'en-CA']),
+                timezone_id=random.choice(['America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Europe/London', 'Europe/Berlin']),
+                permissions=['geolocation', 'notifications'],
+                geolocation=self._generate_random_geo(),
+                bypass_csp=True
             )
-            # Anti-fingerprinting measures (basic)
             await context.add_init_script("""
-                if (navigator.webdriver) { Object.defineProperty(navigator, 'webdriver', { get: () => false }); }
-                // Add more sophisticated fingerprinting evasions if necessary
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5].map(i => ({name: `Plugin ${i}`, filename: `plugin${i}.dll`, description: `Description for plugin ${i}`})) });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                // Further fingerprinting randomization can be added here (e.g., WebGL, Canvas, AudioContext)
             """)
 
             self.internal_state['browser_contexts'][context_id] = context
@@ -301,25 +348,25 @@ class BrowsingAgent(GeniusAgentBase):
             self.logger.info(f"Created new browser context (ID: {context_id}). Active: {len(self.internal_state['browser_contexts'])}")
             return context_id, context
         except Exception as e:
-            self.internal_state['context_semaphore'].release() # Release semaphore on failure
+            self.internal_state['context_semaphore'].release()
             self.logger.error(f"Failed to create new browser context: {e}", exc_info=True)
-            if context: await self._close_context(context_id, context) # Attempt cleanup
+            if context and hasattr(context, 'close'): await self._close_context(context_id, context)
             raise
 
     def _generate_random_geo(self) -> Dict:
-        # Generate plausible geolocations (e.g., within major cities)
         locations = [
-            {'latitude': 40.7128, 'longitude': -74.0060, 'accuracy': random.uniform(30, 150)}, # NYC
-            {'latitude': 34.0522, 'longitude': -118.2437, 'accuracy': random.uniform(30, 150)}, # LA
-            {'latitude': 51.5074, 'longitude': -0.1278, 'accuracy': random.uniform(30, 150)}, # London
-            {'latitude': 48.8566, 'longitude': 2.3522, 'accuracy': random.uniform(30, 150)}, # Paris
+            {'latitude': 40.7128, 'longitude': -74.0060, 'accuracy': random.uniform(20, 100)}, # NYC
+            {'latitude': 34.0522, 'longitude': -118.2437, 'accuracy': random.uniform(20, 100)}, # LA
+            {'latitude': 51.5074, 'longitude': -0.1278, 'accuracy': random.uniform(20, 100)}, # London
+            {'latitude': 48.8566, 'longitude': 2.3522, 'accuracy': random.uniform(20, 100)}, # Paris
+            {'latitude': 35.6895, 'longitude': 139.6917, 'accuracy': random.uniform(20, 100)}, # Tokyo
+            {'latitude': -33.8688, 'longitude': 151.2093, 'accuracy': random.uniform(20, 100)}, # Sydney
         ]
         return random.choice(locations)
 
     async def _close_context(self, context_id: str, context: Optional[BrowserContext] = None):
-        # (Implementation largely unchanged from v3.2, ensures semaphore release)
         context_to_close = context or self.internal_state['browser_contexts'].get(context_id)
-        semaphore_released = False
+        semaphore_released_in_this_call = False
         if context_to_close:
             try:
                 pages_to_remove = [pid for pid, pdata in self.internal_state['active_pages'].items() if pdata['context_id'] == context_id]
@@ -327,9 +374,9 @@ class BrowsingAgent(GeniusAgentBase):
                     page_obj = self.internal_state['active_pages'].pop(pid, {}).get('page')
                     if page_obj and not page_obj.is_closed():
                         try: await page_obj.close(run_before_unload=True)
-                        except Exception as page_close_err: logger.warning(f"Error closing page {pid}: {page_close_err}")
+                        except Exception as page_close_err: logger.warning(f"Error closing page {pid} in context {context_id}: {page_close_err}")
 
-                if not context_to_close.is_closed(): # Check if already closed
+                if hasattr(context_to_close, 'is_closed') and not context_to_close.is_closed(): # Check if already closed
                     await context_to_close.close()
                     self.logger.info(f"Closed browser context (ID: {context_id}).")
             except Exception as e: self.logger.warning(f"Error closing context {context_id}: {e}")
@@ -338,58 +385,53 @@ class BrowsingAgent(GeniusAgentBase):
                 self.internal_state['context_account_map'].pop(context_id, None)
                 self.internal_state['context_proxy_map'].pop(context_id, None)
                 try:
-                    # Check semaphore count before releasing
-                    # Note: This check isn't perfectly thread-safe but reduces ValueErrors
                     if self.internal_state['context_semaphore']._value < self.internal_state['max_concurrent_contexts']:
                          self.internal_state['context_semaphore'].release()
-                         semaphore_released = True
-                except ValueError: pass # Already released or race condition
-                except AttributeError: pass # Semaphore might not be initialized if error occurred early
-                self.logger.debug(f"Context cleanup complete for {context_id}. Active: {len(self.internal_state['browser_contexts'])}. Semaphore released: {semaphore_released}")
+                         semaphore_released_in_this_call = True
+                except (ValueError, AttributeError): pass 
+                self.logger.debug(f"Context cleanup complete for {context_id}. Active contexts: {len(self.internal_state['browser_contexts'])}. Semaphore released now: {semaphore_released_in_this_call}")
         else:
-             # If context object wasn't found but ID exists in map, still try to clean up maps and release semaphore
-             maps_cleaned = False
-             if context_id in self.internal_state['browser_contexts']: self.internal_state['browser_contexts'].pop(context_id, None); maps_cleaned = True
-             if context_id in self.internal_state['context_account_map']: self.internal_state['context_account_map'].pop(context_id, None); maps_cleaned = True
-             if context_id in self.internal_state['context_proxy_map']: self.internal_state['context_proxy_map'].pop(context_id, None); maps_cleaned = True
-
-             if maps_cleaned:
+             cleaned_from_maps = False
+             if self.internal_state['browser_contexts'].pop(context_id, None): cleaned_from_maps = True
+             if self.internal_state['context_account_map'].pop(context_id, None): cleaned_from_maps = True
+             if self.internal_state['context_proxy_map'].pop(context_id, None): cleaned_from_maps = True
+             if cleaned_from_maps:
+                 self.logger.warning(f"Context object for ID {context_id} not found, but removed from internal maps.")
                  try:
                      if self.internal_state['context_semaphore']._value < self.internal_state['max_concurrent_contexts']:
                           self.internal_state['context_semaphore'].release()
-                          semaphore_released = True
-                 except ValueError: pass
-                 except AttributeError: pass
-                 self.logger.warning(f"Context object not found for ID {context_id}, but cleaned maps. Semaphore released: {semaphore_released}")
-
+                          semaphore_released_in_this_call = True
+                 except (ValueError, AttributeError) : pass
+                 self.logger.debug(f"Semaphore released after cleaning maps for {context_id}: {semaphore_released_in_this_call}")
 
     async def _get_page_for_context(self, context_id: str) -> Tuple[str, Page]:
-        # (Implementation largely unchanged from v3.2)
         context = self.internal_state['browser_contexts'].get(context_id)
-        if not context: raise ValueError(f"Context ID {context_id} not found.")
+        if not context: raise ValueError(f"Context ID {context_id} not found for page retrieval.")
         try:
-            if context.is_closed(): raise PlaywrightError(f"Context {context_id} is already closed.")
-        except AttributeError: # Handle case where context object might be None unexpectedly
-             raise ValueError(f"Context ID {context_id} is invalid or None.")
+            if hasattr(context, 'is_closed') and context.is_closed(): raise PlaywrightError(f"Context {context_id} is already closed.")
+        except AttributeError: raise ValueError(f"Context ID {context_id} is invalid or None.")
 
-        existing_page = next((pdata['page'] for pid, pdata in self.internal_state['active_pages'].items() if pdata['context_id'] == context_id and not pdata['page'].is_closed()), None)
-        if existing_page:
-             page_id = next(pid for pid, pdata in self.internal_state['active_pages'].items() if pdata['page'] == existing_page)
-             self.logger.debug(f"Reusing existing page {page_id} for context {context_id}")
-             return page_id, existing_page
+        for pid, pdata in self.internal_state['active_pages'].items():
+            if pdata['context_id'] == context_id and pdata['page'] and not pdata['page'].is_closed():
+                self.logger.debug(f"Reusing existing page {pid} for context {context_id}")
+                return pid, pdata['page']
 
         page_id = f"page_{uuid.uuid4().hex[:8]}"
         page = await context.new_page()
         page.set_default_timeout(self.internal_state['default_timeout_ms'])
         self.internal_state['active_pages'][page_id] = {'page': page, 'context_id': context_id}
-        self.logger.info(f"Created new page (ID: {page_id}) within context {context_id}.")
+        self.logger.info(f"Created new page (ID: {page_id}) within context {context_id}. Total active pages: {len(self.internal_state['active_pages'])}")
         return page_id, page
 
     async def _close_browser_and_playwright(self):
-        # (Implementation largely unchanged from v3.2)
         self.logger.info("Closing all browser contexts and stopping Playwright...")
         context_ids = list(self.internal_state['browser_contexts'].keys())
-        if context_ids: await asyncio.gather(*(self._close_context(cid) for cid in context_ids), return_exceptions=True)
+        if context_ids:
+            for cid in context_ids: await self._close_context(cid)
+        self.internal_state['browser_contexts'].clear()
+        self.internal_state['active_pages'].clear()
+        self.internal_state['context_account_map'].clear()
+        self.internal_state['context_proxy_map'].clear()
 
         browser = self.internal_state.get('browser_instance')
         if browser and browser.is_connected():
@@ -402,48 +444,29 @@ class BrowsingAgent(GeniusAgentBase):
             try: await playwright_instance.stop(); self.logger.info("Playwright instance stopped.")
             except Exception as e: self.logger.error(f"Error stopping Playwright: {e}", exc_info=True)
         self.internal_state['playwright_instance'] = None
-        self.internal_state['active_pages'] = {} # Clear active pages map
 
-    # --- Proxy Management ---
-    def _update_proxy_stats(self, context_id: Optional[str], success: bool):
-        # (Implementation unchanged from v3.2)
+    async def _update_proxy_stats(self, context_id: Optional[str], success: bool):
         if not context_id: return
         proxy_info = self.internal_state['context_proxy_map'].get(context_id)
         if not proxy_info or not proxy_info.get('server'): return
         proxy_url = proxy_info['server']
         now = datetime.now(timezone.utc)
-        if proxy_url not in self.internal_state['proxy_stats']: self.internal_state['proxy_stats'][proxy_url] = {'success': 0, 'failure': 0, 'last_used': now}
+        if proxy_url not in self.internal_state['proxy_stats']: self.internal_state['proxy_stats'][proxy_url] = {'success': 0, 'failure': 0, 'last_used': now, 'first_used': now, 'associated_context_ids': set()}
+        self.internal_state['proxy_stats'][proxy_url]['associated_context_ids'].add(context_id)
         if success: self.internal_state['proxy_stats'][proxy_url]['success'] += 1
         else: self.internal_state['proxy_stats'][proxy_url]['failure'] += 1
         self.internal_state['proxy_stats'][proxy_url]['last_used'] = now
-        # Optional: Add logic to report consistently failing proxies immediately
-        # total_attempts = self.internal_state['proxy_stats'][proxy_url]['success'] + self.internal_state['proxy_stats'][proxy_url]['failure']
-        # if total_attempts > 10 and self.internal_state['proxy_stats'][proxy_url]['failure'] / total_attempts > 0.7:
-        #     asyncio.create_task(self.orchestrator.report_proxy_issue(proxy_url, "High failure rate"))
-
-
-    # --- Core Abstract Method Implementations ---
 
     async def plan_task(self, task_details: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-        """
-        Generates a plan for browsing tasks. Complex plans should come from ThinkTool.
-        This agent focuses on executing steps, including autonomous decisions within steps.
-        """
-        # Planning is kept simple here; complex sequences are assumed to be planned by ThinkTool
-        # and passed as a single 'web_ui_automate' or multi-step task.
         action = task_details.get('action')
         plan = []
         await self._internal_think(f"Received task: {action}. Planning execution.", details=task_details)
-
-        # Simple tasks can have basic plans generated here
         if action == 'scrape_website':
             url = task_details.get('url')
             if not url: raise ValueError("Missing 'url' for scrape_website task.")
             plan.append({"step": 1, "action": "open_page", "tool": "browser", "params": {"url": url}})
-            # Extraction logic decided within execute_step based on params
-            plan.append({"step": 2, "action": "extract_data", "tool": "browser", "params": task_details}) # Pass all details
+            plan.append({"step": 2, "action": "extract_data", "tool": "browser", "params": task_details})
             plan.append({"step": 3, "action": "close_context", "tool": "browser", "params": {}})
-
         elif action == 'google_dork_scan':
             target = task_details.get('target')
             if not target: raise ValueError("Missing target for google_dork_scan")
@@ -452,119 +475,295 @@ class BrowsingAgent(GeniusAgentBase):
             plan.append({"step": 2, "action": "execute_dork_searches", "tool": "browser", "params": {}})
             plan.append({"step": 3, "action": "analyze_dork_results", "tool": "browser", "params": {}})
             plan.append({"step": 4, "action": "close_context", "tool": "browser", "params": {}})
-
-        # Complex UI automation is treated as a single execution step for this agent
         elif action == 'web_ui_automate':
              goal = task_details.get('goal', 'Unknown UI Goal')
              service = task_details.get('service', 'Unknown Service')
              plan.append({"step": 1, "action": f"Execute UI Automation: {service} - {goal}", "tool": "browser", "params": task_details})
-             # Cleanup might be handled within the automation or as a separate step if needed
              plan.append({"step": 2, "action": "close_context", "tool": "browser", "params": {"reason": "UI Automation Complete"}})
-
         else:
-            # Assume other actions are single steps handled by execute_step
-            self.logger.info(f"No specific plan generated for action '{action}'. Will attempt direct execution.")
-            plan.append({"step": 1, "action": action, "tool": "browser", "params": task_details}) # Default to browser tool
+            self.logger.info(f"No specific plan generated by BrowsingAgent for action '{action}'. Will attempt direct execution via execute_step.")
+            plan.append({"step": 1, "action": action, "tool": "browser", "params": task_details})
             plan.append({"step": 2, "action": "close_context", "tool": "browser", "params": {"reason": f"Task '{action}' Complete"}})
-
         self.logger.info(f"Generated plan with {len(plan)} steps for action '{action}'.")
         return plan
 
-    @retry(stop=stop_after_attempt(4), # Increase retries slightly
-           wait=wait_exponential(multiplier=1.5, min=5, max=90), # Longer max wait
-           retry=retry_if_exception_type((PlaywrightTimeoutError, PlaywrightError)), # Retry on more Playwright errors
-           reraise=True) # Reraise the exception after final attempt fails
+    async def _execute_web_ui_sub_task(self, service_name: str, goal: str, initial_url: Optional[str] = None, ui_steps_or_direct_goal: Union[List[Dict], str] = "Achieve specified goal", max_sub_steps: int = 15, use_existing_context_id: Optional[str] = None, is_temp_mail_operation: bool = False) -> Dict[str, Any]:
+        sub_task_id = f"sub_{uuid.uuid4().hex[:6]}"
+        self.logger.info(f"Executing UI sub-task '{sub_task_id}': Service='{service_name}', Goal='{goal}'")
+        final_result = {"status": "failure", "message": "Sub-task failed initialization.", "extracted_data": {}, "context_id": use_existing_context_id}
+        
+        context_id = use_existing_context_id
+        page_id = None
+        page: Optional[Page] = None
+        created_new_context_for_subtask = False
+        sub_task_start_time = time.time()
+        log_content_for_kb_sub: Dict[str, Any] = {
+            "sub_task_id": sub_task_id, "service": service_name, "goal_summary": goal[:100],
+            "timestamp_start": datetime.now(timezone.utc).isoformat(),
+            "is_temp_mail_op": is_temp_mail_operation
+        }
+
+        try:
+            if context_id:
+                context_obj = self.internal_state['browser_contexts'].get(context_id)
+                if not context_obj or (hasattr(context_obj, 'is_closed') and context_obj.is_closed()):
+                    self.logger.warning(f"Provided context {context_id} for sub-task is closed/invalid. Creating new one.")
+                    await self._close_context(context_id) # Ensure old one is cleaned if it was in our map
+                    context_id = None
+                else:
+                    try:
+                        active_page_for_context = next((pdata['page'] for pid, pdata in self.internal_state['active_pages'].items() if pdata['context_id'] == context_id and not pdata['page'].is_closed()), None)
+                        if active_page_for_context:
+                            page = active_page_for_context
+                            page_id = next(pid for pid, pdata in self.internal_state['active_pages'].items() if pdata['page'] == page)
+                            self.logger.debug(f"Reusing page {page_id} in context {context_id} for sub-task.")
+                        else:
+                            page_id, page = await self._get_page_for_context(context_id)
+                        
+                        if initial_url and page.url != initial_url:
+                            self.logger.info(f"Sub-task navigating page {page_id} to initial_url: {initial_url}")
+                            await page.goto(initial_url, wait_until='domcontentloaded', timeout=45000)
+                    except Exception as page_err:
+                        self.logger.warning(f"Failed to get/use page in existing context {context_id} for sub-task: {page_err}. Creating new context.")
+                        if page_id and page_id in self.internal_state['active_pages']: del self.internal_state['active_pages'][page_id]
+                        context_id = None; page = None; page_id = None
+            if not context_id:
+                proxy_purpose = f"sub_task_{service_name}_{goal[:20].replace(' ','_')}"
+                proxy_quality = 'standard_plus' if is_temp_mail_operation else 'high_stealth'
+                proxy = await self.orchestrator.get_proxy(purpose=proxy_purpose, quality_level=proxy_quality)
+                context_id, _ = await self._get_new_context(proxy_info=proxy)
+                page_id, page = await self._get_page_for_context(context_id)
+                created_new_context_for_subtask = True
+                if initial_url:
+                    await page.goto(initial_url, wait_until='domcontentloaded', timeout=60000)
+            
+            final_result["context_id"] = context_id
+            log_content_for_kb_sub["context_id_used"] = context_id
+            proxy_details_sub = self.internal_state['context_proxy_map'].get(context_id)
+            log_content_for_kb_sub["proxy_used_details"] = proxy_details_sub.get('server','N/A').split('@')[-1] if proxy_details_sub and proxy_details_sub.get('server') else "None"
+
+
+            current_step_count = 0; last_action_summary = "Sub-task UI automation started."
+            automation_successful = False; extracted_sub_task_data = {}
+            log_content_for_kb_sub["visual_llm_decisions"] = 0
+            micro_steps_to_execute = []
+
+            if isinstance(ui_steps_or_direct_goal, str): # LLM needs to plan micro-steps
+                initial_planning_context = {
+                    "task": "Plan micro-steps for UI sub-task", "service_context": service_name, "overall_sub_task_goal": ui_steps_or_direct_goal,
+                    "current_url": page.url, "page_text_content_snippet": (await page.evaluate("document.body.innerText"))[:2000],
+                    "desired_output_format": "JSON list of micro-action objects: [{\"action_description\": \"brief description of micro-step for LLM to execute next (e.g., 'Click the generate email button', 'Copy the displayed email text')\"}] - Keep steps very small and precise."
+                }
+                planning_prompt = await self.generate_dynamic_prompt(initial_planning_context)
+                screenshot_for_planning = await page.screenshot(full_page=True)
+                planned_steps_json = await self.orchestrator.call_llm(agent_name=self.AGENT_NAME, prompt=planning_prompt, temperature=0.1, max_tokens=1000, is_json_output=True, image_data=screenshot_for_planning)
+                if planned_steps_json:
+                    parsed_plan = self._parse_llm_json(planned_steps_json, expect_type=list)
+                    if parsed_plan and isinstance(parsed_plan, list): micro_steps_to_execute = parsed_plan
+                    else: self.logger.warning(f"Sub-task {sub_task_id}: LLM failed to provide valid micro-steps. Using overall goal."); micro_steps_to_execute = [{"action_description": ui_steps_or_direct_goal}]
+                else: micro_steps_to_execute = [{"action_description": ui_steps_or_direct_goal}]
+            elif isinstance(ui_steps_or_direct_goal, list): micro_steps_to_execute = ui_steps_or_direct_goal
+            
+            if not micro_steps_to_execute : micro_steps_to_execute = [{"action_description": goal}] # Ensure there's at least one step (the overall goal)
+
+            self.logger.info(f"Sub-task {sub_task_id}: Beginning execution of {len(micro_steps_to_execute)} micro-steps.")
+
+            while current_step_count < max_sub_steps and current_step_count < len(micro_steps_to_execute):
+                current_micro_goal_desc = micro_steps_to_execute[current_step_count].get("action_description", goal)
+                await self._internal_think(f"UI Sub-Task {sub_task_id} Micro-Step {current_step_count + 1}/{len(micro_steps_to_execute)}: Goal='{current_micro_goal_desc}'", details={"last_action_result": last_action_summary})
+                await self._human_like_delay(page, short=True)
+
+                screenshot_bytes = await page.screenshot(full_page=True)
+                page_text_content = await page.evaluate("document.body.innerText")
+                current_url = page.url
+                log_content_for_kb_sub["visual_llm_decisions"] +=1
+
+                automation_task_context = {
+                    "task": "Determine next UI action for current micro-step of sub-task",
+                    "service_context": service_name, "current_micro_goal": current_micro_goal_desc, "overall_sub_task_goal": goal,
+                    "page_text_content_snippet": page_text_content[:4000], "current_url": current_url,
+                    "last_action_result": last_action_summary, "current_step_in_sub_task": f"{current_step_count + 1}/{len(micro_steps_to_execute)}",
+                    "available_actions": ["click", "input", "scroll", "wait", "extract_text", "finish_current_micro_goal", "finish_entire_sub_task", "error_sub_task"],
+                    "desired_output_format": "JSON: {\"action_type\": \"<chosen_action>\", \"selector\": \"<css_selector_or_xpath_or_visual_desc>\", \"coordinates\": {\"x\": float, \"y\": float}?, \"text_to_input\": \"<string>\"?, \"extraction_target_description\": \"<if extract_text, what to extract, e.g., 'the email address displayed'>\"?, \"output_variable_name\": \"<if extract_text, name to store result, e.g., 'email_address' or 'verification_link'>\"?, \"reasoning\": \"<Explanation>\", \"error_message\": \"<If error_sub_task>\"}"
+                }
+                llm_prompt = await self.generate_dynamic_prompt(automation_task_context)
+                action_json_str = await self.orchestrator.call_llm(
+                    agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.05, max_tokens=1000, is_json_output=True, image_data=screenshot_bytes
+                )
+                if not action_json_str: last_action_summary = "LLM failed to determine next sub-task action."; current_step_count += 1; continue
+                try:
+                    action_data = self._parse_llm_json(action_json_str)
+                    if not action_data: raise ValueError("Failed to parse LLM action JSON for sub-task.")
+                    action_type = action_data.get('action_type')
+                    reasoning = action_data.get('reasoning', 'N/A')
+                    self.logger.info(f"Sub-Task {sub_task_id} Micro-Step {current_step_count + 1}: LLM decided action: {action_type}. Reasoning: {reasoning}")
+                    action_executed_successfully = False; action_result_message = f"Sub-task action '{action_type}' initiated."
+
+                    if action_type == 'click':
+                        selector = action_data.get('selector'); coords = action_data.get('coordinates')
+                        target_element = await self._find_element(page, selector, coords, visual_description_if_no_selector=selector if not coords else None)
+                        if target_element: await self._human_click(page, target_element); action_executed_successfully = True; action_result_message = f"Clicked element: '{selector or coords or 'visual_target'}'."
+                        else: action_result_message = f"Click failed: Element not found for '{selector or coords or 'visual_target'}'."
+                    elif action_type == 'input':
+                        selector = action_data.get('selector'); coords = action_data.get('coordinates')
+                        text_to_input = action_data.get('text_to_input', "")
+                        target_element = await self._find_element(page, selector, coords, visual_description_if_no_selector=selector if not coords else None)
+                        if target_element:
+                             await self._human_fill(page, target_element, str(text_to_input))
+                             action_executed_successfully = True; action_result_message = f"Input text into element '{selector or coords or 'visual_target'}'."
+                        else: action_result_message = f"Input failed: Element not found for '{selector or coords or 'visual_target'}'."
+                    elif action_type == 'extract_text':
+                        selector = action_data.get('selector'); coords = action_data.get('coordinates')
+                        target_description = action_data.get('extraction_target_description', 'target_text_value')
+                        output_var_name = action_data.get('output_variable_name', target_description.lower().replace(" ", "_"))
+                        element_to_extract = await self._find_element(page, selector, coords, visual_description_if_no_selector=selector if not coords else target_description)
+                        if element_to_extract:
+                            extracted_text = await element_to_extract.text_content(timeout=10000) or await element_to_extract.inner_text(timeout=10000) or await element_to_extract.input_value(timeout=10000)
+                            if extracted_text is not None:
+                                extracted_sub_task_data[output_var_name] = extracted_text.strip()
+                                action_executed_successfully = True; action_result_message = f"Extracted text for '{target_description}' as '{output_var_name}': '{extracted_text.strip()[:50]}...'."
+                            else: action_result_message = f"Extraction failed: Element found but no text for '{target_description}'."
+                        else: action_result_message = f"Extraction failed: Element not found for '{selector or target_description}'."
+                    elif action_type == 'scroll':
+                        direction = action_data.get('scroll_direction', 'down'); await self._human_scroll(page, direction); action_executed_successfully = True; action_result_message = f"Scrolled {direction}."
+                    elif action_type == 'wait':
+                        wait_ms = action_data.get('wait_time_ms', random.randint(1000, 3000)); await page.wait_for_timeout(wait_ms); action_executed_successfully = True; action_result_message = f"Waited for {wait_ms} ms."
+                    elif action_type == 'finish_current_micro_goal':
+                        action_executed_successfully = True; action_result_message = f"Micro-goal '{current_micro_goal_desc}' deemed complete."
+                        current_step_count += 1; continue
+                    elif action_type == 'finish_entire_sub_task':
+                        automation_successful = True; action_executed_successfully = True
+                        action_result_message = f"Entire sub-task goal '{goal}' deemed complete by LLM."
+                        self.logger.info(action_result_message); break
+                    elif action_type == 'error_sub_task':
+                        error_msg = action_data.get('error_message', 'LLM indicated unrecoverable error for sub-task.')
+                        self.logger.error(f"LLM reported error during UI sub-task: {error_msg}")
+                        raise RuntimeError(f"UI Sub-task failed: {error_msg}")
+                    else: action_result_message = f"Unsupported action type for sub-task: {action_type}"
+                    
+                    last_action_summary = action_result_message
+                    if not action_executed_successfully:
+                        self.logger.warning(f"Sub-Task {sub_task_id} Micro-Step {current_step_count + 1}: Action '{action_type}' failed. Msg: {action_result_message}")
+                        raise RuntimeError(f"UI Sub-task micro-step failed: {action_type}. Msg: {last_action_summary}")
+                    current_step_count += 1
+                except Exception as auto_err:
+                    last_action_summary = f"Unexpected error executing sub-task action '{action_data.get('action_type', 'unknown') if 'action_data' in locals() else 'unknown'}': {auto_err}"
+                    self.logger.error(f"Sub-Task {sub_task_id} Micro-Step {current_step_count + 1}: {last_action_summary}", exc_info=True)
+                    raise RuntimeError(f"UI Sub-task failed due to error: {auto_err}") from auto_err
+
+            log_content_for_kb_sub["steps_taken_count"] = current_step_count
+            if automation_successful:
+                final_result["status"] = "success"
+                final_result["message"] = f"Sub-task '{goal}' completed successfully."
+                final_result["extracted_data"] = extracted_sub_task_data
+            else:
+                final_result["message"] = f"Sub-task '{goal}' reached max steps ({max_sub_steps}) or exhausted micro-steps without explicit 'finish_entire_sub_task'. Last action: {last_action_summary}"
+                final_result["extracted_data"] = extracted_sub_task_data # Return any partial data
+            log_content_for_kb_sub["success_status"] = automation_successful
+            log_content_for_kb_sub["final_url_or_state"] = page.url if page else "Page unavailable"
+
+        except Exception as e:
+            self.logger.error(f"Critical error during UI sub-task '{sub_task_id}': {e}", exc_info=True)
+            final_result["message"] = f"Critical error in sub-task: {e}"
+            final_result["extracted_data"] = extracted_sub_task_data
+            log_content_for_kb_sub.update({"status_final": "failure", "error_type": type(e).__name__, "error_message": str(e)})
+        finally:
+            log_content_for_kb_sub["timestamp_end"] = datetime.now(timezone.utc).isoformat()
+            log_content_for_kb_sub["duration_seconds"] = round(time.time() - sub_task_start_time, 2)
+            if self.think_tool:
+                await self.think_tool.execute_task({
+                    "action": "log_knowledge_fragment", "fragment_data": {
+                        "agent_source": self.AGENT_NAME, "data_type": "browsing_ui_sub_task_outcome",
+                        "content": log_content_for_kb_sub,
+                        "tags": [self.AGENT_NAME, "sub_task", service_name, final_result.get("status", "unknown")],
+                        "relevance_score": 0.65 if final_result.get("status") == "success" else 0.45 }})
+            if created_new_context_for_subtask and context_id and not use_existing_context_id:
+                await self._close_context(context_id)
+        return final_result
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.2, min=3, max=45), retry=retry_if_exception_type(PlaywrightTimeoutError), reraise=True)
     async def execute_step(self, step: Dict[str, Any], task_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Executes a single step, handling account selection/creation and visual UI automation."""
         step_action = step.get('action')
         tool = step.get('tool')
-        params = step.get('params', {}).copy() # Base parameters for the step
+        params = step.get('params', {}).copy()
         step_num = step.get('step', '?')
+        step_start_time = time.time()
         result = {"status": "failure", "message": f"Step action '{step_action}' not implemented or failed initialization."}
+        
+        log_content_for_kb: Dict[str, Any] = {
+            "task_id": task_context.get("id", "N/A"), "step_num": step_num, "action_planned": step_action, "tool_planned": tool,
+            "service_target": params.get("service", params.get("target_platform", "UnknownService")),
+            "goal_summary": params.get("goal", step_action)[:150],
+            "timestamp_start": datetime.now(timezone.utc).isoformat(),
+            "params_input": {k: (v[:100]+"..." if isinstance(v,str) and len(v)>100 else v) for k,v in params.items() if k != 'account_password'}
+        }
 
         context_id = task_context.get("current_context_id")
         page_id = task_context.get("current_page_id")
-        context: Optional[BrowserContext] = None
         page: Optional[Page] = None
+        context_obj: Optional[BrowserContext] = None # Define context_obj
 
         try:
-            # --- Ensure Context and Page ---
-            context, page, context_id, page_id = await self._ensure_context_and_page(step, task_context)
-            task_context["current_context_id"] = context_id # Update task context
+            context_obj, page, context_id, page_id = await self._ensure_context_and_page(step, task_context)
+            task_context["current_context_id"] = context_id
             task_context["current_page_id"] = page_id
+            log_content_for_kb["context_id_used"] = context_id
+            proxy_details = self.internal_state['context_proxy_map'].get(context_id)
+            log_content_for_kb["proxy_used_details"] = proxy_details.get('server','N/A').split('@')[-1] if proxy_details and proxy_details.get('server') else "None"
+            account_ctx_details = self.internal_state['context_account_map'].get(context_id, {})
+            log_content_for_kb["account_id_used"] = account_ctx_details.get('id')
+            log_content_for_kb["account_identifier_used"] = account_ctx_details.get('identifier')
 
-            proxy_url_used = self.internal_state['context_proxy_map'].get(context_id, {}).get('server')
             await self._internal_think(f"Executing step {step_num}: {step_action} in context {context_id}", details=params)
 
-            # --- Action Execution ---
             if tool == 'browser':
-                # --- Navigation ---
                 if step_action == 'open_page':
                     url = params.get('url')
-                    if not url: raise ValueError("Missing 'url' parameter.")
+                    if not url: raise ValueError("Missing 'url' parameter for open_page.")
                     self.logger.info(f"Navigating page {page_id} (Context: {context_id}) to URL: {url}")
                     response = await page.goto(url, wait_until='domcontentloaded', timeout=self.internal_state['default_timeout_ms'])
                     status_code = response.status if response else None
-                    self.logger.info(f"Page {page_id} navigated to {url}. Status: {status_code}")
+                    self.logger.info(f"Page {page_id} navigated to {url}. Status: {status_code}, Final URL: {page.url}")
                     if not response or not response.ok:
-                        page_content = await page.content()
-                        raise PlaywrightError(f"Failed to load page {url}. Status: {status_code}. Content: {page_content[:500]}...")
+                        page_content_snippet = (await page.content())[:500]
+                        raise PlaywrightError(f"Failed to load page {url}. Status: {status_code}. Content: {page_content_snippet}...")
                     await self._human_like_delay(page)
-                    result = {"status": "success", "message": f"Page opened: {url}", "page_id": page_id, "context_id": context_id, "status_code": status_code}
-
-                # --- Data Extraction (Consolidated) ---
+                    result = {"status": "success", "message": f"Page opened: {url}", "page_id": page_id, "context_id": context_id, "status_code": status_code, "final_url": page.url}
+                
                 elif step_action == 'extract_data':
-                    selectors = params.get('selectors')
-                    extraction_prompt = params.get('extraction_prompt')
-                    extract_main = params.get('extract_main_content', False)
-                    output_var = params.get('output_var') # Check if output needs storing
-
-                    extracted_data = {}
+                    selectors = params.get('selectors'); extraction_prompt = params.get('extraction_prompt')
+                    extract_main = params.get('extract_main_content', False); output_var = params.get('output_var')
+                    extracted_data = {}; 
                     if selectors and isinstance(selectors, dict):
                         self.logger.info(f"Extracting data using selectors on page {page_id}.")
-                        for key, selector in selectors.items():
+                        for key, selector_val in selectors.items():
                             try:
-                                element = page.locator(selector).first
-                                content = await element.text_content(timeout=15000) or \
-                                          await element.inner_text(timeout=15000) or \
-                                          await element.input_value(timeout=15000) or \
-                                          await element.get_attribute('value', timeout=15000) or \
-                                          await element.get_attribute('href', timeout=15000) or \
-                                          await element.get_attribute('src', timeout=15000) or \
-                                          await element.get_attribute('aria-label', timeout=15000) or ""
+                                element = page.locator(selector_val).first
+                                await element.wait_for(state='visible', timeout=15000)
+                                content_options = [
+                                    await element.text_content(timeout=10000), await element.inner_text(timeout=10000),
+                                    await element.input_value(timeout=10000), await element.get_attribute('value', timeout=10000),
+                                    await element.get_attribute('href', timeout=10000), await element.get_attribute('src', timeout=10000),
+                                    await element.get_attribute('aria-label', timeout=10000)
+                                ]
+                                content = next((opt for opt in content_options if opt is not None and opt.strip()), "")
                                 extracted_data[key] = content.strip()
-                            except Exception as e: self.logger.warning(f"Selector '{selector}' for key '{key}' failed: {e}"); extracted_data[key] = None
+                            except Exception as e_sel: self.logger.warning(f"Selector '{selector_val}' for key '{key}' failed: {e_sel}"); extracted_data[key] = None
                         result = {"status": "success", "message": "Data extracted via selectors.", "extracted_data": extracted_data}
-
                     elif extraction_prompt:
                         self.logger.info(f"Extracting data using Visual LLM analysis on page {page_id}.")
-                        screenshot_bytes = await page.screenshot()
-                        page_text_content = await page.evaluate("document.body.innerText")
+                        screenshot_bytes = await page.screenshot(full_page=True); page_text_content = await page.evaluate("document.body.innerText")
                         llm_task_context = {
                             "task": "Extract structured data from webpage using visual and text context",
-                            "webpage_text_content": page_text_content[:6000],
-                            "extraction_instructions": extraction_prompt,
-                            "current_url": page.url,
-                            "desired_output_format": "JSON containing the extracted data according to instructions."
-                        }
-                        llm_prompt = await self.generate_dynamic_prompt(llm_task_context)
-                        # --- MODIFIED: Removed hardcoded model_preference ---
-                        llm_response_str = await self.orchestrator.call_llm(
-                            agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.1,
-                            max_tokens=2000, is_json_output=True,
-                            image_data=screenshot_bytes # Let orchestrator pick model based on image_data presence
-                        )
-                        # --- END MODIFICATION ---
+                            "webpage_text_content": page_text_content[:8000], "extraction_instructions": extraction_prompt,
+                            "current_url": page.url, "desired_output_format": "JSON containing the extracted data according to instructions."}
+                        llm_prompt_str = await self.generate_dynamic_prompt(llm_task_context)
+                        llm_response_str = await self.orchestrator.call_llm(agent_name=self.AGENT_NAME, prompt=llm_prompt_str, temperature=0.05, max_tokens=2500, is_json_output=True, image_data=screenshot_bytes)
                         if llm_response_str:
-                             try:
-                                 parsed_data = self._parse_llm_json(llm_response_str)
-                                 if parsed_data is not None:
-                                     extracted_data = parsed_data # Store parsed data
-                                     result = {"status": "success", "message": "Data extracted via Visual LLM.", "extracted_data": extracted_data}
-                                 else: raise ValueError("LLM response was not valid JSON.")
-                             except Exception as parse_err: result = {"status": "failure", "message": f"LLM returned invalid JSON or failed parsing: {parse_err}", "raw_output": llm_response_str}
-                        else: result = {"status": "failure", "message": "Visual LLM analysis returned no response."}
-
+                             parsed_llm_data = self._parse_llm_json(llm_response_str)
+                             if parsed_llm_data is not None: extracted_data = parsed_llm_data; result = {"status": "success", "message": "Data extracted via Visual LLM.", "extracted_data": extracted_data}
+                             else: result = {"status": "failure", "message": "LLM returned invalid JSON for extraction.", "raw_output": llm_response_str}
+                        else: result = {"status": "failure", "message": "Visual LLM analysis returned no response for extraction."}
                     elif extract_main:
                         self.logger.info(f"Extracting main text content from page {page_id}.")
                         try:
@@ -572,1253 +771,542 @@ class BrowsingAgent(GeniusAgentBase):
                             extracted_data = {"main_text": body_text.strip() if body_text else ""}
                             result = {"status": "success", "message": "Main content extracted.", "extracted_data": extracted_data}
                         except Exception as text_err: result = {"status": "failure", "message": f"Error extracting main text: {text_err}"}
-                    else:
-                        result = {"status": "warning", "message": "No extraction method specified (selectors, prompt, or main_content)."}
-
-                    # Store extracted data in task_context if output_var is specified
-                    if output_var and result.get("status") == "success":
-                        task_context[output_var] = extracted_data
-                        self.logger.info(f"Stored extracted data in task context variable: '{output_var}'")
-                        result["result_data"] = extracted_data # Also return in step result
-
-                # --- Visual UI Automation (Primary Interaction Method) ---
+                    else: result = {"status": "warning", "message": "No extraction method specified (selectors, prompt, or main_content)."}
+                    if output_var and result.get("status") == "success": task_context[output_var] = extracted_data; result["result_data"] = extracted_data
+                
                 elif step_action.startswith('Execute UI Automation') or step_action == 'web_ui_automate':
-                    service = params.get('service', 'Unknown Service')
-                    goal = params.get('goal', 'Perform UI actions')
-                    # --- MODIFICATION START: Handle input_vars ---
-                    # Get base parameters specific to this automation goal
-                    automate_params = params.get('params', {}).copy()
-                    # Get input variables defined in the step plan
+                    automate_goal = params.get('goal', 'Perform UI actions')
+                    automate_params = params.get('params', {}).copy() # Specific params for this goal
                     input_vars_map = params.get('input_vars', {})
-                    # Resolve input variables using the main task_context
                     resolved_input_vars = {}
                     for param_name, context_var_name in input_vars_map.items():
                         if isinstance(context_var_name, str) and context_var_name.startswith('$'):
-                            var_key = context_var_name[1:] # Remove '$'
-                            if var_key in task_context:
-                                resolved_input_vars[param_name] = task_context[var_key]
-                                self.logger.debug(f"Resolved input var '{param_name}' from task context key '{var_key}'")
-                            else:
-                                self.logger.warning(f"Input variable '{context_var_name}' requested but not found in task context.")
-                                resolved_input_vars[param_name] = None # Or raise error?
-                        else:
-                             # If not starting with '$', treat as literal value? Or ignore? Let's ignore for now.
-                             self.logger.warning(f"Input variable value '{context_var_name}' for '{param_name}' does not start with '$'. Treating as literal or ignoring.")
-                             # resolved_input_vars[param_name] = context_var_name # Uncomment to treat as literal
-                    # Merge resolved variables into the parameters used by the automation loop
+                            var_key = context_var_name[1:]
+                            if var_key in task_context: resolved_input_vars[param_name] = task_context[var_key]
+                            else: self.logger.warning(f"Input var '{context_var_name}' not found in task_context for UI automation."); resolved_input_vars[param_name] = None
+                        else: resolved_input_vars[param_name] = context_var_name # Treat as literal
                     automate_params.update(resolved_input_vars)
-                    # --- MODIFICATION END ---
+                    
+                    max_steps_ui = params.get('max_steps', 30); current_step_ui = 0; last_action_summary_ui = "UI Automation started."
+                    automation_success = False; ui_automation_extracted_data = {}; log_content_for_kb["visual_llm_decisions"] = 0; log_content_for_kb["captcha_encounters"] = 0
+                    step_output_data_ui = None
 
-                    max_steps = params.get('max_steps', 25)
-                    current_step_count = 0
-                    last_action_summary = "Automation started."
+                    self.logger.info(f"Starting Visual UI Automation: Service='{params.get('service')}', Goal='{automate_goal}' on page {page_id}")
 
-                    if not goal: raise ValueError("Missing 'goal' for web_ui_automate")
-                    self.logger.info(f"Starting Visual UI Automation: Service='{service}', Goal='{goal}' on page {page_id}")
-
-                    while current_step_count < max_steps:
-                        current_step_count += 1
-                        await self._internal_think(f"UI Automate Step {current_step_count}/{max_steps}: Goal='{goal}'", details={"last_action_result": last_action_summary})
+                    while current_step_ui < max_steps_ui:
+                        current_step_ui += 1; log_content_for_kb["visual_llm_decisions"] +=1
+                        await self._internal_think(f"UI Automate Step {current_step_ui}/{max_steps_ui}: Goal='{automate_goal}'", details={"last_action_result": last_action_summary_ui})
                         await self._human_like_delay(page, short=True)
 
-                        screenshot_bytes = await page.screenshot(full_page=True)
-                        page_text_content = await page.evaluate("document.body.innerText")
-                        current_url = page.url
+                        screenshot_bytes_ui = await page.screenshot(full_page=True)
+                        page_text_content_ui = await page.evaluate("document.body.innerText")
+                        current_url_ui = page.url
 
-                        automation_task_context = {
+                        ui_automation_task_context = {
                             "task": "Determine next UI action based primarily on visual context",
-                            "service_context": service, "current_goal": goal,
-                            "automation_parameters": automate_params, # Use merged params
-                            "page_text_content_snippet": page_text_content[:5000],
-                            "current_url": current_url, "last_action_result": last_action_summary,
-                            "current_step": f"{current_step_count}/{max_steps}",
-                            "available_actions": ["click", "input", "upload", "scroll", "wait", "navigate", "download", "solve_captcha", "finish", "error"],
-                            "desired_output_format": "JSON: {\"action_type\": \"<chosen_action>\", \"selector\": \"<css_selector_or_xpath>\", \"coordinates\": {\"x\": float, \"y\": float}?, \"text_to_input\": \"<string>\"?, \"file_path_param\": \"<param_name_for_file>\"?, \"scroll_direction\": \"up|down|left|right|top|bottom\"?, \"wait_time_ms\": int?, \"target_url\": \"<string>\"?, \"captcha_type\": \"checkbox|image_challenge|etc\"?, \"reasoning\": \"<Explanation>\", \"error_message\": \"<If action_type is error>\"}"
+                            "service_context": params.get('service'), "current_goal": automate_goal,
+                            "automation_parameters": automate_params,
+                            "page_text_content_snippet": page_text_content_ui[:6000], # Increased snippet
+                            "current_url": current_url_ui, "last_action_result": last_action_summary_ui,
+                            "current_step": f"{current_step_ui}/{max_steps_ui}",
+                            "available_actions": ["click", "input", "upload", "scroll", "wait", "navigate", "download", "solve_captcha", "extract_value", "finish", "error"],
+                            "desired_output_format": "JSON: {\"action_type\": \"<chosen_action>\", \"selector\": \"<css_selector_or_xpath_or_visual_desc_of_target>\", \"coordinates\": {\"x\": float, \"y\": float}?, \"text_to_input\": \"<string_or_param_key_like_params.my_value_or_identity.email>\"?, \"file_path_param\": \"<param_name_for_file_from_automation_parameters>\"?, \"scroll_direction\": \"up|down|left|right|top|bottom\"?, \"wait_time_ms\": int?, \"target_url\": \"<string>\"?, \"captcha_type\": \"checkbox|image_challenge|etc\"?, \"extraction_details\": {\"output_variable_name\": \"<name_for_extracted_data>\", \"value_type\": \"text|attribute:src|attribute:href\"}?, \"reasoning\": \"<Detailed explanation of why this action and target were chosen based on visual evidence and goal.>\", \"error_message\": \"<If action_type is error>\"}"
                         }
-                        if "captcha" in goal.lower() or "captcha" in last_action_summary.lower():
-                             automation_task_context["special_focus"] = "A CAPTCHA might be present. Identify it and determine the interaction needed (e.g., click checkbox, describe image challenge)."
-
-                        llm_prompt = await self.generate_dynamic_prompt(automation_task_context)
-                        # --- MODIFIED: Removed hardcoded model_preference ---
-                        action_json_str = await self.orchestrator.call_llm(
-                            agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.05,
-                            max_tokens=800, is_json_output=True,
-                            image_data=screenshot_bytes # Let orchestrator pick model
-                        )
-                        # --- END MODIFICATION ---
-
-                        if not action_json_str:
-                            last_action_summary = "LLM failed to determine next action."
-                            self.logger.error(last_action_summary)
-                            if current_step_count == max_steps: raise RuntimeError(f"UI Automation failed: LLM unresponsive after {max_steps} steps.")
-                            continue
-
+                        if "captcha" in automate_goal.lower() or "captcha" in last_action_summary_ui.lower():
+                             ui_automation_task_context["special_focus"] = "A CAPTCHA might be present. Identify it and determine the interaction needed."
+                        
+                        llm_prompt_ui = await self.generate_dynamic_prompt(ui_automation_task_context)
+                        action_json_str_ui = await self.orchestrator.call_llm(agent_name=self.AGENT_NAME, prompt=llm_prompt_ui, temperature=0.05, max_tokens=1200, is_json_output=True, image_data=screenshot_bytes_ui)
+                        
+                        if not action_json_str_ui: last_action_summary_ui = "LLM failed to determine UI action."; continue
                         try:
-                            action_data = self._parse_llm_json(action_json_str)
-                            if not action_data: raise ValueError("Failed to parse LLM action JSON.")
+                            action_data_ui = self._parse_llm_json(action_json_str_ui)
+                            if not action_data_ui: raise ValueError("Failed to parse UI action JSON.")
+                            action_type_ui = action_data_ui.get('action_type')
+                            reasoning_ui = action_data_ui.get('reasoning', 'N/A')
+                            self.logger.info(f"UI Automate Step {current_step_ui}: LLM action: {action_type_ui}. Reasoning: {reasoning_ui}")
+                            action_executed_successfully_ui = False; action_result_message_ui = f"Action '{action_type_ui}' initiated."
 
-                            action_type = action_data.get('action_type')
-                            reasoning = action_data.get('reasoning', 'N/A')
-                            self.logger.info(f"Attempt {current_step_count}: LLM decided action: {action_type}. Reasoning: {reasoning}")
+                            if action_type_ui == 'click':
+                                selector_ui = action_data_ui.get('selector'); coords_ui = action_data_ui.get('coordinates')
+                                target_element_ui = await self._find_element(page, selector_ui, coords_ui, visual_description_if_no_selector=selector_ui if not coords_ui else None)
+                                if target_element_ui: await self._human_click(page, target_element_ui); action_executed_successfully_ui = True; action_result_message_ui = f"Clicked: '{selector_ui or coords_ui or 'visual_target'}'."
+                                else: action_result_message_ui = f"Click failed: Element not found for '{selector_ui or coords_ui or 'visual_target'}'."
+                            elif action_type_ui == 'input':
+                                selector_ui = action_data_ui.get('selector'); coords_ui = action_data_ui.get('coordinates')
+                                text_to_input_raw_ui = action_data_ui.get('text_to_input')
+                                text_to_input_ui = None
+                                if isinstance(text_to_input_raw_ui, str):
+                                    if text_to_input_raw_ui.startswith("params."):
+                                        key_ui = text_to_input_raw_ui.split('params.')[-1]
+                                        text_to_input_ui = automate_params.get(key_ui)
+                                        if text_to_input_ui is None: action_result_message_ui = f"Input failed: Param key '{key_ui}' not in automate_params."
+                                        else: self.logger.debug(f"Resolved input text from automate_params key '{key_ui}'")
+                                    elif text_to_input_raw_ui.startswith("identity."): # Handle identity resolution
+                                        identity_params = automate_params.get("identity", {}) # Assuming identity is passed in automate_params
+                                        key_ui = text_to_input_raw_ui.split('identity.')[-1]
+                                        text_to_input_ui = identity_params.get(key_ui)
+                                        if text_to_input_ui is None: action_result_message_ui = f"Input failed: Identity key '{key_ui}' not found."
+                                        else: self.logger.debug(f"Resolved input text from identity key '{key_ui}'")
+                                    else: text_to_input_ui = str(text_to_input_raw_ui) # Literal
+                                elif text_to_input_raw_ui is not None: text_to_input_ui = str(text_to_input_raw_ui)
+                                else: action_result_message_ui = "Input failed: LLM provided no text or valid param/identity key."
 
-                            action_executed_successfully = False
-                            action_result_message = f"Action '{action_type}' initiated."
-                            step_output_data = None # To store data produced by this micro-step
+                                target_element_ui = await self._find_element(page, selector_ui, coords_ui, visual_description_if_no_selector=selector_ui if not coords_ui else None)
+                                if target_element_ui and text_to_input_ui is not None:
+                                    await self._human_fill(page, target_element_ui, text_to_input_ui)
+                                    action_executed_successfully_ui = True; action_result_message_ui = f"Input '{str(text_to_input_ui)[:20]}...' into '{selector_ui or coords_ui or 'visual_target'}'."
+                                elif not target_element_ui: action_result_message_ui = f"Input failed: Element not found for '{selector_ui or coords_ui or 'visual_target'}'."
+                            elif action_type_ui == 'upload':
+                                selector_ui = action_data_ui.get('selector'); coords_ui = action_data_ui.get('coordinates')
+                                file_path_param_name_ui = action_data_ui.get('file_path_param')
+                                file_path_ui = automate_params.get(file_path_param_name_ui) if file_path_param_name_ui else None
+                                target_element_ui = await self._find_element(page, selector_ui, coords_ui, visual_description_if_no_selector=selector_ui if not coords_ui else None)
+                                if target_element_ui and file_path_ui and os.path.exists(str(file_path_ui)):
+                                    async with page.expect_file_chooser(timeout=30000) as fc_info_ui:
+                                         await self._human_click(page, target_element_ui, timeout=20000)
+                                    file_chooser_ui = await fc_info_ui.value
+                                    await file_chooser_ui.set_files(str(file_path_ui))
+                                    action_executed_successfully_ui = True; action_result_message_ui = f"Uploaded file '{os.path.basename(str(file_path_ui))}'."
+                                elif not file_path_ui or not os.path.exists(str(file_path_ui)): action_result_message_ui = f"Upload failed: File path '{file_path_ui}' invalid (from param '{file_path_param_name_ui}')."
+                                else: action_result_message_ui = f"Upload failed: Element not found for '{selector_ui or coords_ui}'."
+                            elif action_type_ui == 'scroll':
+                                direction_ui = action_data_ui.get('scroll_direction', 'down'); selector_ui = action_data_ui.get('selector')
+                                target_element_ui = await self._find_element(page, selector_ui) if selector_ui else None
+                                await self._human_scroll(page, direction_ui, target_element_ui)
+                                action_executed_successfully_ui = True; action_result_message_ui = f"Scrolled {direction_ui}."
+                            elif action_type_ui == 'wait':
+                                wait_ms_ui = action_data_ui.get('wait_time_ms', random.randint(1500, 4000))
+                                await page.wait_for_timeout(wait_ms_ui)
+                                action_executed_successfully_ui = True; action_result_message_ui = f"Waited for {wait_ms_ui} ms."
+                            elif action_type_ui == 'navigate':
+                                target_url_ui = action_data_ui.get('target_url')
+                                if target_url_ui:
+                                    response_nav = await page.goto(target_url_ui, wait_until='domcontentloaded', timeout=60000)
+                                    if response_nav and response_nav.ok: action_executed_successfully_ui = True; action_result_message_ui = f"Navigated to {target_url_ui}."
+                                    else: action_result_message_ui = f"Navigation failed: Status {response_nav.status if response_nav else 'N/A'} for {target_url_ui}."
+                                else: action_result_message_ui = "Navigation failed: LLM did not provide target_url."
+                            elif action_type_ui == 'download':
+                                selector_ui = action_data_ui.get('selector'); coords_ui = action_data_ui.get('coordinates')
+                                target_element_ui = await self._find_element(page, selector_ui, coords_ui, visual_description_if_no_selector=selector_ui if not coords_ui else None)
+                                if target_element_ui:
+                                    async with page.expect_download(timeout=self.config.get("BROWSER_DOWNLOAD_TIMEOUT_S", 300) * 1000) as download_info_ui:
+                                        await self._human_click(page, target_element_ui)
+                                    download_ui = await download_info_ui.value
+                                    download_filename_ui = f"{task_context.get('id','task')}_{uuid.uuid4().hex[:8]}_{download_ui.suggested_filename}" # Include task ID
+                                    download_path_ui = os.path.join(self.temp_dir, download_filename_ui)
+                                    await download_ui.save_as(download_path_ui)
+                                    ui_automation_extracted_data["downloaded_file_path"] = download_path_ui
+                                    action_executed_successfully_ui = True; action_result_message_ui = f"File downloaded to {download_path_ui}"
+                                else: action_result_message_ui = f"Download failed: Element not found for '{selector_ui or coords_ui}'."
+                            elif action_type_ui == 'solve_captcha':
+                                log_content_for_kb["captcha_encounters"] +=1
+                                captcha_type_ui = action_data_ui.get('captcha_type', 'unknown'); selector_ui = action_data_ui.get('selector'); coords_ui = action_data_ui.get('coordinates')
+                                target_element_ui = await self._find_element(page, selector_ui, coords_ui, visual_description_if_no_selector=selector_ui if not coords_ui else "the CAPTCHA element")
+                                if target_element_ui:
+                                    if captcha_type_ui == 'checkbox':
+                                        await self._human_click(page, target_element_ui); await page.wait_for_timeout(random.uniform(5000, 10000))
+                                        verify_screenshot = await page.screenshot(); verify_text = await page.evaluate("document.body.innerText")
+                                        verify_prompt_ctx = {"task": "Verify CAPTCHA checkbox result", "page_text_content_snippet": verify_text[:2000], "desired_output_format": "JSON: {\"captcha_solved\": bool, \"new_challenge_description\": str?}"}
+                                        verify_prompt = await self.generate_dynamic_prompt(verify_prompt_ctx)
+                                        verify_json = await self.orchestrator.call_llm(self.AGENT_NAME, verify_prompt, image_data=verify_screenshot, is_json_output=True, max_tokens=300)
+                                        verify_data = self._parse_llm_json(verify_json)
+                                        if verify_data and verify_data.get("captcha_solved"): action_executed_successfully_ui = True; action_result_message_ui = "Clicked CAPTCHA checkbox, visually confirmed."
+                                        else: action_result_message_ui = f"Clicked CAPTCHA checkbox, but visual confirmation failed or new challenge: {verify_data.get('new_challenge_description','N/A')}"
+                                    elif captcha_type_ui == 'image_challenge':
+                                        action_result_message_ui = f"Image CAPTCHA solving needs advanced visual reasoning and interaction not yet fully implemented for element '{selector_ui or coords_ui}'. Consider manual intervention or dedicated CAPTCHA solving service integration via ThinkTool."
+                                        self.logger.warning(action_result_message_ui)
+                                    else: action_result_message_ui = f"CAPTCHA solving failed: Unsupported type '{captcha_type_ui}'."
+                                else: action_result_message_ui = f"CAPTCHA solving failed: Element not found for '{selector_ui or coords_ui}'."
+                            elif action_type_ui == 'extract_value':
+                                extraction_details_ui = action_data_ui.get('extraction_details', {})
+                                selector_ui = action_data_ui.get('selector'); coords_ui = action_data_ui.get('coordinates')
+                                output_var_name_ui = extraction_details_ui.get('output_variable_name', f"extracted_val_{current_step_ui}")
+                                value_type_ui = extraction_details_ui.get('value_type', 'text')
+                                target_element_ui = await self._find_element(page, selector_ui, coords_ui, visual_description_if_no_selector=selector_ui if not coords_ui else None)
+                                if target_element_ui:
+                                    extracted_val = None
+                                    if value_type_ui == 'text': extracted_val = await target_element_ui.text_content(timeout=10000)
+                                    elif value_type_ui.startswith('attribute:'): attr_name = value_type_ui.split(':')[-1]; extracted_val = await target_element_ui.get_attribute(attr_name, timeout=10000)
+                                    if extracted_val is not None:
+                                        ui_automation_extracted_data[output_var_name_ui] = extracted_val.strip() # Store in dict for this automation task
+                                        action_executed_successfully_ui = True; action_result_message_ui = f"Extracted '{value_type_ui}' for '{output_var_name_ui}'."
+                                    else: action_result_message_ui = f"Extraction failed: Element found but no value for '{output_var_name_ui}' (type: {value_type_ui})."
+                                else: action_result_message_ui = f"Extraction failed: Element not found for '{selector_ui or coords_ui}'."
+                            elif action_type_ui == 'finish':
+                                automation_success = True; action_executed_successfully_ui = True
+                                action_result_message_ui = f"UI Automation goal '{automate_goal}' completed successfully by LLM decision."
+                                self.logger.info(action_result_message_ui); break
+                            elif action_type_ui == 'error':
+                                error_msg_ui = action_data_ui.get('error_message', 'LLM indicated an unrecoverable error.')
+                                self.logger.error(f"LLM reported error during UI automation: {error_msg_ui}")
+                                raise RuntimeError(f"UI Automation failed: {error_msg_ui}")
+                            else: action_result_message_ui = f"Unsupported action type from LLM: {action_type_ui}"; self.logger.warning(action_result_message_ui)
 
-                            if action_type == 'click':
-                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
-                                target_element = await self._find_element(page, selector, coords)
-                                if target_element: await self._human_click(page, target_element); action_executed_successfully = True; action_result_message = f"Clicked element matching '{selector or coords}'."
-                                else: action_result_message = f"Click failed: Element not found for '{selector or coords}'."
-
-                            elif action_type == 'input':
-                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
-                                text_to_input_raw = action_data.get('text_to_input')
-                                text_to_input = None
-                                # Resolve input text from automate_params if it's a key reference
-                                if isinstance(text_to_input_raw, str) and text_to_input_raw.startswith("params."):
-                                    key = text_to_input_raw.split('.')[-1]
-                                    text_to_input = automate_params.get(key)
-                                    if text_to_input is None: action_result_message = f"Input failed: Parameter key '{key}' not found in resolved params.";
-                                    else: self.logger.debug(f"Resolved input text from params key '{key}'")
-                                elif text_to_input_raw is not None:
-                                    text_to_input = text_to_input_raw # Use literal text
-                                else: action_result_message = "Input failed: LLM did not provide text or valid param key."
-
-                                target_element = await self._find_element(page, selector, coords)
-                                if target_element and text_to_input is not None:
-                                    await self._human_fill(page, target_element, str(text_to_input)) # Ensure text is string
-                                    action_executed_successfully = True; action_result_message = f"Input text into element '{selector or coords}'."
-                                elif not target_element: action_result_message = f"Input failed: Element not found for '{selector or coords}'."
-                                # else: message already set above
-
-                            elif action_type == 'upload':
-                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
-                                file_path_param_name = action_data.get('file_path_param')
-                                file_path = automate_params.get(file_path_param_name) if file_path_param_name else None # Get resolved path from merged params
-                                target_element = await self._find_element(page, selector, coords)
-                                if target_element and file_path and os.path.exists(str(file_path)): # Check existence
-                                    async with page.expect_file_chooser() as fc_info:
-                                         await self._human_click(page, target_element, timeout=10000)
-                                    file_chooser = await fc_info.value
-                                    await file_chooser.set_files(str(file_path)) # Ensure path is string
-                                    action_executed_successfully = True; action_result_message = f"Uploaded file '{os.path.basename(str(file_path))}' to element '{selector or coords}'."
-                                elif not file_path or not os.path.exists(str(file_path)):
-                                    action_result_message = f"Upload failed: File path '{file_path}' invalid or not found (resolved from param '{file_path_param_name}')."
-                                else: action_result_message = f"Upload failed: Element not found for '{selector or coords}'."
-
-                            elif action_type == 'scroll':
-                                direction = action_data.get('scroll_direction', 'down')
-                                selector = action_data.get('selector')
-                                target_element = await self._find_element(page, selector) if selector else None
-                                await self._human_scroll(page, direction, target_element)
-                                action_executed_successfully = True; action_result_message = f"Scrolled {direction}."
-
-                            elif action_type == 'wait':
-                                wait_ms = action_data.get('wait_time_ms', random.randint(1500, 4000))
-                                await page.wait_for_timeout(wait_ms)
-                                action_executed_successfully = True; action_result_message = f"Waited for {wait_ms} ms."
-
-                            elif action_type == 'navigate':
-                                target_url = action_data.get('target_url')
-                                if target_url:
-                                    self.logger.info(f"Navigating to URL specified by LLM: {target_url}")
-                                    response = await page.goto(target_url, wait_until='domcontentloaded')
-                                    if response and response.ok: action_executed_successfully = True; action_result_message = f"Navigated to {target_url}."
-                                    else: action_result_message = f"Navigation failed: Could not load {target_url} (Status: {response.status if response else 'N/A'})."
-                                else: action_result_message = "Navigation failed: LLM did not provide target_url."
-
-                            elif action_type == 'download':
-                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
-                                target_element = await self._find_element(page, selector, coords)
-                                if target_element:
-                                    async with page.expect_download(timeout=180000) as download_info:
-                                        await self._human_click(page, target_element)
-                                    download = await download_info.value
-                                    download_filename = f"{uuid.uuid4().hex}_{download.suggested_filename}"
-                                    download_path = os.path.join(self.temp_dir, download_filename)
-                                    await download.save_as(download_path)
-                                    self.logger.info(f"File downloaded to: {download_path}")
-                                    step_output_data = download_path # Store path as output of this micro-step
-                                    action_executed_successfully = True; action_result_message = f"File downloaded to {download_path}"
-                                else: action_result_message = f"Download failed: Element not found for '{selector or coords}'."
-
-                            elif action_type == 'solve_captcha':
-                                captcha_type = action_data.get('captcha_type', 'unknown')
-                                selector = action_data.get('selector'); coords = action_data.get('coordinates')
-                                self.logger.info(f"Attempting to solve CAPTCHA (Type: {captcha_type})")
-                                target_element = await self._find_element(page, selector, coords)
-                                if target_element:
-                                    if captcha_type == 'checkbox':
-                                        await self._human_click(page, target_element)
-                                        await page.wait_for_timeout(random.uniform(3000, 6000))
-                                        action_executed_successfully = True; action_result_message = "Clicked CAPTCHA checkbox."
-                                    elif captcha_type == 'image_challenge':
-                                        action_result_message = f"Image CAPTCHA solving not fully implemented for element '{selector or coords}'. Requires specific LLM interaction."
-                                        self.logger.warning(action_result_message)
-                                    else: action_result_message = f"CAPTCHA solving failed: Unknown or unsupported type '{captcha_type}'."
-                                else: action_result_message = f"CAPTCHA solving failed: Element not found for '{selector or coords}'."
-
-                            elif action_type == 'finish':
-                                self.logger.info(f"Visual UI Automation goal '{goal}' completed successfully based on LLM decision.")
-                                # Check if the original step requested an output variable
-                                output_var_name = params.get("output_var")
-                                if output_var_name:
-                                     # Try to get the final result (e.g., URL, confirmation text) - needs refinement
-                                     final_output_value = page.url # Default to final URL
-                                     self.logger.info(f"Storing final automation output '{final_output_value}' in task context variable: '{output_var_name}'")
-                                     task_context[output_var_name] = final_output_value
-                                     result["result_data"] = final_output_value # Include in step result
-                                result["status"] = "success"; result["message"] = f"UI Automation goal '{goal}' completed."
-                                action_executed_successfully = True
-                                break # Exit the automation loop
-
-                            elif action_type == 'error':
-                                error_msg = action_data.get('error_message', 'LLM indicated an unrecoverable error.')
-                                self.logger.error(f"LLM reported error during UI automation: {error_msg}")
-                                raise RuntimeError(f"UI Automation failed: {error_msg}")
-
-                            else:
-                                action_result_message = f"Unsupported action type from LLM: {action_type}"
-                                self.logger.warning(action_result_message)
-
-                            # --- Store micro-step output if needed ---
-                            # If the LLM's action produced data AND the original step defined an output_var
-                            # (This is primarily handled by 'download' and 'finish' currently)
-                            # output_var_name = params.get("output_var")
-                            # if output_var_name and step_output_data is not None:
-                            #     task_context[output_var_name] = step_output_data
-                            #     self.logger.info(f"Stored step output in task context variable: '{output_var_name}'")
-
-                            # --- Update loop status ---
-                            last_action_summary = action_result_message
-                            if not action_executed_successfully:
-                                self.logger.warning(f"Attempt {current_step_count}: Action '{action_type}' failed or was not applicable. Message: {action_result_message}")
-                                if current_step_count == max_steps:
-                                     raise RuntimeError(f"UI Automation failed after {max_steps} steps. Last failed action: {action_type}. Message: {last_action_summary}")
-
+                            last_action_summary_ui = action_result_message_ui
+                            if not action_executed_successfully_ui:
+                                self.logger.warning(f"UI Automate Attempt {current_step_ui}: Action '{action_type_ui}' failed. Msg: {action_result_message_ui}")
+                                if current_step_ui == max_steps_ui: raise RuntimeError(f"UI Automation failed after {max_steps_ui} steps. Last: {action_type_ui}. Msg: {last_action_summary_ui}")
                         except PlaywrightError as pe_auto:
-                            last_action_summary = f"Playwright error executing action '{action_data.get('action_type', 'unknown')}': {pe_auto}"
-                            self.logger.error(f"Attempt {current_step_count}: {last_action_summary}", exc_info=False)
-                            if current_step_count == max_steps: raise RuntimeError(f"UI Automation failed after {max_steps} steps due to Playwright error: {pe_auto}") from pe_auto
+                            last_action_summary_ui = f"Playwright error executing '{action_data_ui.get('action_type', 'unknown')}': {pe_auto}"
+                            self.logger.error(f"UI Automate Step {current_step_ui}: {last_action_summary_ui}", exc_info=False)
+                            if current_step_ui == max_steps_ui: raise RuntimeError(f"UI Automation failed (Playwright error): {pe_auto}") from pe_auto
                         except Exception as auto_err:
-                            last_action_summary = f"Unexpected error executing action '{action_data.get('action_type', 'unknown')}': {auto_err}"
-                            self.logger.error(f"Attempt {current_step_count}: {last_action_summary}", exc_info=True)
-                            if current_step_count == max_steps: raise RuntimeError(f"UI Automation failed after {max_steps} steps due to unexpected error: {auto_err}") from auto_err
+                            last_action_summary_ui = f"Unexpected error executing '{action_data_ui.get('action_type', 'unknown')}': {auto_err}"
+                            self.logger.error(f"UI Automate Step {current_step_ui}: {last_action_summary_ui}", exc_info=True)
+                            if current_step_ui == max_steps_ui: raise RuntimeError(f"UI Automation failed (unexpected error): {auto_err}") from auto_err
+                    
+                    log_content_for_kb["steps_taken_count"] = current_step_ui
+                    if automation_success:
+                        result = {"status": "success", "message": f"UI Automation goal '{automate_goal}' completed.", "result_data": ui_automation_extracted_data}
+                    else: result = {"status": "failure", "message": f"UI Automation goal '{automate_goal}' failed or max steps. Last: {last_action_summary_ui}", "result_data": ui_automation_extracted_data}
+                    log_content_for_kb["success_status"] = automation_success
+                    log_content_for_kb["final_url_or_state"] = page.url if page else "Page unavailable"
 
-                    # After loop finishes (either by 'finish' or max_steps)
-                    if result.get("status") != "success": # If loop ended due to max steps without 'finish'
-                         self.logger.warning(f"UI Automation loop finished after {max_steps} steps without explicit 'finish' action. Goal '{goal}' might be incomplete.")
-                         result = {"status": "warning", "message": f"Automation finished due to max steps ({max_steps}). Goal '{goal}' may be incomplete. Last action result: {last_action_summary}"}
-
-                # --- Google Dorking Actions ---
-                elif tool == 'internal' and step_action == 'generate_dorks':
-                    target = params.get('target')
-                    dork_types = params.get('types', [])
-                    if not target: raise ValueError("Missing target for dork generation.")
-                    dorks = self._generate_google_dorks(target, dork_types) # Use enhanced helper
-                    task_context['generated_dorks'] = dorks
-                    result = {"status": "success", "message": f"Generated {len(dorks)} dorks.", "dorks": dorks}
-
-                elif tool == 'browser' and step_action == 'execute_dork_searches':
-                    dorks = task_context.get('generated_dorks')
-                    if not dorks: raise ValueError("No dorks generated in previous step.")
-                    search_results = {}
-                    self.logger.info(f"Executing {len(dorks)} Google Dorks...")
-                    for i, dork in enumerate(dorks):
-                        self.logger.info(f"Searching Dork ({i+1}/{len(dorks)}): {dork}")
-                        search_url = f"https://www.google.com/search?q={quote_plus(dork)}&num=20&hl=en&filter=0" # Added filter=0
+                elif step_action == 'close_context':
+                    reason_close = params.get('reason', 'Step complete')
+                    if context_id: await self._close_context(context_id, context_obj); task_context["current_context_id"] = None; task_context["current_page_id"] = None
+                    result = {"status": "success", "message": f"Browser context closed. Reason: {reason_close}"}
+                
+                elif step_action == 'generate_dorks':
+                    target_gd = params.get('target'); dork_types_gd = params.get('types', [])
+                    if not target_gd: raise ValueError("Missing target for dork generation.")
+                    dorks_gd = self._generate_google_dorks(target_gd, dork_types_gd)
+                    task_context['generated_dorks'] = dorks_gd
+                    result = {"status": "success", "message": f"Generated {len(dorks_gd)} dorks.", "dorks": dorks_gd, "result_data": dorks_gd}
+                
+                elif step_action == 'execute_dork_searches':
+                    dorks_to_search = task_context.get('generated_dorks', params.get('dorks'))
+                    if not dorks_to_search: raise ValueError("No dorks provided or generated for execute_dork_searches.")
+                    search_results_map = {}; log_content_for_kb["dork_searches_attempted"] = len(dorks_to_search)
+                    dork_success_count = 0
+                    for i, dork_query in enumerate(dorks_to_search):
+                        self.logger.info(f"Searching Dork ({i+1}/{len(dorks_to_search)}): {dork_query}")
+                        search_url_gd = f"https://www.google.com/search?q={quote_plus(dork_query)}&num=20&hl=en&filter=0"
                         try:
-                            await page.goto(search_url, wait_until='domcontentloaded', timeout=35000)
-                            await self._human_like_delay(page) # Human delay after load
+                            await page.goto(search_url_gd, wait_until='domcontentloaded', timeout=35000)
+                            await self._human_like_delay(page)
+                            screenshot_gd = await page.screenshot(); llm_check_ctx_gd = {"task": "Check for Google search block/CAPTCHA", "current_url": page.url, "desired_output_format": "JSON: {\"is_blocked\": boolean, \"reason\": \"<description if blocked>\"}"}
+                            llm_prompt_gd = await self.generate_dynamic_prompt(llm_check_ctx_gd)
+                            check_resp_gd = await self.orchestrator.call_llm(agent_name=self.AGENT_NAME, prompt=llm_prompt_gd, image_data=screenshot_gd, max_tokens=150, is_json_output=True, temperature=0.1)
+                            block_check_gd = self._parse_llm_json(check_resp_gd)
+                            if block_check_gd and block_check_gd.get("is_blocked"):
+                                self.logger.warning(f"Google search blocked for dork: {dork_query}. Reason: {block_check_gd.get('reason')}. Skipping remaining dorks for this context."); self._update_proxy_stats(context_id, False); break
+                            
+                            links_locators = await page.locator('//div[contains(@class, "g ") and .//a[@href and @ping]]//a[@href and @ping]').all()
+                            valid_links_gd = []
+                            for link_el in links_locators:
+                                href_gd = await link_el.get_attribute('href')
+                                if href_gd and href_gd.startswith('http') and not re.match(r'https?://(www\.)?google\.com/|https?://accounts\.google\.com/', href_gd):
+                                    cleaned_url_gd = urljoin(page.url, href_gd)
+                                    parsed_url_gd = urlparse(cleaned_url_gd)
+                                    final_url_gd = f"{parsed_url_gd.scheme}://{parsed_url_gd.netloc}{parsed_url_gd.path}"
+                                    if parsed_url_gd.query: final_url_gd += f"?{parsed_url_gd.query}"
+                                    valid_links_gd.append(final_url_gd)
+                            search_results_map[dork_query] = list(dict.fromkeys(valid_links_gd))[:15]
+                            dork_success_count +=1; self._update_proxy_stats(context_id, True)
+                        except Exception as e_dork_search: self.logger.error(f"Error searching dork '{dork_query}': {e_dork_search}"); self._update_proxy_stats(context_id, False)
+                        await asyncio.sleep(random.uniform(7, 18))
+                    task_context['dork_search_results'] = search_results_map
+                    log_content_for_kb["dork_searches_successful"] = dork_success_count
+                    result = {"status": "success", "message": f"Executed {len(dorks_to_search)} dork searches.", "results_summary": {k: len(v) for k, v in search_results_map.items()}, "result_data": search_results_map}
 
-                            # Check for CAPTCHA or block page visually
-                            screenshot_bytes = await page.screenshot()
-                            llm_check_context = {"task": "Check for Google search block/CAPTCHA", "current_url": page.url, "desired_output_format": "JSON: {\"is_blocked\": boolean, \"reason\": \"<description if blocked>\"}"}
-                            llm_prompt = await self.generate_dynamic_prompt(llm_check_context)
-                            # --- MODIFIED: Removed hardcoded model_preference ---
-                            check_response = await self.orchestrator.call_llm(
-                                agent_name=self.AGENT_NAME, prompt=llm_prompt, image_data=screenshot_bytes,
-                                max_tokens=100, is_json_output=True, temperature=0.1
-                            )
-                            # --- END MODIFICATION ---
-                            block_check = self._parse_llm_json(check_response)
-
-                            if block_check and block_check.get("is_blocked"):
-                                reason = block_check.get("reason", "Unknown block")
-                                self.logger.warning(f"Google search blocked for dork: {dork}. Reason: {reason}. Skipping remaining dorks for this context.")
-                                self._update_proxy_stats(context_id, False); break # Stop dorking in this context
-
-                            # Extract results (more robustly)
-                            links = await page.locator('//div[contains(@class, "g ")]//a[@href and @ping]').all() # More specific XPath
-                            valid_links = []
-                            for link_element in links:
-                                href = await link_element.get_attribute('href')
-                                if href and href.startswith('http') and not re.match(r'https?://(www\.)?google\.com/|https?://accounts\.google\.com/', href):
-                                    # Clean tracking parameters
-                                    parsed_url = urlparse(href)
-                                    cleaned_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
-                                    if parsed_url.query: cleaned_url += f"?{parsed_url.query}" # Keep query for now, might need cleaning too
-                                    valid_links.append(cleaned_url)
-
-                            search_results[dork] = list(dict.fromkeys(valid_links))[:15] # Unique links, limit 15
-                            self.logger.info(f"Dork '{dork}' found {len(search_results[dork])} unique potential links.")
-                            self._update_proxy_stats(context_id, True)
-
-                        except PlaywrightTimeoutError: self.logger.warning(f"Timeout searching Google for dork: {dork}"); self._update_proxy_stats(context_id, False)
-                        except PlaywrightError as pe_dork: self.logger.error(f"Playwright error searching Google for dork '{dork}': {pe_dork}"); self._update_proxy_stats(context_id, False)
-                        except Exception as search_err: self.logger.error(f"Unexpected error searching Google for dork '{dork}': {search_err}", exc_info=True); self._update_proxy_stats(context_id, False)
-                        # Longer, variable delay between searches
-                        await asyncio.sleep(random.uniform(8, 20))
-
-                    task_context['dork_search_results'] = search_results
-                    result = {"status": "success", "message": f"Executed {len(dorks)} dork searches.", "results_summary": {k: len(v) for k, v in search_results.items()}}
-
-                elif tool == 'browser' and step_action == 'analyze_dork_results':
-                    search_results = task_context.get('dork_search_results')
-                    if not search_results: raise ValueError("No dork search results found to analyze.")
-                    potential_findings = [] # Store detailed findings
-                    urls_to_analyze = list(set(url for urls in search_results.values() for url in urls))
-                    max_urls_to_analyze = self.config.get("DORK_MAX_URLS_TO_ANALYZE", 50)
-                    self.logger.info(f"Analyzing up to {max_urls_to_analyze} unique URLs from dork results ({len(urls_to_analyze)} total found)...")
-
-                    for i, url in enumerate(urls_to_analyze[:max_urls_to_analyze]):
-                        await self._internal_think(f"Analyzing Dork Result URL ({i+1}/{min(len(urls_to_analyze), max_urls_to_analyze)}): {url}")
+                elif step_action == 'analyze_dork_results':
+                    dork_results_to_analyze = task_context.get('dork_search_results', params.get('dork_results'))
+                    if not dork_results_to_analyze: raise ValueError("No dork search results to analyze.")
+                    all_urls_to_analyze = list(set(url for urls in dork_results_to_analyze.values() for url in urls))
+                    max_urls_dork = self.config.get("DORK_MAX_URLS_TO_ANALYZE", 30)
+                    potential_findings_dork = []; analyzed_count_dork = 0
+                    for i, url_dork in enumerate(all_urls_to_analyze[:max_urls_dork]):
+                        await self._internal_think(f"Analyzing Dork Result URL ({i+1}/{min(len(all_urls_to_analyze), max_urls_dork)}): {url_dork}")
                         try:
-                            await page.goto(url, wait_until='domcontentloaded', timeout=45000) # Longer timeout for potentially slow pages
-                            await self._human_like_delay(page, short=True)
-
-                            # Use visual LLM to analyze screenshot + text for credentials/sensitive info
-                            screenshot_bytes = await page.screenshot(full_page=True)
-                            page_text = await page.evaluate("document.body.innerText")
-                            if not page_text or len(page_text) < 30: self.logger.debug(f"Skipping short/empty page: {url}"); continue
-
-                            analysis_task_context = {
-                                "task": "Analyze webpage screenshot and text for potential credentials, API keys, secrets, sensitive config, or login forms",
-                                "text_content_snippet": page_text[:10000], # Generous snippet
-                                "target_url": url,
-                                "desired_output_format": "JSON list of findings: [{\"type\": \"password|api_key|secret|db_conn|config_file|login_form|ssh_key|other_sensitive\", \"value_snippet\": \"<relevant text snippet>\", \"context_snippet\": \"<surrounding text>\", \"location_hint\": \"<e.g., form input, code block, plain text>\"}] or empty list []."
-                            }
-                            llm_prompt = await self.generate_dynamic_prompt(analysis_task_context)
-                            # --- MODIFIED: Removed hardcoded model_preference ---
-                            findings_json_str = await self.orchestrator.call_llm(
-                                agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.1,
-                                max_tokens=1500, is_json_output=True,
-                                image_data=screenshot_bytes # Let orchestrator pick model
-                            )
-                            # --- END MODIFICATION ---
-
-                            if findings_json_str:
-                                findings_found = self._parse_llm_json(findings_json_str, expect_type=list)
-                                if findings_found:
-                                    for finding in findings_found: finding['source_url'] = url # Add source URL
-                                    potential_findings.extend(findings_found)
-                                    self.logger.info(f"Found {len(findings_found)} potential items on {url}")
-                                    # Log immediately to KB for high-priority findings
-                                    if any(f['type'] in ['password', 'api_key', 'secret', 'ssh_key'] for f in findings_found):
-                                         await self.log_knowledge_fragment(
-                                             agent_source=self.AGENT_NAME, data_type="dorking_credential_finding",
-                                             content={"findings": findings_found, "source_url": url},
-                                             tags=["dorking", "credentials", "security_risk", "high_priority", urlparse(url).netloc],
-                                             relevance_score=0.95
-                                         )
-                        except PlaywrightTimeoutError: self.logger.warning(f"Timeout visiting dork result URL {url}")
-                        except PlaywrightError as pe_analyze: self.logger.warning(f"Playwright error analyzing dork result URL {url}: {pe_analyze}")
-                        except Exception as page_err: self.logger.warning(f"Failed to analyze dork result URL {url}: {page_err}", exc_info=True)
-                        await asyncio.sleep(random.uniform(3, 7)) # Delay between URL analyses
-
-                    if potential_findings:
-                        # Log summary and notify
-                        await self.log_operation('critical', f"Google Dorking Analysis Complete. Found {len(potential_findings)} total potential items across analyzed URLs. Details logged to KB.")
-                        # Send notification via orchestrator
-                        await self.orchestrator.send_notification(
-                            title="Potential Sensitive Findings via Google Dorking",
-                            message=f"Scan found {len(potential_findings)} potential items (credentials, keys, configs, etc.). Check Knowledge Base (Type: dorking_credential_finding) for details.",
-                            level="critical"
-                        )
-                    else:
-                        self.logger.info("Dork analysis complete. No high-confidence sensitive items found in analyzed URLs.")
-
-                    result = {"status": "success", "message": f"Dork analysis complete. Found {len(potential_findings)} potential items.", "potential_findings": potential_findings}
-                    self._update_proxy_stats(context_id, True)
-
-
-                # --- Context Closing ---
-                elif tool == 'browser' and step_action == 'close_context':
-                    reason = params.get('reason', 'Step complete')
-                    if context_id:
-                        await self._close_context(context_id, context)
-                        task_context["current_context_id"] = None # Clear from task context
-                        task_context["current_page_id"] = None
-                        result = {"status": "success", "message": f"Browser context closed. Reason: {reason}"}
-                    else: result = {"status": "warning", "message": "No active context ID found to close."}
-
-                # --- Fallback for unknown browser actions ---
-                else:
-                    result = {"status": "failure", "message": f"Unsupported browser action: {step_action}"}
-
-            # --- Handle Non-Browser Tools (Internal, Search, LLM) ---
+                            await page.goto(url_dork, wait_until='domcontentloaded', timeout=45000)
+                            await self._human_like_delay(page, short=True); analyzed_count_dork +=1
+                            screenshot_dork = await page.screenshot(full_page=True); page_text_dork = await page.evaluate("document.body.innerText")
+                            if not page_text_dork or len(page_text_dork) < 20: continue
+                            analysis_ctx_dork = {"task": "Analyze webpage for credentials/secrets/login_forms", "text_content_snippet": page_text_dork[:8000], "target_url": url_dork, "desired_output_format": "JSON list of findings: [{\"type\": \"password|api_key|secret|login_form|other\", \"value_snippet\": \"...\", \"context_snippet\": \"...\"}] or []"}
+                            llm_prompt_dork = await self.generate_dynamic_prompt(analysis_ctx_dork)
+                            findings_json_dork = await self.orchestrator.call_llm(agent_name=self.AGENT_NAME, prompt=llm_prompt_dork, temperature=0.1, max_tokens=1500, is_json_output=True, image_data=screenshot_dork)
+                            if findings_json_dork:
+                                findings_list_dork = self._parse_llm_json(findings_json_dork, expect_type=list)
+                                if findings_list_dork:
+                                    for finding_dork in findings_list_dork: finding_dork['source_url'] = url_dork
+                                    potential_findings_dork.extend(findings_list_dork)
+                        except Exception as e_dork_analyze: self.logger.warning(f"Failed to analyze dork URL {url_dork}: {e_dork_analyze}")
+                        await asyncio.sleep(random.uniform(2, 5))
+                    log_content_for_kb["dork_urls_analyzed"] = analyzed_count_dork
+                    log_content_for_kb["dork_potential_findings_count"] = len(potential_findings_dork)
+                    result = {"status": "success", "message": f"Dork analysis complete. Found {len(potential_findings_dork)} potential items.", "potential_findings": potential_findings_dork, "result_data": potential_findings_dork}
+                    if potential_findings_dork and self.think_tool:
+                        await self.think_tool.execute_task({"action": "log_knowledge_fragment", "fragment_data": {"agent_source": self.AGENT_NAME, "data_type": "dorking_sensitive_findings_batch", "content": {"findings": potential_findings_dork[:10]}, "tags": ["dorking", "security_alert"], "relevance_score": 0.9}})
+                else: result = {"status": "failure", "message": f"Unsupported browser action: {step_action}"}
             elif tool == 'internal':
                  if step_action == 'generate_dorks':
-                     # Logic is above, this case might not be hit if planned correctly
-                     target = params.get('target'); dork_types = params.get('types', [])
-                     if not target: raise ValueError("Missing target for dork generation.")
-                     dorks = self._generate_google_dorks(target, dork_types)
-                     task_context['generated_dorks'] = dorks
-                     result = {"status": "success", "message": f"Generated {len(dorks)} dorks.", "dorks": dorks}
+                     target_gd = params.get('target'); dork_types_gd = params.get('types', [])
+                     if not target_gd: raise ValueError("Missing target for dork generation.")
+                     dorks_gd = self._generate_google_dorks(target_gd, dork_types_gd)
+                     task_context['generated_dorks'] = dorks_gd
+                     result = {"status": "success", "message": f"Generated {len(dorks_gd)} dorks.", "dorks": dorks_gd, "result_data": dorks_gd}
                  else: result = {"status": "failure", "message": f"Unknown internal action: {step_action}"}
+            else: result = {"status": "failure", "message": f"Unsupported tool type specified: {tool}"}
 
-            elif tool == 'search_engine': # Assumes orchestrator provides a direct search tool if needed
-                 if step_action == 'execute_search':
-                      query = params.get('query'); num_results = params.get('num_results', 5)
-                      if not query: raise ValueError("Missing 'query' parameter.")
-                      # Use orchestrator's tool execution method
-                      search_tool_result = await self._execute_tool('search_engine_api', {'query': query, 'num_results': num_results}, step_num)
-                      if search_tool_result.get('status') == 'success':
-                           task_context['search_results'] = search_tool_result.get('results', [])
-                           result = {"status": "success", "message": f"Search completed via API.", "result_data": task_context['search_results']}
-                      else: result = search_tool_result
-                 else: result = {"status": "failure", "message": f"Unknown search engine action: {step_action}"}
+            log_content_for_kb["status_final"] = result.get("status")
+            log_content_for_kb["message_final"] = result.get("message")
+            log_content_for_kb["extracted_data_preview"] = str(result.get("extracted_data", result.get("result_data", {})))[:200]
+            self._update_proxy_stats(context_id, result.get("status") == "success")
 
-            elif tool == 'llm': # Direct LLM calls if needed (e.g., summarization)
-                 if step_action == 'summarize_results':
-                      search_results = task_context.get('search_results')
-                      if not search_results: raise ValueError("No search results found in context to summarize.")
-                      content_to_summarize = "\n---\n".join([f"Title: {r.get('title', 'N/A')}\nURL: {r.get('url', 'N/A')}\nSnippet: {r.get('snippet', 'N/A')}" for r in search_results])
-                      llm_task_context = { "task": "Summarize search results", "search_results_content": content_to_summarize[:10000], "desired_output_format": "Concise summary highlighting key findings." }
-                      llm_prompt = await self.generate_dynamic_prompt(llm_task_context)
-                      summary = await self.orchestrator.call_llm(agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.3, max_tokens=1000)
-                      if summary: result = {"status": "success", "message": "Search results summarized.", "summary": summary, "result_data": summary}
-                      else: result = {"status": "failure", "message": "LLM summarization failed."}
-                 else: result = {"status": "failure", "message": f"Unknown LLM action: {step_action}"}
-
-            # --- Unknown Tool ---
-            else:
-                result = {"status": "failure", "message": f"Unsupported tool type specified: {tool}"}
-
-        # --- Error Handling ---
         except PlaywrightError as pe:
-            self.logger.error(f"Playwright error during step {step_num} ('{step_action}'): {pe}", exc_info=False) # Less verbose logging for PE
-            result = {"status": "failure", "message": f"Browser error: {pe.message}"} # Use PE message
+            self.logger.error(f"Playwright error during step {step_num} ('{step_action}'): {pe}", exc_info=False)
+            result = {"status": "failure", "message": f"Browser error: {pe.message}"}
+            log_content_for_kb.update({"status_final": "failure", "error_type": "PlaywrightError", "error_message": pe.message})
             self._update_proxy_stats(context_id, False)
-            # Capture screenshot on error if page exists
             if page and not page.is_closed():
-                 try:
-                     error_screenshot_path = os.path.join(self.temp_dir, f"error_{context_id}_{page_id}_{int(time.time())}.png")
-                     await page.screenshot(path=error_screenshot_path, full_page=True)
-                     result["error_screenshot"] = error_screenshot_path
-                     self.logger.info(f"Error screenshot saved to: {error_screenshot_path}")
+                 error_screenshot_path = os.path.join(self.temp_dir, f"error_{context_id}_{page_id}_{int(time.time())}.png")
+                 try: await page.screenshot(path=error_screenshot_path, full_page=True); result["error_screenshot"] = error_screenshot_path; log_content_for_kb["error_screenshot"] = error_screenshot_path
                  except Exception as ss_err: self.logger.error(f"Failed to capture error screenshot: {ss_err}")
-            raise # Re-raise to trigger tenacity retry
-
-        except FileNotFoundError as fnf_err:
-             self.logger.error(f"File not found during step {step_num} ('{step_action}'): {fnf_err}")
-             result = {"status": "failure", "message": str(fnf_err)}
-             # Don't retry file not found errors
-
-        except ValueError as ve: # Catch specific value errors (e.g., missing params)
-            self.logger.error(f"Value error during step {step_num} ('{step_action}'): {ve}")
-            result = {"status": "failure", "message": f"Configuration or Parameter Error: {ve}"}
-            # Don't retry value errors
-
-        except RuntimeError as rte: # Catch deliberate runtime errors (e.g., LLM error, account creation fail)
-            self.logger.error(f"Runtime error during step {step_num} ('{step_action}'): {rte}")
-            result = {"status": "failure", "message": f"Runtime Error: {rte}"}
-            # Don't retry most runtime errors unless specifically designed for it
-
+            raise
         except Exception as e:
             self.logger.error(f"Unexpected error during step {step_num} ('{step_action}'): {e}", exc_info=True)
             result = {"status": "failure", "message": f"Unexpected error: {e}"}
+            log_content_for_kb.update({"status_final": "failure", "error_type": type(e).__name__, "error_message": str(e)})
             self._update_proxy_stats(context_id, False)
-            if page and not page.is_closed(): # Screenshot on unexpected errors too
-                 try:
-                     error_screenshot_path = os.path.join(self.temp_dir, f"unexpected_error_{context_id}_{page_id}_{int(time.time())}.png")
-                     await page.screenshot(path=error_screenshot_path, full_page=True)
-                     result["error_screenshot"] = error_screenshot_path
-                     self.logger.info(f"Unexpected error screenshot saved to: {error_screenshot_path}")
+            if page and not page.is_closed():
+                 error_screenshot_path = os.path.join(self.temp_dir, f"unexpected_error_{context_id}_{page_id}_{int(time.time())}.png")
+                 try: await page.screenshot(path=error_screenshot_path, full_page=True); result["error_screenshot"] = error_screenshot_path; log_content_for_kb["error_screenshot"] = error_screenshot_path
                  except Exception as ss_err: self.logger.error(f"Failed to capture unexpected error screenshot: {ss_err}")
             await self._report_error(f"Step {step_num} ('{step_action}') failed unexpectedly: {e}", task_context.get('id'))
-            # Consider if unexpected errors should be retried by tenacity (PlaywrightError is handled above)
-
-        # --- Final Result Logging ---
-        log_level = "info" if result.get("status") == "success" else "warning"
-        if result.get("status") == "failure": log_level = "error"
-        self.logger.log(logging.getLevelName(log_level.upper()), f"Step {step_num} ('{step_action}') completed with status: {result.get('status')}. Message: {result.get('message')}")
-
+        finally:
+            log_content_for_kb["timestamp_end"] = datetime.now(timezone.utc).isoformat()
+            log_content_for_kb["duration_seconds"] = round(time.time() - step_start_time, 2)
+            if self.think_tool and step_action not in ['close_context'] and log_content_for_kb.get("status_final"):
+                await self.think_tool.execute_task({
+                    "action": "log_knowledge_fragment", "fragment_data": {
+                        "agent_source": self.AGENT_NAME, "data_type": "browsing_ui_automation_outcome",
+                        "content": log_content_for_kb,
+                        "tags": [self.AGENT_NAME, step_action.replace(" ","_"), log_content_for_kb["status_final"], params.get("service", "general")],
+                        "relevance_score": 0.75 if log_content_for_kb["status_final"] == "success" else 0.55 }})
         return result
 
     async def _ensure_context_and_page(self, step: Dict[str, Any], task_context: Dict[str, Any]) -> Tuple[BrowserContext, Page, str, str]:
-        """Gets or creates context/page, handling account selection/creation."""
         context_id = task_context.get("current_context_id")
         page_id = task_context.get("current_page_id")
         context: Optional[BrowserContext] = None
         page: Optional[Page] = None
-
         params = step.get('params', {})
-        requires_account = params.get('requires_account', False) # Step indicates if account is needed
+        requires_account = params.get('requires_account', False)
         service_needed = params.get('service') or params.get('target_platform')
-        account_id_param = params.get('account_id') # Specific account requested?
-        allow_creation = params.get('allow_account_creation', True) # Allow creation by default if needed
+        account_id_param = params.get('account_id')
+        allow_creation = params.get('allow_account_creation', True)
 
-        # Check existing context
         if context_id:
             context = self.internal_state['browser_contexts'].get(context_id)
-            if not context or context.is_closed():
-                self.logger.warning(f"Context {context_id} was closed or invalid. Will create new context.")
-                await self._close_context(context_id) # Ensure cleanup
+            if not context or (hasattr(context, 'is_closed') and context.is_closed()):
+                self.logger.warning(f"Context {context_id} was closed/invalid. Will create new.")
+                await self._close_context(context_id)
                 context_id = None; page_id = None; context = None
             else:
-                # Verify if the existing context's account matches requirements
                 current_account = self.internal_state['context_account_map'].get(context_id)
                 if requires_account:
                     if not current_account:
-                        self.logger.warning(f"Existing context {context_id} has no associated account, but step requires one. Creating new context.")
+                        self.logger.warning(f"Existing context {context_id} has no account, step requires one. New context.")
                         await self._close_context(context_id); context_id = None; page_id = None; context = None
                     elif service_needed and current_account.get('service') != service_needed:
-                        self.logger.warning(f"Existing context {context_id} is for service '{current_account.get('service')}', but step requires '{service_needed}'. Creating new context.")
+                        self.logger.warning(f"Context {context_id} for service '{current_account.get('service')}', step needs '{service_needed}'. New context.")
                         await self._close_context(context_id); context_id = None; page_id = None; context = None
                     elif account_id_param and current_account.get('id') != account_id_param:
-                         self.logger.warning(f"Existing context {context_id} has account ID {current_account.get('id')}, but step requires {account_id_param}. Creating new context.")
+                         self.logger.warning(f"Context {context_id} has account ID {current_account.get('id')}, step needs {account_id_param}. New context.")
                          await self._close_context(context_id); context_id = None; page_id = None; context = None
-
-        # Create new context if needed
         if not context_id:
             account_details = None
-            proxy_info = params.get('proxy_info') # Use proxy from step params if provided
-
-            # Determine account needed
+            proxy_info = params.get('proxy_info')
             if requires_account:
                 if account_id_param:
                     account_details = await self._get_account_details_from_db(account_id_param)
-                    if not account_details:
-                        raise ValueError(f"Required account ID {account_id_param} not found in DB.")
-                    self.logger.info(f"Using specific account ID {account_id_param} for service {account_details.get('service')}.")
+                    if not account_details: raise ValueError(f"Required account ID {account_id_param} not found.")
                 elif service_needed:
                     account_details = await self._select_available_account_for_service(service_needed)
                     if not account_details and allow_creation:
-                        self.logger.warning(f"No available active account found for service '{service_needed}'. Attempting autonomous creation.")
-                        account_details = await self._attempt_new_account_creation(service_needed) # This now returns details or raises error
-                        if not account_details:
-                             # _attempt_new_account_creation should raise error on failure now
-                             raise RuntimeError(f"Failed to find or create an account for service: {service_needed}")
-                        # If creation succeeded, account_details will be populated
+                        self.logger.warning(f"No available account for '{service_needed}'. Attempting creation.")
+                        account_details = await self._attempt_new_account_creation(service_needed)
+                        if not account_details: raise RuntimeError(f"Failed to find or create account for: {service_needed}")
                     elif not account_details and not allow_creation:
-                         raise ValueError(f"No available active account found for service '{service_needed}', and creation is disallowed for this step.")
-                else:
-                    raise ValueError("Step requires account, but 'service' or 'account_id' parameter is missing.")
-
-            # Get proxy if not provided in step params
+                         raise ValueError(f"No account for '{service_needed}', creation disallowed.")
+                else: raise ValueError("Step requires account, but 'service' or 'account_id' missing.")
             if not proxy_info and hasattr(self.orchestrator, 'get_proxy'):
                  proxy_purpose = f"context_{service_needed or 'general'}_{account_details.get('id', 'new') if account_details else 'anon'}"
-                 proxy_info = await self.orchestrator.get_proxy(purpose=proxy_purpose, quality_level='high' if requires_account else 'standard')
-
+                 proxy_info = await self.orchestrator.get_proxy(purpose=proxy_purpose, quality_level='high_stealth' if requires_account else 'standard_plus')
             context_id, context = await self._get_new_context(account_details, proxy_info)
-
-        # Get page for the context
         page_id, page = await self._get_page_for_context(context_id)
-
         return context, page, context_id, page_id
 
-
-    # --- Human Emulation Helpers ---
-    async def _human_like_delay(self, page: Page, short: bool = False):
-        """Adds variable delays, mouse movements, and scrolls."""
-        if short:
-            await page.wait_for_timeout(random.uniform(400, 900))
-            return
-
-        try:
-            # Move mouse to a random plausible location
-            viewport = page.viewport_size or {'width': 1280, 'height': 720}
-            await page.mouse.move(
-                random.uniform(viewport['width'] * 0.1, viewport['width'] * 0.9),
-                random.uniform(viewport['height'] * 0.1, viewport['height'] * 0.9),
-                steps=random.randint(5, 15) # More steps for smoother movement
-            )
-            await page.wait_for_timeout(random.uniform(600, 1800))
-
-            # Random scroll
-            if random.random() < 0.6: # Increased scroll probability
-                scroll_amount = random.randint(-350, 350)
-                await page.mouse.wheel(0, scroll_amount)
-                await page.wait_for_timeout(random.uniform(500, 1200))
-
-        except Exception as delay_err:
-            self.logger.warning(f"Minor error during human-like delay simulation: {delay_err}")
-
-        # Final longer wait
-        await page.wait_for_timeout(random.uniform(1800, 4500))
-
-    async def _human_click(self, page: Page, target: Union[Locator, str], timeout: int = 30000):
-        """Performs a click with human-like mouse movement and slight offset."""
-        element: Optional[Locator] = None
-        if isinstance(target, str):
-            element = page.locator(target).first
-        elif isinstance(target, Locator):
-            element = target
-
-        if not element: raise PlaywrightError(f"Cannot click, element not found or invalid: {target}")
-
-        try:
-            await element.scroll_into_view_if_needed(timeout=10000)
-            await page.wait_for_timeout(random.uniform(100, 300)) # Brief pause after scroll
-
-            bb = await element.bounding_box()
-            if not bb: raise PlaywrightError("Element bounding box not available for click.")
-
-            # Calculate a random point within the element bounds
-            click_x = bb['x'] + random.uniform(bb['width'] * 0.2, bb['width'] * 0.8)
-            click_y = bb['y'] + random.uniform(bb['height'] * 0.2, bb['height'] * 0.8)
-
-            # Move mouse realistically towards the point
-            await page.mouse.move(click_x, click_y, steps=random.randint(8, 20))
-            await page.wait_for_timeout(random.uniform(150, 400)) # Pause before click
-
-            # Perform the click
-            await page.mouse.down()
-            await page.wait_for_timeout(random.uniform(60, 150)) # Hold click briefly
-            await page.mouse.up()
-
-            await page.wait_for_timeout(random.uniform(200, 500)) # Pause after click
-
-        except PlaywrightTimeoutError as pte:
-             raise PlaywrightTimeoutError(f"Timeout during human-like click on {target}: {pte.message}") from pte
-        except Exception as e:
-             raise PlaywrightError(f"Error during human-like click on {target}: {e}") from e
-
-    async def _human_fill(self, page: Page, target: Union[Locator, str], text: str, delay_ms: int = 110):
-        """Fills an input field with human-like typing delay."""
-        element: Optional[Locator] = None
-        if isinstance(target, str):
-            element = page.locator(target).first
-        elif isinstance(target, Locator):
-            element = target
-
-        if not element: raise PlaywrightError(f"Cannot fill, element not found or invalid: {target}")
-
-        try:
-            await self._human_click(page, element) # Click the field first
-            await page.wait_for_timeout(random.uniform(200, 500))
-            # Use Playwright's fill with delay for simplicity, or type character by character
-            # await element.fill(text, timeout=20000) # Simpler approach
-            # More realistic typing:
-            await element.press_sequentially(text, delay=random.uniform(delay_ms * 0.7, delay_ms * 1.3))
-            await page.wait_for_timeout(random.uniform(300, 600)) # Pause after typing
-        except Exception as e:
-             raise PlaywrightError(f"Error during human-like fill on {target}: {e}") from e
-
-    async def _human_scroll(self, page: Page, direction: str, target_element: Optional[Locator] = None):
-        """Performs scrolling with mouse wheel simulation."""
-        scroll_amount = random.randint(400, 900)
-        if direction == "up": scroll_amount = -scroll_amount
-        elif direction == "left": await page.mouse.wheel(-scroll_amount, 0); return
-        elif direction == "right": await page.mouse.wheel(scroll_amount, 0); return
-        elif direction == "top": await page.evaluate("window.scrollTo(0, 0)"); return
-        elif direction == "bottom": await page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); return
-        # Default is down
-
-        if target_element:
-             # Scroll the specific element if possible (less reliable)
-             try: await target_element.evaluate(f"(element) => element.scrollTop += {scroll_amount}")
-             except Exception: await page.mouse.wheel(0, scroll_amount) # Fallback to page scroll
-        else:
-             await page.mouse.wheel(0, scroll_amount)
-        await page.wait_for_timeout(random.uniform(300, 700))
-
-    async def _find_element(self, page: Page, selector: Optional[str], coords: Optional[Dict] = None) -> Optional[Locator]:
-         """Finds element by selector or coordinates (prioritizes selector)."""
-         if selector:
-             try:
-                 element = page.locator(selector).first
-                 await element.wait_for(state='visible', timeout=15000) # Wait for visibility
-                 return element
-             except PlaywrightTimeoutError:
-                 self.logger.warning(f"Element not found or not visible for selector: {selector}")
-                 return None
-             except Exception as e:
-                  self.logger.error(f"Error finding element with selector '{selector}': {e}")
-                  return None
-         elif coords and 'x' in coords and 'y' in coords:
-             # Finding by coordinates is less reliable, best used for clicking, not getting Locator object easily
-             # This might need refinement or direct coordinate clicking
-             self.logger.warning("Finding element purely by coordinates is not directly supported for returning Locator. Use coordinates directly in click actions.")
-             return None # Cannot reliably return a Locator from coordinates alone
-         return None
-
-    # --- Account Management ---
-    async def _generate_fake_identity(self) -> Optional[Dict]:
-        """Generates realistic fake identity details including a temp email."""
-        try:
-            first_name = self.faker.first_name()
-            last_name = self.faker.last_name()
-            username_base = f"{first_name.lower()}_{last_name.lower()}{random.randint(10, 999)}"
-            password = self.faker.password(length=random.randint(12, 16), special_chars=True, digits=True, upper_case=True, lower_case=True)
-
-            # Get temporary email address
-            email = await self.temp_mail_service.get_new_email_address()
-            if not email:
-                self.logger.error("Failed to generate temporary email address for fake identity.")
-                return None
-
-            identity = {
-                "first_name": first_name,
-                "last_name": last_name,
-                "full_name": f"{first_name} {last_name}",
-                "email": email,
-                "username": username_base, # Service might require email as username
-                "password": password,
-                # Add more fields as needed (e.g., address, phone - requires more complex generation/validation)
-                # "address": self.faker.address(),
-                # "city": self.faker.city(),
-                # "zipcode": self.faker.zipcode(),
-            }
-            self.logger.info(f"Generated fake identity with email: {email}")
-            return identity
-        except Exception as e:
-            self.logger.error(f"Error generating fake identity: {e}", exc_info=True)
-            return None
-
-    async def _attempt_new_account_creation(self, service_name: str) -> Optional[Dict]:
-        """
-        Performs autonomous account creation using visual automation and temp email.
-        Returns account details dict on success, raises RuntimeError on failure.
-        """
-        await self._internal_think(f"Initiating autonomous account creation for service: {service_name}")
-        self.logger.info(f"Attempting new account creation for: {service_name}")
-
-        identity = await self._generate_fake_identity()
-        if not identity:
-            raise RuntimeError(f"Account creation failed for {service_name}: Could not generate fake identity.")
-
-        # --- Setup Context for Creation ---
-        creation_context_id: Optional[str] = None
-        creation_page: Optional[Page] = None
-        try:
-            # Get high-quality proxy specifically for signup
-            proxy_info = await self.orchestrator.get_proxy(purpose=f"account_creation_{service_name}", quality_level='premium')
-            if not proxy_info: self.logger.warning("Failed to get premium proxy for account creation, using standard.") # Fallback?
-
-            creation_context_id, creation_context = await self._get_new_context(account_details={"service": service_name, "status": "creating"}, proxy_info=proxy_info)
-            _, creation_page = await self._get_page_for_context(creation_context_id)
-
-            # --- Find Signup Page (Requires service-specific knowledge or discovery) ---
-            # This URL should ideally be provided by ThinkTool or discovered dynamically
-            signup_url = self.config.get(f"SERVICE_{service_name.upper()}_SIGNUP_URL")
-            if not signup_url:
-                 # TODO: Implement dynamic discovery of signup URL if needed
-                 raise RuntimeError(f"Account creation failed: Signup URL for service '{service_name}' not configured.")
-
-            await creation_page.goto(signup_url, wait_until='domcontentloaded')
-            await self._human_like_delay(creation_page)
-
-            # --- Execute Visual UI Automation for Signup ---
-            signup_goal = f"Complete the signup process on {service_name} using the provided identity details, handle CAPTCHAs, and perform email verification if required."
-            signup_params = {"identity": identity} # Pass generated identity to the automation goal
-
-            # Use the main execute_step logic for the UI automation part
-            automation_step = {
-                "action": "Execute UI Automation: Signup",
-                "tool": "browser",
-                "params": {
-                    "service": service_name,
-                    "goal": signup_goal,
-                    "params": signup_params,
-                    "max_steps": 35 # Allow more steps for signup complexity
-                }
-            }
-            # Create a temporary task context for this sub-task
-            signup_task_context = {"current_context_id": creation_context_id, "current_page_id": _} # Page ID not needed directly here
-
-            # We need to call the automation logic directly here, not via execute_step recursion
-            # Reusing the core loop from execute_step's web_ui_automate section:
-            max_steps = automation_step['params'].get('max_steps', 35)
-            current_step_count = 0
-            last_action_summary = "Signup automation started."
-            signup_successful = False
-
-            while current_step_count < max_steps:
-                 current_step_count += 1
-                 await self._internal_think(f"Signup Step {current_step_count}/{max_steps}: Goal='{signup_goal}'", details={"last_action_result": last_action_summary})
-                 await self._human_like_delay(creation_page, short=True)
-
-                 screenshot_bytes = await creation_page.screenshot(full_page=True)
-                 page_text_content = await creation_page.evaluate("document.body.innerText")
-                 current_url = creation_page.url
-
-                 automation_task_context = {
-                     "task": "Determine next UI action for account signup",
-                     "service_context": service_name, "current_goal": signup_goal,
-                     "automation_parameters": signup_params, # Contains identity details
-                     "page_text_content_snippet": page_text_content[:5000],
-                     "current_url": current_url, "last_action_result": last_action_summary,
-                     "current_step": f"{current_step_count}/{max_steps}",
-                     "available_actions": ["click", "input", "scroll", "wait", "solve_captcha", "check_email_verification", "finish", "error"], # Adjusted actions
-                     "desired_output_format": "JSON: {\"action_type\": \"<chosen_action>\", \"selector\": \"<css>\", \"coordinates\": {\"x\":y}?, \"text_to_input\": \"<string>\"?, \"captcha_type\": \"checkbox|etc\"?, \"reasoning\": \"<Explanation>\", \"error_message\": \"<If error>\"}"
-                 }
-                 # Add identity details explicitly for LLM context if needed (be mindful of prompt length)
-                 # automation_task_context["identity_details_summary"] = f"Email: {identity['email']}, Name: {identity['full_name']}"
-
-                 # Special handling for email verification step
-                 if "email verification" in last_action_summary.lower() or "check your email" in page_text_content.lower():
-                      automation_task_context["special_focus"] = "Email verification might be required. Check page for confirmation status or decide to trigger 'check_email_verification' action."
-
-                 llm_prompt = await self.generate_dynamic_prompt(automation_task_context)
-                 # --- MODIFIED: Removed hardcoded model_preference ---
-                 action_json_str = await self.orchestrator.call_llm(
-                     agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.05,
-                     max_tokens=800, is_json_output=True, image_data=screenshot_bytes # Let orchestrator pick model
-                 )
-                 # --- END MODIFICATION ---
-
-                 if not action_json_str: last_action_summary = "LLM failed to determine signup action."; continue
-
-                 try:
-                     action_data = self._parse_llm_json(action_json_str)
-                     if not action_data: raise ValueError("Failed to parse LLM action JSON.")
-                     action_type = action_data.get('action_type')
-                     reasoning = action_data.get('reasoning', 'N/A')
-                     self.logger.info(f"Signup Attempt {current_step_count}: LLM decided action: {action_type}. Reasoning: {reasoning}")
-
-                     action_executed_successfully = False
-                     action_result_message = f"Signup action '{action_type}' initiated."
-
-                     # --- Execute Signup Actions ---
-                     if action_type == 'click':
-                         selector = action_data.get('selector'); coords = action_data.get('coordinates')
-                         target_element = await self._find_element(creation_page, selector, coords)
-                         if target_element: await self._human_click(creation_page, target_element); action_executed_successfully = True; action_result_message = f"Clicked element '{selector or coords}'."
-                         else: action_result_message = f"Click failed: Element not found for '{selector or coords}'."
-                     elif action_type == 'input':
-                         selector = action_data.get('selector'); coords = action_data.get('coordinates')
-                         text_to_input = action_data.get('text_to_input') # LLM should specify value or reference identity key
-                         # Resolve text: Check if it refers to identity dict
-                         if text_to_input and text_to_input.startswith("identity."):
-                              key = text_to_input.split('.')[-1]
-                              resolved_text = identity.get(key)
-                              if resolved_text is None: action_result_message = f"Input failed: Identity key '{key}' not found."; resolved_text = ""
-                              else: text_to_input = resolved_text # Use the resolved value
-                         elif text_to_input is None: action_result_message = "Input failed: LLM did not provide text."; text_to_input = ""
-
-                         target_element = await self._find_element(creation_page, selector, coords)
-                         if target_element and text_to_input is not None:
-                              await self._human_fill(creation_page, target_element, text_to_input)
-                              action_executed_successfully = True; action_result_message = f"Input text into element '{selector or coords}'."
-                         elif not target_element: action_result_message = f"Input failed: Element not found for '{selector or coords}'."
-                     elif action_type == 'scroll':
-                         direction = action_data.get('scroll_direction', 'down')
-                         await self._human_scroll(creation_page, direction)
-                         action_executed_successfully = True; action_result_message = f"Scrolled {direction}."
-                     elif action_type == 'wait':
-                         wait_ms = action_data.get('wait_time_ms', random.randint(1500, 4000))
-                         await creation_page.wait_for_timeout(wait_ms)
-                         action_executed_successfully = True; action_result_message = f"Waited for {wait_ms} ms."
-                     elif action_type == 'solve_captcha':
-                         captcha_type = action_data.get('captcha_type', 'unknown')
-                         selector = action_data.get('selector'); coords = action_data.get('coordinates')
-                         target_element = await self._find_element(creation_page, selector, coords)
-                         if target_element:
-                             if captcha_type == 'checkbox':
-                                 await self._human_click(creation_page, target_element)
-                                 await creation_page.wait_for_timeout(random.uniform(4000, 7000)) # Wait longer for challenge/verification
-                                 action_executed_successfully = True; action_result_message = "Clicked CAPTCHA checkbox."
-                             else: action_result_message = f"CAPTCHA solving failed: Unsupported type '{captcha_type}'."
-                         else: action_result_message = f"CAPTCHA solving failed: Element not found for '{selector or coords}'."
-                     elif action_type == 'check_email_verification':
-                         self.logger.info("Checking temporary email for verification link...")
-                         verification_link = await self.temp_mail_service.get_verification_link(identity['email'], timeout_seconds=180, keyword="verify") # Adjust keyword if needed
-                         if verification_link:
-                             self.logger.info(f"Found verification link: {verification_link}. Navigating in current context.")
-                             # Navigate to the link in the *same* context
-                             response = await creation_page.goto(verification_link, wait_until='domcontentloaded')
-                             if response and response.ok:
-                                 action_executed_successfully = True; action_result_message = "Navigated to email verification link successfully."
-                                 await self._human_like_delay(creation_page) # Wait after verification page loads
-                             else: action_result_message = f"Email verification failed: Could not load link {verification_link} (Status: {response.status if response else 'N/A'})."
-                         else:
-                             action_result_message = "Email verification failed: No verification link found in temp email within timeout."
-                             # Keep action_executed_successfully = False, LLM might retry or error
-                     elif action_type == 'finish':
-                         action_executed_successfully = True
-                         signup_successful = True
-                         action_result_message = f"LLM determined signup process for {service_name} is complete."
-                         self.logger.info(action_result_message)
-                         break # Exit signup loop
-                     elif action_type == 'error':
-                         error_msg = action_data.get('error_message', 'LLM indicated signup error.')
-                         raise RuntimeError(f"Account creation failed for {service_name}: {error_msg}")
-                     else:
-                         action_result_message = f"Unsupported action type during signup: {action_type}"
-
-                     last_action_summary = action_result_message
-                     if not action_executed_successfully:
-                          self.logger.warning(f"Signup Attempt {current_step_count}: Action '{action_type}' failed. Message: {action_result_message}")
-                          if current_step_count == max_steps: raise RuntimeError(f"Account creation failed for {service_name} after {max_steps} steps. Last failed action: {action_type}.")
-
-                 except Exception as signup_err:
-                      last_action_summary = f"Error during signup step {current_step_count}: {signup_err}"
-                      self.logger.error(last_action_summary, exc_info=True)
-                      if current_step_count == max_steps: raise RuntimeError(f"Account creation failed for {service_name} due to error: {signup_err}") from signup_err
-
-            # --- Post-Automation Check ---
-            if not signup_successful:
-                raise RuntimeError(f"Account creation for {service_name} failed: Automation loop completed {max_steps} steps without explicit 'finish' action. Last status: {last_action_summary}")
-
-            # --- Store Credentials Securely ---
-            self.logger.info(f"Account creation for {service_name} appears successful. Storing credentials...")
-            # Use Orchestrator's secure storage mechanism
-            stored_account_details = await self.orchestrator.secure_storage.store_new_account(
-                service=service_name,
-                identifier=identity['email'], # Or username if applicable
-                password=identity['password'],
-                status='active', # Mark as active
-                metadata={"created_by": self.AGENT_NAME, "creation_ts": datetime.now(timezone.utc).isoformat()}
-            )
-
-            if not stored_account_details or 'id' not in stored_account_details:
-                 # Log critical error but maybe proceed with in-memory details for current task?
-                 self.logger.critical(f"Failed to securely store credentials for newly created {service_name} account ({identity['email']}) via orchestrator!")
-                 # Return the generated identity for immediate use, but it won't persist
-                 stored_account_details = {**identity, "id": f"temp_{uuid.uuid4().hex[:4]}", "status": "active", "service": service_name} # Temporary ID
-            else:
-                 self.logger.info(f"Successfully created and stored account ID {stored_account_details['id']} for {service_name}.")
-
-            # Update context map with the *stored* details (including the real ID)
-            self.internal_state['context_account_map'][creation_context_id] = stored_account_details
-
-            return stored_account_details
-
-        except Exception as creation_err:
-            self.logger.error(f"Account creation process for {service_name} failed: {creation_err}", exc_info=True)
-            # Ensure context is closed on failure
-            if creation_context_id:
-                await self._close_context(creation_context_id)
-            raise RuntimeError(f"Account creation failed for {service_name}: {creation_err}") from creation_err
-        # No finally block needed for context closing, handled in exception or normal flow
-
-
-    async def _get_account_details_from_db(self, account_id: int) -> Optional[Dict]:
-        """Fetches non-sensitive account details from the database via Orchestrator."""
-        # Delegate to orchestrator's secure storage to avoid direct DB dependency here
-        if hasattr(self.orchestrator, 'secure_storage') and hasattr(self.orchestrator.secure_storage, 'get_account_details_by_id'):
-            try:
-                details = await self.orchestrator.secure_storage.get_account_details_by_id(account_id)
-                # Ensure password is not included in the returned dict for general use
-                if details: details.pop('password', None)
-                return details
-            except Exception as e:
-                self.logger.error(f"Error fetching account details for ID {account_id} via orchestrator: {e}")
-                return None
-        else:
-            self.logger.error("Orchestrator secure storage or get_account_details_by_id method unavailable.")
-            return None
-
-
-    async def _select_available_account_for_service(self, service_name: str) -> Optional[Dict]:
-        """Selects an 'active' account for a given service via Orchestrator."""
-        self.logger.debug(f"Selecting available account for service: {service_name}")
-        if hasattr(self.orchestrator, 'secure_storage') and hasattr(self.orchestrator.secure_storage, 'find_active_account_for_service'):
-            try:
-                details = await self.orchestrator.secure_storage.find_active_account_for_service(service_name)
-                if details:
-                    self.logger.info(f"Selected account ID {details.get('id')} for service {service_name}")
-                    # Ensure password is not included
-                    details.pop('password', None)
-                    return details
-                else:
-                    self.logger.info(f"No 'active' account found for service: {service_name}")
-                    return None
-            except Exception as e:
-                self.logger.error(f"Error selecting account for service {service_name} via orchestrator: {e}")
-                return None
-        else:
-            self.logger.error("Orchestrator secure storage or find_active_account_for_service method unavailable.")
-            return None
-
-    def _generate_google_dorks(self, target: str, dork_types: List[str]) -> List[str]:
-        """Generates a list of Google Dorks based on requested types."""
-        dorks = []
-        # Ensure target doesn't have protocol for site: operator
-        parsed_target = urlparse(target)
-        site_target = parsed_target.netloc or parsed_target.path # Use netloc if available
-        if not site_target: return [] # Cannot generate dorks without a valid target domain/path
-
-        base_site_dork = f'site:{site_target}'
-        # More comprehensive dorks
-        if 'login' in dork_types: dorks.extend([f'{base_site_dork} intitle:"login" | intitle:"signin" | inurl:login | inurl:signin | inurl:auth', f'{base_site_dork} "admin" | "administrator" | "staff" login'])
-        if 'password' in dork_types: dorks.extend([f'{base_site_dork} filetype:log | filetype:txt | filetype:cfg | filetype:env | filetype:ini password | pass | pwd | secret', f'{base_site_dork} filetype:sql | filetype:dump | filetype:db | filetype:mdb "password" | "pwd" | "hash"', f'{base_site_dork} intext:"password" | intext:"secret_key" | intext:"api_key"'])
-        if 'config_files' in dork_types: dorks.extend([f'{base_site_dork} filetype:env | filetype:yml | filetype:yaml | filetype:config | filetype:conf | filetype:inf | filetype:rdp | filetype:cfg | filetype:ini | filetype:bak | filetype:backup | filetype:swp | filetype:bkf', f'{base_site_dork} ext:sql | ext:db | ext:mdb | ext:backup | ext:bak | ext:swp | ext:bkf', f'{base_site_dork} "index of /" "config" | "admin" | "backup" | "private" | "etc"'])
-        if 'api_keys' in dork_types: dorks.extend([f'{base_site_dork} "api_key" | "apikey" | "client_secret" | "access_token" | "authorization_bearer"', f'{base_site_dork} filetype:json | filetype:js | filetype:yaml | filetype:yml | filetype:txt api_key | authorization | secret | token'])
-        if 'documents' in dork_types: dorks.extend([f'{base_site_dork} filetype:pdf | filetype:docx | filetype:xlsx | filetype:pptx | filetype:doc | filetype:xls | filetype:ppt "internal" | "confidential" | "private" | "minutes" | "report"'])
-        if 'subdomains' in dork_types: dorks.append(f'site:*.{site_target} -site:www.{site_target}')
-        if 'error_messages' in dork_types: dorks.append(f'inurl:{site_target} "error" | "exception" | "stack trace" | "warning" | "debug"')
-        if 'directory_listing' in dork_types: dorks.append(f'intitle:"index of" {base_site_dork}')
-        if 'sensitive_urls' in dork_types: dorks.extend([f'{base_site_dork} inurl:admin | inurl:dashboard | inurl:private | inurl:secure | inurl:backup | inurl:config'])
-
-        unique_dorks = list(dict.fromkeys(dorks)) # Remove duplicates
-        self.logger.info(f"Generated {len(unique_dorks)} unique dorks for target '{site_target}'.")
-        return unique_dorks
-
-
-    # --- Learning, Critique, Prompt Generation, Insights (Largely unchanged from v3.2/v3.1) ---
-    # These methods provide status and feedback but don't alter core execution logic based on user reqs.
     async def learning_loop(self):
-        """Autonomous learning cycle (Placeholder - requires specific learning goals)."""
-        self.logger.info("BrowsingAgent learning_loop started (currently passive monitoring).")
+        self.logger.info(f"{self.AGENT_NAME} L40+ learning loop started.")
         while not self._stop_event.is_set():
             try:
-                await self._internal_think("Starting learning cycle: Analyzing proxy performance and task outcomes.")
-                # 1. Analyze Proxy Performance
+                learn_interval = int(self.config.get("BROWSER_LEARNING_INTERVAL_S", 3600 * 1))
+                await asyncio.sleep(learn_interval)
+                if self._stop_event.is_set(): break
+                await self._internal_think("Learning cycle: Analyzing proxy performance and detailed UI task outcomes for ThinkTool.")
                 poor_proxies = []
                 proxy_stats = self.internal_state.get('proxy_stats', {})
-                for proxy, stats in proxy_stats.items():
+                for proxy_url, stats in proxy_stats.items():
                     total_attempts = stats.get('success', 0) + stats.get('failure', 0)
-                    if total_attempts > 15: # Higher threshold for analysis
-                        failure_rate = stats.get('failure', 0) / total_attempts
-                        if failure_rate > 0.6: # Flag proxies failing > 60%
-                            poor_proxies.append({"proxy": proxy.split('@')[-1], "failure_rate": failure_rate, "attempts": total_attempts})
-                            self.logger.warning(f"Proxy {proxy.split('@')[-1]} identified as poor performing (Fail rate: {failure_rate:.1%}).")
-
-                if poor_proxies:
-                     # Report poor proxies to Orchestrator/ThinkTool for potential action
-                     await self.log_knowledge_fragment(
-                         agent_source=self.AGENT_NAME, data_type="proxy_performance_alert",
-                         content={"poor_proxies": poor_proxies}, tags=["proxy", "performance", "alert", "monitoring"], relevance_score=0.8
-                     )
-                     # Optionally trigger orchestrator action
-                     # await self.orchestrator.handle_poor_proxies(poor_proxies)
-
-                # 2. Analyze Recent Task Failures (Example: UI Automation)
-                # This requires querying the KB via ThinkTool or accessing task history
-                # failure_fragments = await self.query_knowledge_base(...)
-                # if failed_goals:
-                #    self.logger.warning(f"Recent UI Automation Failures: {dict(failed_goals)}")
-                #    # Trigger LLM analysis or ThinkTool directive to investigate common failures
-
+                    if total_attempts > 5:
+                        failure_rate = stats.get('failure', 0) / total_attempts if total_attempts > 0 else 0
+                        if failure_rate > 0.4:
+                            proxy_display_name = proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url
+                            last_used_iso = stats.get('last_used').isoformat() if isinstance(stats.get('last_used'), datetime) else str(stats.get('last_used'))
+                            poor_proxies.append({"proxy_server": proxy_display_name, "failure_rate": failure_rate, "attempts": total_attempts, "last_used": last_used_iso})
+                if poor_proxies and self.think_tool:
+                     await self.think_tool.execute_task({
+                         "action": "log_knowledge_fragment", "fragment_data": {
+                             "agent_source": self.AGENT_NAME, "data_type": "proxy_performance_alert",
+                             "content": {"poor_performing_proxies": poor_proxies, "analysis_timestamp": datetime.now(timezone.utc).isoformat()},
+                             "tags": ["proxy", "performance", "alert", "browsing_agent"], "relevance_score": 0.85 }})
+                if self.think_tool:
+                    recent_ui_outcomes = await self.think_tool.query_knowledge_base(data_types=["browsing_ui_automation_outcome"], tags=[self.AGENT_NAME], time_window=timedelta(days=1), limit=50)
+                    if recent_ui_outcomes:
+                        detailed_outcomes_summary = []
+                        for frag in recent_ui_outcomes:
+                            try:
+                                content = json.loads(frag.content) if isinstance(frag.content, str) else frag.content
+                                detailed_outcomes_summary.append({
+                                    "service": content.get("service_target", "Unknown"), "goal_summary": content.get("goal_summary", "Unknown"),
+                                    "status": content.get("status_final", "unknown"), "error_type": content.get("error_type"),
+                                    "steps_taken": content.get("steps_taken_count"), "captcha_encounters": content.get("captcha_encounters",0),
+                                    "visual_llm_decisions": content.get("visual_llm_decisions",0),
+                                    "proxy_used_short": content.get("proxy_used_details","N/A"),
+                                    "timestamp": frag.timestamp.isoformat() if isinstance(frag.timestamp, datetime) else str(frag.timestamp)
+                                })
+                            except Exception as e_parse_frag: self.logger.warning(f"Could not parse outcome fragment {frag.id}: {e_parse_frag}")
+                        if detailed_outcomes_summary:
+                            await self.think_tool.execute_task({"action": "process_feedback", "feedback_data": {self.AGENT_NAME: {"type": "ui_automation_performance_deep_dive", "outcomes_summary": detailed_outcomes_summary, "period_analyzed": "last_24_hours", "request_for_thinktool": "Analyze these UI automation outcomes. Identify patterns of failure for specific services or goals. Suggest improvements to BrowsingAgent's visual analysis prompts, interaction strategies, or if specific sites require dedicated 'exploit scripts'."}}})
+                            self.logger.info(f"Sent {len(detailed_outcomes_summary)} UI automation outcome summaries to ThinkTool for deep analysis.")
+                    else: self.logger.info("No detailed UI automation outcomes found in KB for learning cycle.")
                 self.internal_state["last_learning_cycle_ts"] = datetime.now(timezone.utc)
-                self.logger.debug("BrowsingAgent learning cycle complete.")
-
-                learn_interval = int(self.config.get("BROWSER_LEARNING_INTERVAL_S", 7200)) # Default 2 hours
-                await asyncio.sleep(learn_interval)
-
-            except asyncio.CancelledError: self.logger.info("BrowsingAgent learning loop cancelled."); break
-            except Exception as e:
-                self.logger.error(f"Error in BrowsingAgent learning loop: {e}", exc_info=True)
-                await self._report_error(f"Learning loop error: {e}")
-                await asyncio.sleep(60 * 30) # Wait longer after error
+                self.logger.debug(f"{self.AGENT_NAME} learning cycle complete.")
+            except asyncio.CancelledError: self.logger.info(f"{self.AGENT_NAME} learning loop cancelled."); break
+            except Exception as e: self.logger.error(f"Error in {self.AGENT_NAME} learning loop: {e}", exc_info=True); await self._report_error(f"Learning loop error: {e}"); await asyncio.sleep(60 * 15)
 
     async def self_critique(self) -> Dict[str, Any]:
-        """Evaluates agent health, resource usage, and proxy performance."""
         self.logger.info(f"{self.AGENT_NAME}: Performing self-critique.")
         critique = {"status": "ok", "feedback": "Critique pending analysis."}
         try:
-            num_active_contexts = len(self.internal_state.get('browser_contexts', {}))
-            proxy_stats = self.internal_state.get('proxy_stats', {})
-            # Summarize proxy stats without credentials
-            proxy_stats_summary = {
-                p.split('@')[-1]: f"S:{s.get('success',0)}/F:{s.get('failure',0)} ({(s.get('success',0)/(s.get('success',0)+s.get('failure',1)))*100:.1f}%)"
-                for p, s in proxy_stats.items() if (s.get('success',0)+s.get('failure',0)) > 0
+            insights = await self.collect_insights()
+            error_fragments_content = []
+            if self.think_tool:
+                error_fragments = await self.think_tool.query_knowledge_base(data_types=["browsing_ui_automation_outcome"], tags=[self.AGENT_NAME, "failure"], time_window=timedelta(days=3), limit=20)
+                for frag in error_fragments:
+                    try: error_fragments_content.append(json.loads(frag.content) if isinstance(frag.content, str) else frag.content)
+                    except: pass
+            
+            critique_context = {
+                "task": "Critique BrowsingAgent Performance & Resilience", "current_insights": insights,
+                "recent_failure_logs": error_fragments_content,
+                "desired_output_format": "JSON: { \"overall_assessment\": str, \"strengths\": [str], \"weaknesses\": [str], \"suggestions_for_thinktool_directives\": [\"Specific directive for ThinkTool to improve BrowsingAgent (e.g., 'Research new anti-fingerprinting for site X', 'Develop UI exploit script for temp mail Y')\"] }"
             }
-            critique['resource_usage'] = {"active_contexts": num_active_contexts, "max_contexts": self.internal_state['max_concurrent_contexts']}
-            critique['proxy_stats_summary'] = proxy_stats_summary
-
-            feedback_points = [f"Active Contexts: {num_active_contexts}/{self.internal_state['max_concurrent_contexts']}."]
-            high_failure_proxies_count = sum(1 for stats in proxy_stats.values() if (stats.get('success',0) + stats.get('failure',0)) > 10 and stats.get('failure',0) / (stats.get('success',0) + stats.get('failure',1)) > 0.5)
-            if high_failure_proxies_count > 0:
-                feedback_points.append(f"WARNING: {high_failure_proxies_count} proxies show high failure rates (>50% with >10 attempts). Performance degradation possible.")
-                critique['status'] = 'warning'
-            if num_active_contexts >= self.internal_state['max_concurrent_contexts']:
-                feedback_points.append("WARNING: Operating at maximum concurrent context limit. Task throughput may be limited.")
-                critique['status'] = 'warning'
-
-            # TODO: Query DB/KB for recent task success/failure rates specific to this agent.
-
-            critique['feedback'] = " ".join(feedback_points)
-        except Exception as e:
-            self.logger.error(f"Error during self-critique: {e}", exc_info=True)
-            critique['status'] = 'error'; critique['feedback'] = f"Critique failed: {e}"
+            prompt = await self.generate_dynamic_prompt(critique_context)
+            llm_model_pref = settings.OPENROUTER_MODELS.get('think_critique')
+            critique_json = await self._call_llm_with_retry(prompt, model=llm_model_pref, temperature=0.4, max_tokens=1000, is_json_output=True)
+            if critique_json:
+                 try:
+                     critique_result = self._parse_llm_json(critique_json)
+                     if not critique_result: raise ValueError("Parsed critique is None")
+                     critique['feedback'] = critique_result.get('overall_assessment', 'LLM critique generated.')
+                     critique['details'] = critique_result
+                     if self.think_tool: await self.think_tool.execute_task({"action": "log_knowledge_fragment", "fragment_data": {"agent_source": self.AGENT_NAME, "data_type": "self_critique_summary_L40", "content": critique_result, "tags": ["critique", "browsing_agent", "L40"], "relevance_score": 0.9 }})
+                     if self.think_tool and critique_result.get("suggestions_for_thinktool_directives"):
+                         for suggestion_str in critique_result["suggestions_for_thinktool_directives"]:
+                             await self.think_tool.execute_task({"action":"create_directive_from_suggestion", "content": {"source_agent": self.AGENT_NAME, "suggestion": suggestion_str, "priority": 6}})
+                 except Exception as e_parse: self.logger.error(f"Failed to parse self-critique LLM response: {e_parse}"); critique['feedback'] += " Failed to parse LLM critique."; critique['status'] = 'error'
+            else: critique['feedback'] += " LLM critique call failed."; critique['status'] = 'error'
+        except Exception as e: self.logger.error(f"Error during self-critique: {e}", exc_info=True); critique['status'] = 'error'; critique['feedback'] = f"Self-critique failed: {e}"
         return critique
 
     async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
-        """Constructs context-rich prompts for LLM calls, emphasizing visual input."""
         self.logger.debug(f"Generating dynamic prompt for BrowsingAgent task: {task_context.get('task')}")
-        prompt_parts = [self.meta_prompt] # Start with agent's core identity and capabilities
+        prompt_parts = [self.meta_prompt]
         prompt_parts.append("\n--- Current Task & Context ---")
-        # Prioritize key context items
-        priority_keys = ['task', 'current_goal', 'service_context', 'current_url', 'last_action_result', 'special_focus', 'identity_details_summary']
+        priority_keys = ['task', 'current_goal', 'current_sub_goal', 'overall_sub_task_goal', 'service_context', 'current_url', 'last_action_result', 'special_focus', 'identity_details_summary', 'automation_parameters', 'target_description', 'extraction_instructions', 'target_profile_for_analytics', 'query']
         for key in priority_keys:
-            if key in task_context:
-                 value = task_context[key]
-                 value_str = str(value)[:1000] + ("..." if len(str(value)) > 1000 else "") # Limit length
+            if key in task_context and task_context[key] is not None:
+                 value = task_context[key];
+                 value_str = ""
+                 if isinstance(value, (dict,list)):
+                     try: value_str = json.dumps(value, default=str, indent=2)[:1500] + "..." # Limit complex objects
+                     except: value_str = str(value)[:1500] + "..."
+                 else: value_str = str(value)[:1500] + ("..." if len(str(value)) > 1500 else "")
                  prompt_parts.append(f"**{key.replace('_', ' ').title()}**: {value_str}")
 
-        prompt_parts.append("\n**Visual Context:** A screenshot of the current webpage is provided.")
-        prompt_parts.append("**Text Context Snippet:**")
-        text_snippet = task_context.get('page_text_content_snippet') or task_context.get('text_content_snippet', '')
-        prompt_parts.append(f"```\n{text_snippet[:4000]}\n```") # Limit text snippet length
-
-        # Add remaining context items concisely
-        prompt_parts.append("\n**Other Parameters:**")
-        other_params = {k: v for k, v in task_context.items() if k not in priority_keys and k not in ['page_text_content_snippet', 'text_content_snippet', 'task', 'desired_output_format']}
+        prompt_parts.append("\n**Visual Context:** A screenshot of the current webpage is provided with this request.")
+        prompt_parts.append("**Text Context Snippet (from page):**"); text_snippet = task_context.get('page_text_content_snippet', '')
+        prompt_parts.append(f"```\n{text_snippet[:4000]}\n```") # Ensure snippet is not overly long
+        
+        other_params = {k: v for k, v in task_context.items() if k not in priority_keys and k not in ['page_text_content_snippet', 'task', 'desired_output_format', 'image_data']}
         if other_params:
-             try: prompt_parts.append(f"```json\n{json.dumps(other_params, default=str, indent=2)}\n```")
-             except TypeError: prompt_parts.append(str(other_params)[:1000] + "...") # Fallback
-        else: prompt_parts.append("None")
-
-        # --- Specific Instructions based on Task ---
+            prompt_parts.append("\n**Other Parameters for this action:**")
+            try: prompt_parts.append(f"```json\n{json.dumps(other_params, default=str, indent=2)}\n```")
+            except: prompt_parts.append(str(other_params)[:1000] + "...")
+        
         prompt_parts.append("\n--- Your Instructions ---")
         task_type = task_context.get('task')
-        if task_type == 'Determine next UI action based primarily on visual context' or task_type == 'Determine next UI action for account signup':
-            prompt_parts.append(f"Analyze the provided **screenshot** and text snippet. Based *primarily* on the visual layout and the current goal ('{task_context.get('current_goal', 'N/A')}'), determine the single best next action from {task_context.get('available_actions', [])}.")
-            prompt_parts.append("Provide a precise selector (CSS or XPath) or coordinates for the target element. If inputting text, specify the exact text or reference the 'params.<key>' from parameters.") # MODIFIED: Reference 'params.<key>'
-            prompt_parts.append("If a CAPTCHA is visible, use the 'solve_captcha' action and identify its type and target element.")
-            prompt_parts.append("If the goal involves email verification, use 'check_email_verification' when appropriate.")
-            prompt_parts.append("Use 'finish' only when the goal is definitively achieved. Use 'error' if stuck or encountering an unrecoverable issue.")
-            prompt_parts.append("Provide clear reasoning, focusing on visual cues.")
+        if task_type == 'Determine next UI action based primarily on visual context' or task_type == 'Determine next UI action for sub-task based on visual context' or task_type == 'Determine next UI action for account signup':
+            prompt_parts.append(f"Analyze the provided **screenshot** and text snippet. Based *primarily* on the visual layout and the current goal ('{task_context.get('current_goal') or task_context.get('current_sub_goal') or task_context.get('current_micro_goal','N/A')}'), determine the single best next action from {task_context.get('available_actions', [])}.")
+            prompt_parts.append("Provide a precise selector (CSS or XPath if obvious, otherwise a clear visual description of the target element, e.g., 'the large blue button that says Submit') or coordinates for the target element. If inputting text, specify the exact text or reference 'params.<key>' or 'identity.<key>' from automation_parameters.")
+            prompt_parts.append("If a CAPTCHA is visible, use 'solve_captcha'. If extracting a value, use 'extract_value' and specify 'output_variable_name'.")
+            prompt_parts.append("Use 'finish', 'finish_current_micro_goal', or 'finish_entire_sub_task' only when the specific goal is definitively achieved. Use 'error' or 'error_sub_task' if stuck or unrecoverable issue.")
+            prompt_parts.append("Provide clear, concise reasoning, focusing on visual cues and goal alignment.")
         elif task_type == 'Extract structured data from webpage using visual and text context':
             prompt_parts.append(f"Analyze the screenshot and text. Follow these instructions: {task_context.get('extraction_instructions', 'Extract key information.')}")
             prompt_parts.append("Identify the data visually and textually. Use null for missing fields.")
-        elif task_type == 'Analyze webpage screenshot and text for potential credentials...':
+        elif task_type == 'Analyze webpage for credentials/secrets/login_forms':
              prompt_parts.append(f"Carefully examine the **screenshot** and text from URL '{task_context.get('target_url')}' for any potential credentials (passwords, API keys, secrets), sensitive configuration data, exposed login forms, or other security risks.")
              prompt_parts.append("Focus on visual elements like forms, code blocks, and unusual text patterns. Be precise in your findings.")
         elif task_type == 'Check for Google search block/CAPTCHA':
              prompt_parts.append("Analyze the screenshot of the Google search results page. Determine if the search was blocked or if a CAPTCHA is present. Respond with the required JSON structure.")
+        elif task_type == 'Plan micro-steps for UI sub-task':
+            prompt_parts.append(f"Given the overall sub-task goal '{task_context.get('overall_sub_task_goal')}' and the current page state (visual and text), break this down into a sequence of 1-5 very small, precise, actionable micro-steps for UI automation. Each step should be a clear instruction like 'Click the button labeled Next' or 'Input the value X into the field described as Y'.")
         else: prompt_parts.append("Analyze the provided context and visual information to complete the task as described.")
 
         if task_context.get('desired_output_format'):
             prompt_parts.append(f"\n**Output Format:** Respond ONLY with valid JSON matching this structure: {task_context['desired_output_format']}")
-            # Ensure JSON block instruction is clear if needed
-            if "JSON" in task_context.get('desired_output_format', ''):
-                 prompt_parts.append("\n```json") # Start JSON block hint
-
-        final_prompt = "\n".join(prompt_parts)
-        self.logger.debug(f"Generated dynamic prompt for BrowsingAgent task: {task_type} (Length: {len(final_prompt)} chars)")
-        return final_prompt
-
+            if "JSON" in task_context.get('desired_output_format', ''): prompt_parts.append("\n```json")
+        return "\n".join(prompt_parts)
 
     async def collect_insights(self) -> Dict[str, Any]:
-        """Collects insights about browsing activity, resource usage, and proxy status."""
         self.logger.debug("BrowsingAgent collect_insights called.")
         num_active_contexts = len(self.internal_state.get('browser_contexts', {}))
         proxy_stats = self.internal_state.get('proxy_stats', {})
-        total_success = sum(s.get('success', 0) for s in proxy_stats.values())
-        total_failure = sum(s.get('failure', 0) for s in proxy_stats.values())
-        total_attempts = total_success + total_failure
-        avg_proxy_success_rate = (total_success / total_attempts) if total_attempts > 0 else 1.0
-        # Count accounts created in this session (requires tracking)
-        accounts_created = self.internal_state.get('accounts_created_this_session', 0)
+        total_success = sum(s.get('success', 0) for s in proxy_stats.values()); total_failure = sum(s.get('failure', 0) for s in proxy_stats.values())
+        total_attempts = total_success + total_failure; avg_proxy_success_rate = (total_success / total_attempts) if total_attempts > 0 else 1.0
+        accounts_created_session = self.internal_state.get('accounts_created_this_session', 0)
+        last_learning_ts_iso = None
+        if isinstance(self.internal_state.get("last_learning_cycle_ts"), datetime):
+            last_learning_ts_iso = self.internal_state["last_learning_cycle_ts"].isoformat()
+        elif self.internal_state.get("last_learning_cycle_ts") is not None:
+            last_learning_ts_iso = str(self.internal_state["last_learning_cycle_ts"])
 
-        insights = {
-            "agent_name": self.AGENT_NAME, "status": self.status,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "active_contexts": num_active_contexts,
-            "max_contexts": self.internal_state.get('max_concurrent_contexts'),
-            "avg_proxy_success_rate": round(avg_proxy_success_rate, 3),
-            "total_proxy_attempts": total_attempts,
-            "accounts_created_session": accounts_created,
-            }
-        return insights
+        return {"agent_name": self.AGENT_NAME, "status": self.status, "timestamp": datetime.now(timezone.utc).isoformat(),
+            "active_contexts": num_active_contexts, "max_contexts": self.internal_state.get('max_concurrent_contexts'),
+            "avg_proxy_success_rate": round(avg_proxy_success_rate, 3), "total_proxy_attempts": total_attempts,
+            "accounts_created_session": accounts_created, "last_learning_ts": last_learning_ts_iso }
 
-    async def stop(self, timeout: float = 45.0): # Increased timeout for graceful shutdown
-        """Override stop to close browser/contexts and cancel tasks gracefully."""
+    async def stop(self, timeout: float = 60.0):
         if self._status in [self.STATUS_STOPPING, self.STATUS_STOPPED]:
             self.logger.info(f"{self.AGENT_NAME} stop requested but already {self._status}.")
             return
-
-        self.logger.info(f"{self.AGENT_NAME} received stop signal. Initiating graceful shutdown...")
+        self.logger.info(f"{self.AGENT_NAME} received stop signal. Initiating graceful shutdown (timeout: {timeout}s)...")
         self._status = self.STATUS_STOPPING
         self._stop_event.set()
-
-        # 1. Cancel Background Tasks (like learning loop)
         tasks_to_cancel = list(self._background_tasks)
         if tasks_to_cancel:
             self.logger.info(f"Cancelling {len(tasks_to_cancel)} BrowsingAgent background tasks...")
             for task in tasks_to_cancel:
                 if task and not task.done(): task.cancel()
-            # Wait briefly for cancellations
-            await asyncio.sleep(1)
-
-        # 2. Gracefully close browser resources
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         await self._close_browser_and_playwright()
-
-        # 3. Wait for background tasks to finish cancelling
-        if tasks_to_cancel:
-            self.logger.info(f"Waiting up to {timeout/2:.1f}s for background tasks to finalize...")
-            done, pending = await asyncio.wait(tasks_to_cancel, timeout=timeout/2, return_when=asyncio.ALL_COMPLETED)
-            if pending: self.logger.warning(f"{len(pending)} BrowsingAgent background tasks did not cancel/finalize gracefully.")
-
-        # 4. Call base class stop
-        await super().stop(timeout/2) # Pass remaining timeout
+        self.logger.info(f"BrowsingAgent resources closed. Finalizing stop.")
+        self._status = self.STATUS_STOPPED
         self.logger.info(f"{self.AGENT_NAME} stopped.")
 
-    # --- KB Interaction Helpers (Delegate to ThinkTool/Orchestrator) ---
-    async def log_knowledge_fragment(self, *args, **kwargs):
-        """Logs knowledge via ThinkTool or Orchestrator."""
-        if self.think_tool and hasattr(self.think_tool, 'log_knowledge_fragment'):
-            return await self.think_tool.log_knowledge_fragment(*args, **kwargs)
-        elif hasattr(self.orchestrator, 'log_knowledge_fragment'): # Fallback to orchestrator
-             return await self.orchestrator.log_knowledge_fragment(*args, **kwargs)
-        else: self.logger.error("Neither ThinkTool nor Orchestrator available for logging KB fragment."); return None
-
-    async def query_knowledge_base(self, *args, **kwargs):
-         """Queries knowledge via ThinkTool or Orchestrator."""
-         # Browsing agent typically executes, doesn't query KB itself often
-         self.logger.warning("BrowsingAgent query_knowledge_base called - typically delegated.")
-         if self.think_tool and hasattr(self.think_tool, 'query_knowledge_base'):
-             return await self.think_tool.query_knowledge_base(*args, **kwargs)
-         elif hasattr(self.orchestrator, 'query_knowledge_base'):
-              return await self.orchestrator.query_knowledge_base(*args, **kwargs)
-         return []
-
-    # --- Helper Methods ---
-    def _parse_llm_json(self, json_string: str, expect_type: Union[Type[dict], Type[list]] = dict) -> Union[Dict, List, None]:
-        """Safely parses JSON from LLM output, handling markdown code blocks and common issues."""
-        if not json_string: return None
-        try:
-            # 1. Find JSON block (handles ```json ... ```)
-            match = None
-            if expect_type == list:
-                match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', json_string, re.DOTALL)
-                start_char, end_char = '[', ']'
-            else: # Default to dict
-                match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', json_string, re.DOTALL)
-                start_char, end_char = '{', '}'
-
-            potential_json = ""
-            if match:
-                potential_json = match.group(1)
-            else:
-                # If no markdown block, try finding the first '{' or '[' and last '}' or ']'
-                start_index = json_string.find(start_char)
-                end_index = json_string.rfind(end_char)
-                if start_index != -1 and end_index != -1 and end_index > start_index:
-                    potential_json = json_string[start_index : end_index + 1]
-                else:
-                    # As a last resort, assume the whole string might be JSON if it starts/ends correctly
-                    trimmed = json_string.strip()
-                    if trimmed.startswith(start_char) and trimmed.endswith(end_char):
-                         potential_json = trimmed
-                    else:
-                         self.logger.warning(f"Could not extract potential JSON ({expect_type}) structure from LLM output: {json_string[:200]}...")
-                         return None
-
-            # 2. Clean and Parse
-            try:
-                # Basic cleaning: remove trailing commas before closing bracket/brace
-                cleaned_json = re.sub(r',\s*([\}\]])', r'\1', potential_json)
-                # Attempt parsing
-                parsed_json = json.loads(cleaned_json)
-            except json.JSONDecodeError as e:
-                self.logger.error(f"JSON parsing failed after cleaning ({e}): {potential_json[:200]}...")
-                # Optionally try more aggressive cleaning here if needed
-                return None
-
-            # 3. Validate Type
-            if isinstance(parsed_json, expect_type):
-                return parsed_json
-            else:
-                self.logger.error(f"Parsed JSON type mismatch. Expected {expect_type}, got {type(parsed_json)}")
-                return None
-
-        except Exception as e:
-            self.logger.error(f"Unexpected error during JSON parsing: {e}", exc_info=True)
-            return None
+# --- End of agents/browsing_agent.py ---

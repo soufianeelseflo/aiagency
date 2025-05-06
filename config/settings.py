@@ -228,9 +228,8 @@ class Settings(BaseSettings):
         else:
             logger.warning(f"Attempted to get non-existent attribute '{secret_name}' via get_secret.")
             return None
-        
-# --- Instantiate Settings ---
 
+# --- Instantiate Settings ---
 try:
     settings = Settings()
     logger.info(f"Settings loaded for App: {settings.APP_NAME} v{settings.APP_VERSION}")

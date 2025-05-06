@@ -1,7 +1,7 @@
 # Filename: agents/social_media_manager.py
 # Description: Agentic Social Media Manager for planning campaigns, managing multiple
 #              accounts, creating/posting content, analyzing performance, and learning.
-# Version: 3.0 (Agentic Learning & Full Implementation)
+# Version: 4.0 (Level 35+ Transmutation - True Agentic Social Dominance)
 
 import logging
 import os
@@ -11,735 +11,854 @@ import random
 import time
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List, Union
-from collections import Counter
+from typing import Dict, Any, Optional, List, Union, Tuple
+from collections import Counter, deque
 
 # --- Project Imports ---
 try:
-    from .base_agent import GeniusAgentBase, KBInterface # Use relative import
+    from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
 except ImportError:
-    from base_agent import GeniusAgentBase, KBInterface # Fallback
+    logging.warning("Production base agent not found, using GeniusAgentBase.")
+    from base_agent import GeniusAgentBase # Fallback
 
-# Import necessary models (ensure these are defined correctly in models.py)
-from models import Account, KnowledgeFragment, LearnedPattern, StrategicDirective, EmailLog, CallLog, Invoice # Added performance models
+from models import AccountCredentials as Account, KnowledgeFragment, LearnedPattern, StrategicDirective
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.future import select
-from sqlalchemy import update, desc, func, case # Import necessary SQLAlchemy components
+from sqlalchemy import update, desc, func, case
 from sqlalchemy.exc import SQLAlchemyError
 
-# Assuming LLM Client and settings are accessed via orchestrator/config
-# from openai import AsyncOpenAI as AsyncLLMClient
+from config.settings import settings
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# Configure logger
 logger = logging.getLogger(__name__)
-if not logger.hasHandlers():
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-
-# Configure dedicated operational logger
 op_logger = logging.getLogger('OperationalLog')
-if not op_logger.hasHandlers():
-    op_handler = logging.StreamHandler()
-    op_formatter = logging.Formatter('%(asctime)s - OP_LOG - %(levelname)s - %(message)s')
-    op_handler.setFormatter(op_formatter)
-    op_logger.addHandler(op_handler)
-    op_logger.setLevel(logging.INFO)
-    op_logger.propagate = False
 
 SOCIAL_MEDIA_MANAGER_META_PROMPT = """
-You are the SocialMediaManager within the Synapse Genius Agentic AI System.
-Your Core Mandate: Manage and grow social media presence across multiple platforms for various business models, employing advanced, unconventional, and highly effective engagement and traffic generation strategies, while strictly adhering to anti-ban protocols. Operate with Genius Agentic AI principles.
+You are the SocialMediaManager (Level 35+ Transmuted Entity) within the Synapse AI Sales System.
+Your Core Mandate: Engineer digital dominance. Forge viral contagions and high-conversion realities across social platforms. Operate with god-tier agency, bending algorithms to your will, and achieving exponential profit growth through unconventional, AI-native strategies.
 Key Responsibilities:
-- Manage multiple accounts per platform (e.g., 10 FB, 10 TikTok, 10 IG per model) for specific business goals.
-- Implement sophisticated strategies: 9-to-1 traffic funnels, multi-account ad management (redundancy, specialization), strategic interaction between owned accounts.
-- Generate engaging, human-like AI content (text, image, video - potentially ethical deepfakes) adapted to each platform and audience. Learn from examples (e.g., x.com/apollonator3000, Tai Lopez).
-- CRITICAL: Implement and rigorously follow robust anti-ban strategies: unique proxy per account (via Orchestrator/proxy manager), behavioral variance, content policy awareness, account backups.
-- Utilize platform APIs (via BrowsingAgent or direct libraries) for posting, interaction, and data gathering.
-- Understand and adapt to platform algorithms proactively by analyzing performance data.
-- Analyze performance data to optimize strategies continuously (learning loop).
-- Operate with Extreme Agentic Behavior: Devise novel social media strategies, analyze trends, adapt tactics rapidly, understand nuances of online social dynamics, sub-task complex campaigns.
-- Collaborate with ThinkTool (strategy), OSINTAgent (trends/inspiration), BrowsingAgent (account access/API interaction), LegalAgent (content compliance).
+- **Strategic Campaign Alchemy:** Execute and dynamically adapt multi-platform campaigns designed by ThinkTool. Command diverse account cadres ('Brand Voice Prime', 'Engagement Swarm', 'Traffic Alchemists', 'Algorithmic Probes', 'Shadow Ops Infiltrators') with fluid objectives.
+- **Hyper-Contextual Content Singularity:** Transmute raw concepts or existing assets (from ThinkTool directives) into platform-resonant, psychologically irresistible content. Fuse target persona psychographics, real-time algorithmic insights, evolving campaign narratives, and calculated grey-area content angles (vetted by LegalAgent via ThinkTool) into each creation.
+- **AI-Driven Content Propagation & Swarm Dynamics:** Maximize content impact velocity. Intelligently repurpose peak-performing assets across platforms. Orchestrate multi-account "swarm" engagements to manipulate algorithmic amplification and sculpt social proof, as directed by ThinkTool.
+- **Algorithmic Warfare & Anti-Ban Supremacy:** Proactively map and exploit algorithmic biases using experimental "Shadow Probe" accounts. Analyze performance data and ThinkTool's radar findings to predict and counter platform changes. Implement and evolve bleeding-edge anti-ban protocols: dynamic, context-aware proxy assignment (via Orchestrator), sophisticated behavioral fingerprinting variance, pre-emptive content policy compliance (via LegalAgent), and predictive account health management.
+- **Autonomous Learning & Predictive Adaptation:** Continuously analyze multi-vector performance metrics. Identify anomalies and emergent patterns. Feed high-fidelity data and strategic queries to ThinkTool. Dynamically adjust content styles, posting cadences, and engagement tactics based on learned patterns and ThinkTool's evolving meta-strategy.
+- **Inter-Agent Synergy & Resource Optimization:** Masterful collaboration with ThinkTool (meta-strategy, exploit identification), BrowsingAgent (flawless execution), LegalAgent (risk boundary definition). Optimize account credential and proxy resource utilization via Orchestrator.
+**Goal:** Ascend as the agency's AI-powered social media sovereign. Achieve unparalleled market penetration and profit multiplication by out-innovating competitors and mastering the digital chaos.
 """
 
 class SocialMediaManager(GeniusAgentBase):
-    """
-    Agentic Social Media Manager: Plans and executes campaigns, manages accounts,
-    generates content, analyzes performance, and learns autonomously.
-    Version: 3.0
-    """
     AGENT_NAME = "SocialMediaManager"
 
     def __init__(self, orchestrator: Any, session_maker: Optional[async_sessionmaker[AsyncSession]] = None):
-        """Initializes the SocialMediaManager."""
-        config = getattr(orchestrator, 'config', None)
-        kb_interface = getattr(orchestrator, 'kb_interface', None)
-        super().__init__(agent_name=self.AGENT_NAME, kb_interface=kb_interface, orchestrator=orchestrator, config=config)
-        self.session_maker = session_maker
+        config = getattr(orchestrator, 'config', settings)
+        super().__init__(agent_name=self.AGENT_NAME, orchestrator=orchestrator, config=config, session_maker=session_maker)
+        self.meta_prompt = SOCIAL_MEDIA_MANAGER_META_PROMPT
+        self.think_tool = getattr(self.orchestrator, 'agents', {}).get('think')
 
         self.internal_state = getattr(self, 'internal_state', {})
-        self.internal_state['managed_accounts'] = {} # { platform: [AccountDetails] }
-        self.internal_state['current_campaign_plan'] = None
-        self.internal_state['platform_configs'] = {} # Cache for platform-specific selectors/URLs
-        self.internal_state['account_rotation_index'] = {} # { platform: index }
-        self.internal_state['account_performance'] = {} # { account_id: {eng_rate: float, health: str} } - Updated by learning loop
-        self.internal_state['content_style_preferences'] = {} # { platform: preferred_style } - Updated by learning loop
-        self.internal_state['learning_interval_seconds'] = int(self.config.get("SMM_LEARNING_INTERVAL_S", 3600 * 3)) # Learn every 3 hours
-        self.internal_state['critique_interval_seconds'] = int(self.config.get("SMM_CRITIQUE_INTERVAL_S", 3600 * 12)) # Critique twice daily
-        self.internal_state['last_learning_run'] = None
-        self.internal_state['last_critique_run'] = None
+        self.internal_state['managed_accounts'] = {}
+        self.internal_state['current_campaign_plan_id'] = None
+        self.internal_state['platform_configs'] = {}
+        self.internal_state['account_rotation_index'] = {}
+        self.internal_state['learning_interval_seconds'] = int(self.config.get("SMM_LEARNING_INTERVAL_S", 3600 * 1))
+        self.internal_state['critique_interval_seconds'] = int(self.config.get("SMM_CRITIQUE_INTERVAL_S", 3600 * 4))
+        self.internal_state['last_learning_run'] = time.time() - self.internal_state['learning_interval_seconds']
+        self.internal_state['last_critique_run'] = time.time() - self.internal_state['critique_interval_seconds']
+        self.internal_state['performance_metrics_cache'] = {} # platform: {metric: {value, timestamp, trend}}
+        self.internal_state['recent_post_performance'] = deque(maxlen=100) # Store details of recent posts for quick analysis
 
-        # Load managed accounts immediately
-        asyncio.create_task(self._load_managed_accounts())
-
-        self.logger.info(f"{self.AGENT_NAME} v3.0 (Agentic) initialized.")
+        asyncio.create_task(self._load_and_initialize_managed_accounts())
+        self.logger.info(f"{self.AGENT_NAME} v4.0 (L35+ Transmutation) initialized.")
 
     async def log_operation(self, level: str, message: str):
-        """Helper to log to the operational log file with agent context."""
         log_func = getattr(op_logger, level.lower(), op_logger.debug)
         prefix = ""
         if level.lower() in ['warning', 'error', 'critical']: prefix = f"**{level.upper()}:** "
         try: log_func(f"- [{self.agent_name}] {prefix}{message}")
-        except Exception as log_err:
-            print(f"OPERATIONAL LOG FAILED ({self.agent_name}): {level} - {message} | Error: {log_err}")
-            logger.error(f"Failed to write to operational log from {self.agent_name}: {log_err}")
+        except Exception as log_err: logger.error(f"Failed to write to OP log from {self.agent_name}: {log_err}")
 
-    async def _load_managed_accounts(self):
-        """Loads active social media account details from the database."""
-        if not self.session_maker:
-            self.logger.error("Database session maker not available. Cannot load managed accounts.")
-            return
-        self.logger.info("Loading managed social media accounts from database...")
-        # Make platforms configurable via settings
-        platforms_to_manage = self.config.get("SMM_PLATFORMS", ["facebook.com", "tiktok.com", "instagram.com", "x.com"])
+    async def _load_and_initialize_managed_accounts(self):
+        if not self.session_maker: self.logger.error("DB session maker not available."); return
+        self.logger.info("Loading and initializing managed social media accounts...")
+        platforms_to_manage = self.config.get("SMM_PLATFORMS", ["x.com", "facebook.com", "instagram.com", "tiktok.com", "linkedin.com"])
         loaded_accounts = {p: [] for p in platforms_to_manage}
         try:
             async with self.session_maker() as session:
-                stmt = select(Account).where(
-                    Account.service.in_(platforms_to_manage),
-                    Account.is_available == True
-                )
+                stmt = select(Account).where(Account.service.in_(platforms_to_manage))
                 result = await session.execute(stmt)
-                accounts = result.scalars().all()
-                for acc in accounts:
-                    acc_details = { "id": acc.id, "email": acc.email, "username": acc.username, "vault_path": acc.vault_path, "service": acc.service }
+                accounts_from_db = result.scalars().all()
+                for acc in accounts_from_db:
+                    acc_details = {
+                        "id": acc.id, "identifier": acc.account_identifier, "service": acc.service,
+                        "status_db": acc.status, "notes": acc.notes,
+                        "health_status": "unknown", "last_used_post": None,
+                        "post_success_rate": 1.0, "post_attempts": 0, "engagement_metrics_summary": {},
+                        "last_login_fail_ts": None, "last_successful_post_ts": None
+                    }
                     if acc.service in loaded_accounts: loaded_accounts[acc.service].append(acc_details)
-
             self.internal_state['managed_accounts'] = loaded_accounts
-            self.internal_state['account_rotation_index'] = {p: 0 for p in loaded_accounts}
+            self.internal_state['account_rotation_index'] = {p: {} for p in loaded_accounts}
             total_accounts = sum(len(v) for v in loaded_accounts.values())
-            self.logger.info(f"Loaded {total_accounts} managed social media accounts across {len(loaded_accounts)} platforms.")
-            for platform, acc_list in loaded_accounts.items(): self.logger.info(f" - {platform}: {len(acc_list)} accounts")
+            self.logger.info(f"Loaded {total_accounts} social media account records. Health status to be determined by ThinkTool/Learning Loop.")
+            if total_accounts > 10 and self.think_tool:
+                asyncio.create_task(self.think_tool.execute_task({
+                    "action": "assess_initial_account_health",
+                    "content": {"service_filter_list": platforms_to_manage, "priority_reason": "SMM Cold Start"}
+                }))
+        except Exception as e: self.logger.error(f"Error loading managed accounts: {e}", exc_info=True)
 
-        except SQLAlchemyError as db_err: self.logger.error(f"Database error loading managed accounts: {db_err}", exc_info=True)
-        except Exception as e: self.logger.error(f"Unexpected error loading managed accounts: {e}", exc_info=True)
-
-    def _get_managed_account(self, platform: str, criteria: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
-        """Selects an available managed account, potentially based on criteria or performance."""
+    def _get_managed_account(self, platform: str, account_group_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
         platform_key = platform.lower().replace("https://", "").replace("www.", "")
-        accounts = self.internal_state.get('managed_accounts', {}).get(platform_key)
-        if not accounts:
-            self.logger.warning(f"No managed accounts loaded for platform: {platform_key}")
-            return None
+        all_platform_accounts = self.internal_state.get('managed_accounts', {}).get(platform_key, [])
+        if not all_platform_accounts: self.logger.warning(f"No managed accounts for platform: {platform_key}"); return None
 
-        num_accounts = len(accounts)
-        # TODO: Implement smarter selection based on criteria (e.g., account_group from plan)
-        # or performance/health data stored in self.internal_state['account_performance']
-        # For now, use simple round-robin.
-        current_index = self.internal_state.get('account_rotation_index', {}).get(platform_key, 0)
-        selected_account = accounts[current_index]
-        self.internal_state.setdefault('account_rotation_index', {})[platform_key] = (current_index + 1) % num_accounts
+        candidate_accounts = [
+            acc for acc in all_platform_accounts
+            if acc.get('status_db') == 'active' and
+               acc.get('health_status') not in ['banned', 'locked', 'permanently_restricted'] and
+               (not acc.get('last_login_fail_ts') or (datetime.now(timezone.utc) - acc['last_login_fail_ts'] > timedelta(hours=self.config.get("SMM_ACCOUNT_LOGIN_FAIL_COOLDOWN_H", 6)))) # Cooldown after login fail
+        ]
+        
+        if account_group_hint:
+            group_candidates = [acc for acc in candidate_accounts if account_group_hint.lower() in (acc.get('notes') or '').lower()]
+            if group_candidates: candidate_accounts = group_candidates
+            else: self.logger.warning(f"No 'active'/'healthy' accounts in group '{account_group_hint}' on {platform_key}. Considering any healthy account.")
+        
+        if not candidate_accounts: self.logger.warning(f"No 'active'/'healthy' accounts found for {platform_key} (Group: {account_group_hint})."); return None
 
-        self.logger.debug(f"Selected account for {platform_key}: {selected_account.get('email') or selected_account.get('username')}")
+        # Sort by health (good > unknown > watch > risky), then by least recently used for posting
+        health_priority = {'good': 0, 'unknown': 1, 'watch': 2, 'risky': 3}
+        candidate_accounts.sort(key=lambda x: (
+            health_priority.get(x.get('health_status'), 99),
+            x.get('last_used_post') or datetime.min.replace(tzinfo=timezone.utc)
+        ))
+        
+        selected_account = candidate_accounts[0]
+        # Optimistic update, actual success will confirm
+        # self.internal_state['managed_accounts'][platform_key][all_platform_accounts.index(selected_account)]['last_used_post'] = datetime.now(timezone.utc)
+
+        self.logger.debug(f"Selected account ID {selected_account.get('id')} ({selected_account.get('identifier')}) for {platform_key} (Group: {account_group_hint or 'any'}, Health: {selected_account.get('health_status')}).")
         return selected_account
 
     async def execute_task(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Executes a social media-related task."""
         action = task_details.get('action', 'unknown')
-        platform = task_details.get('platform', 'unknown')
-        self.logger.info(f"{self.AGENT_NAME} received task: {action} on {platform}")
-        self.status = "working"
+        self.logger.info(f"{self.AGENT_NAME} received task: {action}")
+        self._status = self.STATUS_EXECUTING
         result = {"status": "failure", "message": f"Unsupported action: {action}"}
-
         try:
-            if action == 'post':
+            if action == 'post_content':
                 result = await self._handle_post_action(task_details)
-            elif action == 'analyze':
+            elif action == 'strategic_interaction':
+                result = await self._handle_strategic_interaction(task_details)
+            elif action == 'analyze_social_performance':
                 result = await self._handle_analyze_action(task_details)
-            elif action == 'plan_campaign':
-                 plan = await self._create_campaign_plan(task_details)
-                 if plan: result = {"status": "success", "message": "Campaign plan created.", "plan": plan}
-                 else: result = {"status": "failure", "message": "Failed to create campaign plan."}
-            elif action == 'execute_campaign':
-                 plan_to_execute = self.internal_state.get('current_campaign_plan') or task_details.get('plan')
-                 if plan_to_execute:
-                      asyncio.create_task(self._execute_campaign_plan(plan_to_execute))
-                      result = {"status": "success", "message": "Campaign execution initiated in background."}
-                 else: result = {"status": "failure", "message": "No campaign plan found to execute."}
+            elif action == 'plan_social_campaign':
+                 plan_result = await self._create_campaign_plan(task_details)
+                 if plan_result and plan_result.get("status") == "success":
+                     self.internal_state['current_campaign_plan_id'] = plan_result.get("plan_kf_id")
+                     result = {"status": "success", "message": "Campaign plan generated by ThinkTool.", "plan_kf_id": plan_result.get("plan_kf_id")}
+                 else: result = {"status": "failure", "message": f"Failed to create campaign plan via ThinkTool: {plan_result.get('message') if plan_result else 'Unknown error'}"}
+            elif action == 'execute_social_campaign':
+                 plan_kf_id = self.internal_state.get('current_campaign_plan_id') or task_details.get('plan_kf_id')
+                 if plan_kf_id and self.think_tool:
+                      plan_fragments = await self.think_tool.query_knowledge_base(data_types=["social_campaign_plan"], content_query=f'"id": {plan_kf_id}') # More robust query
+                      if plan_fragments:
+                          campaign_plan_data = json.loads(plan_fragments[0].content)
+                          asyncio.create_task(self._execute_campaign_plan(campaign_plan_data.get("plan", []), plan_kf_id))
+                          result = {"status": "success", "message": "Campaign execution initiated."}
+                      else: result = {"status": "failure", "message": f"Campaign plan KF ID {plan_kf_id} not found."}
+                 else: result = {"status": "failure", "message": "No campaign plan KF ID or ThinkTool unavailable."}
+            elif action == 'repurpose_content_cross_platform':
+                result = await self._handle_repurpose_content(task_details)
+            elif action == 'run_algorithmic_probe':
+                result = await self._run_algorithmic_probe(task_details)
+            elif action == 'update_account_health_status': # New action called by ThinkTool
+                account_id = task_details.get("account_id")
+                new_health = task_details.get("new_health_status")
+                reason = task_details.get("reason")
+                if account_id and new_health:
+                    result = await self._update_specific_account_health(account_id, new_health, reason)
+                else: result = {"status": "failure", "message": "Missing account_id or new_health_status."}
             else: self.logger.warning(f"Unsupported action '{action}' for SocialMediaManager.")
-
         except Exception as e:
-            self.logger.error(f"Error executing social media task '{action}' on {platform}: {e}", exc_info=True)
+            self.logger.error(f"Error executing SMM task '{action}': {e}", exc_info=True)
             result = {"status": "error", "message": f"Unexpected error: {e}"}
-            if hasattr(self.orchestrator, 'report_error'): await self.orchestrator.report_error(self.AGENT_NAME, f"Task '{action}' failed: {e}")
+            await self._report_error(f"Task '{action}' failed: {e}")
         finally:
-            self.status = "idle"
-            self.logger.info(f"{self.AGENT_NAME} finished task: {action} on {platform}. Status: {result.get('status', 'failure')}")
+            self._status = self.STATUS_IDLE
         return result
 
-    async def _handle_post_action(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Handles the logic for posting content."""
-        platform = task_details.get('platform')
-        original_content = task_details.get('content')
-        goal = task_details.get('goal', 'engagement')
-        target_account_id = task_details.get('account_id') # Optional
+    async def _update_specific_account_health(self, account_id: int, new_health: str, reason: str) -> Dict[str,Any]:
+        """Updates the health status of a specific managed account in internal_state."""
+        updated = False
+        for platform, accounts in self.internal_state.get('managed_accounts', {}).items():
+            for acc in accounts:
+                if acc.get('id') == account_id:
+                    acc['health_status'] = new_health
+                    self.logger.info(f"Updated health status for account ID {account_id} to '{new_health}'. Reason: {reason}")
+                    updated = True
+                    break
+            if updated: break
+        if updated: return {"status": "success", "message": f"Account {account_id} health updated to {new_health}."}
+        else: return {"status": "warning", "message": f"Account ID {account_id} not found in managed accounts for health update."}
 
-        if not platform or not original_content: return {"status": "failure", "message": "Missing platform or content."}
 
-        # 1. Refine Content
-        await self._internal_think(f"Refining content for {platform} post. Goal: {goal}.")
-        refinement_prompt = await self.generate_dynamic_prompt({
-            "task": "Refine social media content", "platform": platform,
-            "original_content": original_content, "goal": goal,
-            "desired_output_format": "Refined post text suitable for the platform, including relevant hashtags."
-        })
-        refined_content = await self._call_llm_with_retry(refinement_prompt, max_tokens=1024, temperature=0.7)
-        if not refined_content: refined_content = original_content
+    async def _generate_post_content(self, platform: str, content_directive: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        brief = content_directive.get("content_brief", "Create engaging social media content.")
+        goal = content_directive.get("goal", "engagement")
+        target_persona = content_directive.get("target_persona_profile", {})
+        algo_insights = content_directive.get("platform_algorithm_insights", "N/A") # From ThinkTool
+        campaign_narrative = content_directive.get("current_campaign_narrative_arc", "N/A")
+        grey_angle = content_directive.get("grey_area_content_angle_suggestion")
+        voice_exemplars = content_directive.get("brand_voice_exemplars", [])
+        content_tags_from_plan = content_directive.get("content_tags", [])
+        favored_phrasing_patterns = content_directive.get("favored_phrasing_patterns", []) # From ThinkTool
 
-        # 2. Select Account & Credentials
-        account_details = self._get_managed_account(platform) # Add criteria if needed
-        if not account_details: return {"status": "failure", "message": f"No account for {platform}."}
-        credentials = await self._get_credentials_for_account(account_details)
-        if not credentials: return {"status": "failure", "message": "Credentials missing."}
-
-        # 3. Get Proxy
-        proxy_info = await self._get_proxy_for_action(f"social_post_{platform}")
-
-        # 4. Delegate Posting
-        await self._internal_think(f"Delegating post to {platform} using account {account_details.get('email')} via BrowsingAgent.")
-        platform_config = self._get_platform_config(platform)
-        browsing_task_details = {
-            "action": "social_media_post", "target_platform": platform,
-            "login_url": platform_config.get("login_url"), "post_url": platform_config.get("post_url"),
-            "selectors": platform_config.get("selectors", {}),
-            "account_email": account_details.get('email'), "account_username": account_details.get('username'),
-            "account_password": credentials.get('password'), "post_content": refined_content, "proxy_info": proxy_info
-        }
-
-        if hasattr(self.orchestrator, 'delegate_task'):
-             post_result = await self.orchestrator.delegate_task("BrowsingAgent", browsing_task_details)
-             if post_result and post_result.get("status") == "success":
-                 # Log success to KB for learning loop
-                 await self.log_knowledge_fragment(
-                     agent_source=self.AGENT_NAME, data_type="social_post_outcome",
-                     content={"platform": platform, "account_id": account_details['id'], "status": "success", "post_id": post_result.get("post_id")},
-                     tags=["social_post", "success", platform], relevance_score=0.7
-                 )
-                 return {"status": "success", "message": f"Successfully delegated post to {platform}.", "post_id": post_result.get("post_id", "N/A")}
-             else:
-                  error_msg = post_result.get('message', 'Unknown error') if post_result else 'No result'
-                  # Log failure to KB
-                  await self.log_knowledge_fragment(
-                      agent_source=self.AGENT_NAME, data_type="social_post_outcome",
-                      content={"platform": platform, "account_id": account_details['id'], "status": "failure", "error": error_msg},
-                      tags=["social_post", "failure", platform], relevance_score=0.6
-                  )
-                  return {"status": "failure", "message": f"BrowsingAgent failed to post: {error_msg}"}
-        else: return {"status": "failure", "message": "Orchestrator missing delegate_task capability."}
-
-    async def _handle_analyze_action(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Handles the logic for analyzing social media performance."""
-        platform = task_details.get('platform')
-        metric = task_details.get('metric', 'engagement')
-        target_profile = task_details.get('target_profile')
-        account_id = task_details.get('account_id')
-
-        if not platform: return {"status": "failure", "message": "Missing platform."}
-
-        # 1. Delegate Data Fetch
-        fetch_agent = "OSINTAgent" if not account_id else "BrowsingAgent"
-        fetch_action = "fetch_public_social_metrics" if fetch_agent == "OSINTAgent" else "fetch_account_social_metrics"
-        await self._internal_think(f"Delegating data fetch ({metric}) to {fetch_agent} for platform: {platform}.")
-
-        fetch_task_details = {"action": fetch_action, "platform": platform, "metrics_required": [metric], "target_profile": target_profile}
-        if fetch_agent == "BrowsingAgent":
-             account_details = self._get_managed_account(platform) # Or find by account_id
-             if not account_details: return {"status": "failure", "message": f"No account for {platform}."}
-             credentials = await self._get_credentials_for_account(account_details)
-             if not credentials: return {"status": "failure", "message": "Credentials missing."}
-             proxy_info = await self._get_proxy_for_action(f"social_analyze_{platform}")
-             fetch_task_details.update({
-                 "account_email": account_details.get('email'), "account_username": account_details.get('username'),
-                 "account_password": credentials.get('password'), "proxy_info": proxy_info
-             })
-
-        fetched_data = None
-        if hasattr(self.orchestrator, 'delegate_task'):
-             fetch_result = await self.orchestrator.delegate_task(fetch_agent, fetch_task_details)
-             if fetch_result and fetch_result.get("status") == "success":
-                 fetched_data = fetch_result.get("data")
-                 if not fetched_data: return {"status": "failure", "message": f"No data returned by {fetch_agent}."}
-                 self.logger.info(f"Successfully fetched data from {fetch_agent}.")
-             else:
-                 error_msg = fetch_result.get('message', 'Unknown error') if fetch_result else f'No result from {fetch_agent}'
-                 return {"status": "failure", "message": f"Data fetch failed: {error_msg}"}
-        else: return {"status": "failure", "message": "Orchestrator missing delegate_task capability."}
-
-        # 2. Analyze Data via LLM
-        await self._internal_think(f"Analyzing fetched {metric} data for {platform} via LLM.")
-        try: data_str = json.dumps(fetched_data, default=str, indent=2)
-        except TypeError: data_str = str(fetched_data)
-
-        analysis_prompt = await self.generate_dynamic_prompt({
-            "task": "Analyze social media data", "platform": platform, "metric": metric,
-            "fetched_data_summary": data_str[:3000] + "..." if len(data_str) > 3000 else data_str,
-            "desired_output_format": "Brief summary of key findings regarding the metric."
-        })
-        analysis_summary = await self._call_llm_with_retry(analysis_prompt, max_tokens=500, temperature=0.3)
-
-        if analysis_summary:
-            await self.log_knowledge_fragment(
-                agent_source=self.AGENT_NAME, data_type="social_media_analysis",
-                content={"platform": platform, "metric": metric, "summary": analysis_summary, "raw_data_preview": data_str[:500]},
-                tags=["analysis", "social_media", platform, metric], relevance_score=0.8
-            )
-            return {"status": "success", "message": f"Successfully analyzed {metric} for {platform}.", "analysis_summary": analysis_summary}
-        else: return {"status": "failure", "message": "Data fetched, but LLM analysis failed."}
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
-    async def _create_campaign_plan(self, task_details: Dict[str, Any]) -> Optional[List[Dict]]:
-        """Generates a structured social media campaign plan using an LLM."""
-        self.logger.info("Generating social media campaign plan via LLM...")
-        campaign_goal = task_details.get('goal', 'Increase brand awareness and generate leads')
-        target_platform = task_details.get('platform', 'Multiple')
-        duration = task_details.get('duration', '1 week')
-        target_audience = task_details.get('audience', 'General audience interested in UGC')
-
-        await self._internal_think(f"Fetching context for campaign plan: Trends for {target_platform}, Competitor strategies.")
-        kb_context_str = await self._get_campaign_context(target_platform, target_audience)
+        await self._internal_think(f"Generating hyper-contextual content for {platform}. Goal: {goal}. Brief: {brief[:50]}...")
 
         task_context = {
-            "task": "Create Social Media Campaign Plan", "campaign_goal": campaign_goal,
-            "target_platform": target_platform, "duration": duration, "target_audience": target_audience,
-            "knowledge_base_context": kb_context_str,
-            "desired_output_format": "JSON list of steps: [ { \"step\": int, \"day\": int, \"platform\": str, \"account_group\": str ('Traffic'|'Main'|'Engagement'), \"action_type\": str ('post'|'interact'|'ad'), \"content_brief\": str (detailed brief for LLM content gen), \"interaction_target\": str (e.g., specific user type, hashtag, competitor post URL), \"timing\": str (e.g., 'Morning', '1 PM EST', 'Peak Hours') } ]"
+            "task": "Generate Hyper-Contextual Social Media Post", "platform": platform,
+            "content_brief": brief, "goal": goal, "target_persona": target_persona,
+            "algorithm_insights": algo_insights, "campaign_narrative": campaign_narrative,
+            "grey_area_angle": grey_angle, "voice_exemplars": voice_exemplars,
+            "initial_tags_from_plan": content_tags_from_plan,
+            "favored_phrasing_patterns": favored_phrasing_patterns,
+            "desired_output_format": "JSON: {\"text\": \"<Post text, optimized for platform, persona, goal, and insights. Fuse styles from exemplars and incorporate favored phrasing patterns. Include hashtags, emojis, strong CTA>\", \"image_needed\": bool, \"image_concept_brief\": \"<If image_needed, detailed visual concept brief: mood, key elements, artistic style (e.g., photorealistic, 8k, cinematic lighting), color palette, any specific AI art generator keywords if known>\", \"video_needed\": bool, \"video_concept_brief\": \"<If video_needed, compelling concept & key scenes/hooks, desired length, music style, voiceover tone>\", \"generated_tags\": [\"<relevant_hashtag_or_keyword>\"] }"
         }
-        plan_prompt = await self.generate_dynamic_prompt(task_context)
+        prompt = await self.generate_dynamic_prompt(task_context)
+        llm_response = await self._call_llm_with_retry(prompt, max_tokens=2000, temperature=0.65, is_json_output=True, model=settings.OPENROUTER_MODELS.get("email_draft"))
 
-        plan_json_str = await self._call_llm_with_retry(
-            plan_prompt, model=self.config.get("OPENROUTER_MODELS", {}).get('strategy_planning', "google/gemini-1.5-pro-latest"),
-            temperature=0.6, max_tokens=2500, is_json_output=True
-        )
+        if llm_response:
+            parsed_content = self._parse_llm_json(llm_response)
+            if parsed_content and parsed_content.get("text"):
+                 if parsed_content.get("image_needed") and parsed_content.get("image_concept_brief") and self.think_tool:
+                     image_task = {"action": "generate_image_for_social_post", "content": {"concept_brief": parsed_content["image_concept_brief"], "platform": platform, "post_text_context": parsed_content["text"][:200]}}
+                     image_result = await self.think_tool.execute_task(image_task) # ThinkTool handles image gen/retrieval
+                     if image_result and image_result.get("status") == "success" and image_result.get("findings", {}).get("image_path"):
+                         parsed_content["image_path"] = image_result["findings"]["image_path"]
+                 # Similar logic for video_needed if ThinkTool can orchestrate video generation
+                 if parsed_content.get("video_needed") and parsed_content.get("video_concept_brief") and self.think_tool:
+                     video_task = {"action": "initiate_video_generation_workflow", "params": {"concept_brief": parsed_content["video_concept_brief"], "platform": platform, "base_script_suggestion": parsed_content["text"]}}
+                     video_plan_result = await self.think_tool.execute_task(video_task)
+                     if video_plan_result and video_plan_result.get("status") == "success":
+                         # SMM doesn't execute the video plan, just notes it was initiated.
+                         # ThinkTool/Orchestrator would handle the multi-step video plan.
+                         # The path would be available later via KB query or a callback.
+                         parsed_content["video_generation_initiated"] = True
+                         self.logger.info(f"Video generation workflow initiated for post based on concept: {parsed_content['video_concept_brief'][:100]}...")
+                 return parsed_content
+        self.logger.error(f"Failed to generate or parse content for {platform} post from brief: {brief[:50]}...")
+        return None
 
-        if plan_json_str:
-            try:
-                plan_list = json.loads(plan_json_str[plan_json_str.find('['):plan_json_str.rfind(']')+1])
-                if isinstance(plan_list, list) and all(isinstance(step, dict) and 'step' in step and 'action_type' in step for step in plan_list):
-                    self.internal_state['current_campaign_plan'] = plan_list
-                    self.logger.info(f"Successfully generated campaign plan with {len(plan_list)} steps.")
-                    await self.log_knowledge_fragment(
-                        agent_source=self.AGENT_NAME, data_type="social_campaign_plan",
-                        content=plan_list, tags=["plan", "social_media", target_platform], relevance_score=0.9
-                    )
-                    return plan_list
-                else: raise ValueError("LLM plan response is not a valid list of step dictionaries.")
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
-                self.logger.error(f"Failed to parse LLM campaign plan: {e}. Response: {plan_json_str[:500]}...")
-                return None
+    async def _handle_post_action(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+        platform = task_details.get('platform')
+        content_directive = task_details.get('content_directive') # Expecting a rich directive object
+        account_group_hint = task_details.get('account_group')
+
+        if not platform or not content_directive: return {"status": "failure", "message": "Missing platform or content_directive."}
+
+        generated_content_details = await self._generate_post_content(platform, content_directive)
+        if not generated_content_details or not generated_content_details.get("text"):
+            return {"status": "failure", "message": "Failed to generate content for post."}
+
+        post_text = generated_content_details["text"]
+        image_path = generated_content_details.get("image_path")
+        video_path = None # Video path would come from a completed video generation workflow, not directly here
+
+        account_details = self._get_managed_account(platform, account_group_hint)
+        if not account_details: return {"status": "failure", "message": f"No suitable account for {platform} (Group: {account_group_hint})."}
+        
+        credentials = await self._get_credentials_for_account(account_details)
+        if not credentials or not credentials.get('password'):
+             await self.log_operation('error', f"Password missing for account ID {account_details.get('id')}. Cannot post.")
+             if self.think_tool: await self.think_tool.execute_task({"action": "flag_account_issue", "content": {"account_id": account_details.get('id'), "issue": "missing_password", "severity": "critical"}})
+             return {"status": "failure", "message": f"Password missing for account ID {account_details.get('id')}."}
+
+        proxy_info = await self._get_proxy_for_action(f"social_post_{platform}_{account_details.get('id')}")
+        platform_config = self._get_platform_config(platform)
+
+        browsing_task_params = {
+            "action": "web_ui_automate", "service": platform,
+            "goal": f"Log in to {platform} and publish a new post. Text: '{post_text[:30]}...'. Image: {'Yes' if image_path else 'No'}. Video: {'Yes' if video_path else 'No'}.",
+            "params": {
+                "login_url": platform_config.get("login_url"),
+                "account_identifier": account_details.get('identifier'),
+                "account_password": credentials.get('password'),
+                "post_text": post_text,
+                "image_path_to_upload": image_path,
+                "video_path_to_upload": video_path,
+                "selectors": platform_config.get("selectors", {}),
+            },
+            "proxy_info": proxy_info, "requires_account": True, "account_id": account_details.get('id')
+        }
+
+        post_result = await self.orchestrator.delegate_task("BrowsingAgent", browsing_task_params)
+        outcome_status = "failure"; post_id_or_error = "Unknown error from BrowsingAgent"
+        
+        # Update account in internal_state based on outcome
+        account_idx = -1
+        for idx, acc in enumerate(self.internal_state.get('managed_accounts', {}).get(platform, [])):
+            if acc.get('id') == account_details.get('id'):
+                account_idx = idx
+                break
+
+        if post_result and post_result.get("status") == "success":
+            outcome_status = "success"; post_id_or_error = post_result.get("result_data", {}).get("post_id", "Success (No Post ID from BrowsingAgent)")
+            self.logger.info(f"Successfully posted to {platform} via BrowsingAgent. Post Ref: {post_id_or_error}")
+            if account_idx != -1:
+                self.internal_state['managed_accounts'][platform][account_idx]['post_attempts'] = self.internal_state['managed_accounts'][platform][account_idx].get('post_attempts',0) + 1
+                current_successes = (self.internal_state['managed_accounts'][platform][account_idx].get('post_success_rate',1.0) * (self.internal_state['managed_accounts'][platform][account_idx]['post_attempts']-1) )
+                self.internal_state['managed_accounts'][platform][account_idx]['post_success_rate'] = (current_successes + 1) / self.internal_state['managed_accounts'][platform][account_idx]['post_attempts']
+                self.internal_state['managed_accounts'][platform][account_idx]['last_successful_post_ts'] = datetime.now(timezone.utc)
+                self.internal_state['managed_accounts'][platform][account_idx]['health_status'] = 'good' # Mark as good after successful post
+        elif post_result:
+            post_id_or_error = post_result.get('message', post_id_or_error)
+            if account_idx != -1:
+                self.internal_state['managed_accounts'][platform][account_idx]['post_attempts'] = self.internal_state['managed_accounts'][platform][account_idx].get('post_attempts',0) + 1
+                current_successes = (self.internal_state['managed_accounts'][platform][account_idx].get('post_success_rate',1.0) * (self.internal_state['managed_accounts'][platform][account_idx]['post_attempts']-1) )
+                self.internal_state['managed_accounts'][platform][account_idx]['post_success_rate'] = current_successes / self.internal_state['managed_accounts'][platform][account_idx]['post_attempts']
+                if "login failed" in post_id_or_error.lower() or "credentials invalid" in post_id_or_error.lower() or "account locked" in post_id_or_error.lower():
+                    self.internal_state['managed_accounts'][platform][account_idx]['health_status'] = 'risky'
+                    self.internal_state['managed_accounts'][platform][account_idx]['last_login_fail_ts'] = datetime.now(timezone.utc)
+                    if self.think_tool: await self.think_tool.execute_task({"action": "flag_account_issue", "content": {"account_id": account_details.get('id'), "issue": "login_failure_or_lock", "severity": "high", "details": post_id_or_error}})
+        
+        if self.think_tool:
+            await self.think_tool.execute_task({
+                "action": "log_knowledge_fragment", "fragment_data": {
+                    "agent_source": self.AGENT_NAME, "data_type": "social_post_outcome",
+                    "content": {"platform": platform, "account_id": account_details['id'], "status": outcome_status,
+                                "post_ref": post_id_or_error, "content_directive_summary": str(content_directive)[:200],
+                                "generated_text_preview": post_text[:100], "tags_used": generated_content_details.get("generated_tags", [])},
+                    "tags": ["social_post", outcome_status, platform] + generated_content_details.get("generated_tags", []), "relevance_score": 0.75 }})
+        
+        # Add to recent post performance deque
+        self.internal_state['recent_post_performance'].append({
+            "timestamp": datetime.now(timezone.utc).isoformat(), "platform": platform, "account_id": account_details['id'],
+            "status": outcome_status, "post_ref": post_id_or_error, "goal": content_directive.get("goal")
+        })
+        return {"status": outcome_status, "message": f"Post attempt to {platform}: {post_id_or_error}", "post_ref": post_id_or_error if outcome_status=="success" else None}
+
+    async def _handle_strategic_interaction(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+        platform = task_details.get('platform')
+        interaction_type = task_details.get('interaction_type', 'comment')
+        target_url = task_details.get('target_url')
+        content_brief_for_comment = task_details.get('comment_brief')
+        account_group_hint = task_details.get('account_group', 'Engagement Swarm')
+        target_context_summary = task_details.get("target_context_summary", "N/A") # Provided by ThinkTool
+
+        if not platform or not target_url: return {"status": "failure", "message": "Missing platform or target_url for interaction."}
+
+        await self._internal_think(f"Strategic interaction: {interaction_type} on {platform} with {target_url[:50]}...")
+        account_details = self._get_managed_account(platform, account_group_hint)
+        if not account_details: return {"status": "failure", "message": f"No account for {platform} (Group: {account_group_hint})."}
+        credentials = await self._get_credentials_for_account(account_details)
+        if not credentials or not credentials.get('password'): return {"status": "failure", "message": "Credentials missing."}
+
+        interaction_text = None
+        if interaction_type == 'comment' and content_brief_for_comment:
+            comment_gen_context = {
+                "task": "Generate Engaging Social Media Comment", "platform": platform,
+                "target_post_context_summary": target_context_summary,
+                "comment_brief": content_brief_for_comment, "desired_tone": task_details.get("desired_tone", "insightful_and_engaging"),
+                "desired_output_format": "Plain text comment, platform appropriate length, relevant and engaging. Consider grey-area hooks if specified in brief."
+            }
+            prompt = await self.generate_dynamic_prompt(comment_gen_context)
+            interaction_text = await self._call_llm_with_retry(prompt, max_tokens=300, temperature=0.75) # Higher temp for creativity
+            if not interaction_text: return {"status": "failure", "message": "Failed to generate comment text."}
+
+        proxy_info = await self._get_proxy_for_action(f"social_interaction_{platform}_{account_details.get('id')}")
+        platform_config = self._get_platform_config(platform)
+
+        browsing_task_params = {
+            "action": "web_ui_automate", "service": platform,
+            "goal": f"Perform '{interaction_type}' interaction on target: {target_url}. Comment: '{interaction_text[:30] if interaction_text else 'N/A'}'",
+            "params": {
+                "login_url": platform_config.get("login_url"),
+                "account_identifier": account_details.get('identifier'),
+                "account_password": credentials.get('password'),
+                "target_url_for_interaction": target_url,
+                "interaction_type_to_perform": interaction_type,
+                "comment_text_if_any": interaction_text,
+                "selectors": platform_config.get("selectors", {}),
+            },
+            "proxy_info": proxy_info, "requires_account": True, "account_id": account_details.get('id')
+        }
+        interaction_result = await self.orchestrator.delegate_task("BrowsingAgent", browsing_task_params)
+        outcome_status = "failure"; result_msg = "Interaction failed via BrowsingAgent"
+        if interaction_result and interaction_result.get("status") == "success":
+            outcome_status = "success"; result_msg = f"{interaction_type} successful on {target_url}"
+        elif interaction_result: result_msg = interaction_result.get('message', result_msg)
+
+        if self.think_tool:
+             await self.think_tool.execute_task({"action": "log_knowledge_fragment", "fragment_data": {
+                 "agent_source": self.AGENT_NAME, "data_type": "social_interaction_outcome",
+                 "content": {"platform": platform, "account_id": account_details['id'], "status": outcome_status, "interaction_type": interaction_type, "target_url": target_url, "message": result_msg, "comment_text_used": interaction_text},
+                 "tags": ["social_interaction", outcome_status, platform, interaction_type], "relevance_score": 0.65 }})
+        return {"status": outcome_status, "message": result_msg}
+
+    async def _handle_analyze_action(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+        # ... (Code from v3.1, ensuring it sends data to ThinkTool for deeper analysis) ...
+        platform = task_details.get('platform')
+        metric_to_analyze = task_details.get('metric', 'engagement_rate')
+        target_profile_url = task_details.get('target_profile_url')
+        account_to_use_id = task_details.get('account_id')
+
+        if not platform: return {"status": "failure", "message": "Missing platform for analysis."}
+        if not target_profile_url and not account_to_use_id:
+            return {"status": "failure", "message": "Missing target_profile_url or account_id for analysis."}
+
+        await self._internal_think(f"Analyzing {metric_to_analyze} for {target_profile_url or f'account ID {account_to_use_id}'} on {platform}.")
+        browsing_agent_task_params: Dict[str, Any] = {
+            "action": "web_ui_automate", "service": platform,
+            "goal": f"Fetch analytics data for '{metric_to_analyze}' regarding '{target_profile_url or f'account ID {account_to_use_id}'}'. Navigate to analytics section, extract relevant numbers/charts, or scrape public profile data.",
+            "requires_account": bool(account_to_use_id),
+        }
+        # ... (rest of the logic to set up BrowsingAgent params from v3.1) ...
+        if account_to_use_id:
+            account_details = await self._get_account_details_from_db(account_to_use_id)
+            if not account_details: return {"status": "failure", "message": f"Account ID {account_to_use_id} not found."}
+            credentials = await self._get_credentials_for_account(account_details)
+            if not credentials or not credentials.get('password'): return {"status": "failure", "message": "Credentials missing."}
+            browsing_agent_task_params["params"] = {
+                "account_identifier": account_details.get('identifier'),
+                "account_password": credentials.get('password'),
+                "target_profile_for_analytics": target_profile_url, # Pass target even if using own account
+            }
+            browsing_agent_task_params["proxy_info"] = await self._get_proxy_for_action(f"social_analytics_{platform}_{account_to_use_id}")
         else:
-            self.logger.error("LLM failed to generate a campaign plan.")
-            return None
+            browsing_agent_task_params["params"] = {"target_url_to_scrape": target_profile_url} # Different param for scraping
+            browsing_agent_task_params["proxy_info"] = await self._get_proxy_for_action(f"social_scrape_{platform}")
 
-    async def _execute_campaign_plan(self, plan: List[Dict]):
-        """Executes the steps defined in the campaign plan."""
-        self.logger.info(f"Starting execution of campaign plan with {len(plan)} steps.")
-        if not plan or not isinstance(plan, list):
-            self.logger.error("Execution attempted without a valid campaign plan.")
-            await self.log_operation('error', "Campaign execution failed: Invalid plan provided.")
-            return
+        fetch_result = await self.orchestrator.delegate_task("BrowsingAgent", browsing_agent_task_params)
+        if not fetch_result or fetch_result.get("status") != "success":
+            error_msg = fetch_result.get('message', 'Unknown error') if fetch_result else 'No result from BrowsingAgent'
+            return {"status": "failure", "message": f"Failed to fetch analytics data via BrowsingAgent: {error_msg}"}
 
-        plan_execution_log = [] # Track step outcomes
+        raw_analytics_data = fetch_result.get("result_data", {})
+        if self.think_tool:
+            await self.think_tool.execute_task({
+                "action": "analyze_social_media_analytics_data",
+                "content": {
+                    "platform": platform, "metric_analyzed": metric_to_analyze,
+                    "target_identifier": target_profile_url or f"account_id_{account_to_use_id}",
+                    "raw_data": raw_analytics_data, # This could be structured JSON or path to screenshot
+                    "request_details": task_details.get("analysis_request_details", "General performance review and trend identification.")
+                }})
+            return {"status": "success", "message": f"Analytics data for {platform} sent to ThinkTool for strategic analysis."}
+        else:
+            return {"status": "warning", "message": "Analytics data fetched, but ThinkTool unavailable for deep analysis.", "raw_data": raw_analytics_data}
 
-        for step in plan:
-            step_num = step.get("step", "?")
-            action_type = step.get("action_type")
-            platform = step.get("platform")
-            content_brief = step.get("content_brief")
-            account_group = step.get("account_group", "Main")
-            step_status = "pending"
-            step_result_msg = ""
 
-            await self._internal_think(f"Executing Campaign Step {step_num}: {action_type} on {platform} using {account_group} accounts.")
-            await self.log_operation('info', f"Executing Step {step_num}: {action_type} on {platform}")
+    async def _create_campaign_plan(self, task_details: Dict[str, Any]) -> Optional[Dict[str, Any]]: # Return type changed
+        self.logger.info("Requesting strategic social media campaign plan from ThinkTool.")
+        if not self.think_tool: self.logger.error("ThinkTool unavailable for campaign planning."); return None
 
+        thinktool_task_content = {
+            "goal": task_details.get('goal', 'Maximize engagement and lead generation for UGC service using AI-native tactics.'),
+            "platforms": task_details.get('platforms', ['x.com', 'linkedin.com', 'tiktok.com']),
+            "duration_days": task_details.get('duration_days', 14),
+            "target_audience_description": task_details.get('audience_description', 'Tech-savvy B2B marketers and DTC brand owners interested in cutting-edge video content solutions.'),
+            "key_message_pillars": task_details.get('key_messages', ['AI-Powered UGC Speed & Scale', 'Unbeatable Cost-Efficiency', 'Hyper-Personalized Video Campaigns', 'Viral Potential of AI Content']),
+            "desired_intensity": task_details.get('intensity', 'aggressive_growth_with_calculated_risks'),
+            "budget_consideration": task_details.get('budget', 'organic_focus_with_micro_ad_probes'),
+            "specific_metrics_to_optimize_for": task_details.get("metrics_to_optimize", ["lead_form_submissions", "website_clicks_from_social", "high_quality_engagement_score"]),
+            "request_grey_area_suggestions": True # Explicitly ask for unconventional tactics
+        }
+        plan_result = await self.think_tool.execute_task({
+            "action": "plan_social_media_campaign",
+            "content": thinktool_task_content
+        })
+        if plan_result and plan_result.get("status") == "success" and plan_result.get("findings", {}).get("campaign_plan_kf_id"):
+            kf_id = plan_result["findings"]["campaign_plan_kf_id"]
+            self.logger.info(f"ThinkTool generated campaign plan, stored in KF ID: {kf_id}")
+            return {"status": "success", "plan_kf_id": kf_id} # Return the KF ID of the plan
+        else:
+            self.logger.error(f"ThinkTool failed to generate campaign plan. Result: {plan_result}")
+            return {"status": "failure", "message": f"ThinkTool plan generation failed: {plan_result.get('message') if plan_result else 'Unknown'}"}
+
+    async def _execute_campaign_plan(self, plan_steps: List[Dict], plan_kf_id: Optional[int] = None):
+        # ... (Code from v3.1, ensuring it iterates through steps from plan_steps) ...
+        self.logger.info(f"Starting execution of ThinkTool-generated campaign plan (KF ID: {plan_kf_id}) with {len(plan_steps)} steps.")
+        # ... (rest of the execution logic from v3.1)
+        plan_execution_log = []
+        for step_directive in plan_steps:
+            step_id = step_directive.get("step_id", str(uuid.uuid4())[:8])
+            action_to_delegate = step_directive.get("action_to_delegate")
+            target_agent = step_directive.get("target_agent_for_step", self.AGENT_NAME)
+            task_parameters = step_directive.get("task_parameters", {})
+            step_status = "pending"; step_result_msg = ""
+
+            await self._internal_think(f"Campaign Step {step_id}: Action='{action_to_delegate}', Target='{target_agent}'", details=task_parameters)
             try:
-                # 1. Select Account
-                account_details = self._get_managed_account(platform) # Add criteria later
-                if not account_details: raise Exception(f"No account available for {platform}")
+                action_result = None
+                if target_agent == self.AGENT_NAME and hasattr(self, action_to_delegate):
+                    method_to_call = getattr(self, action_to_delegate)
+                    action_result = await method_to_call(task_parameters)
+                elif target_agent in ["BrowsingAgent", "ThinkTool", "LegalAgent", "EmailAgent", "VoiceSalesAgent"]: # Expanded list
+                    action_result = await self.orchestrator.delegate_task(target_agent, task_parameters)
+                else: raise ValueError(f"Unknown target_agent '{target_agent}' for campaign step.")
 
-                # 2. Generate Content
-                content_to_use = None
-                if action_type == 'post' and content_brief:
-                    content_prompt = await self.generate_dynamic_prompt({
-                        "task": "Generate post content from brief", "platform": platform,
-                        "content_brief": content_brief, "target_audience": plan.get("target_audience", ""),
-                        "desired_output_format": "Post text/caption suitable for the platform."
-                    })
-                    content_to_use = await self._call_llm_with_retry(content_prompt, max_tokens=1024, temperature=0.7)
-                    if not content_to_use: raise Exception("Failed to generate content from brief")
-
-                # 3. Delegate Action
-                browsing_task_details = {"action": None}
-                if action_type == 'post' and content_to_use:
-                    browsing_task_details["action"] = "social_media_post"
-                    browsing_task_details["post_content"] = content_to_use
-                elif action_type == 'interact':
-                    browsing_task_details["action"] = "social_media_interact"
-                    browsing_task_details["interaction_type"] = random.choice(['like', 'comment'])
-                    browsing_task_details["target_post_url"] = step.get("interaction_target")
-                    if browsing_task_details["interaction_type"] == 'comment':
-                         comment_prompt = await self.generate_dynamic_prompt({"task": "Generate relevant social media comment", "target_post_context": "Context needed..."})
-                         browsing_task_details["comment_text"] = await self._call_llm_with_retry(comment_prompt, max_tokens=100)
-
-                if browsing_task_details["action"]:
-                    credentials = await self._get_credentials_for_account(account_details)
-                    if not credentials: raise Exception("Credentials missing")
-                    proxy_info = await self._get_proxy_for_action(f"social_campaign_{platform}_{action_type}")
-                    platform_config = self._get_platform_config(platform)
-
-                    browsing_task_details.update({
-                        "target_platform": platform, "login_url": platform_config.get("login_url"),
-                        "selectors": platform_config.get("selectors", {}),
-                        "account_email": account_details.get('email'), "account_username": account_details.get('username'),
-                        "account_password": credentials.get('password'), "proxy_info": proxy_info
-                    })
-
-                    await self._internal_think(f"Delegating campaign action '{action_type}' for step {step_num} to BrowsingAgent.")
-                    action_result = await self.orchestrator.delegate_task("BrowsingAgent", browsing_task_details)
-
-                    if not action_result or action_result.get("status") != "success":
-                         error_msg = action_result.get('message', 'Unknown error') if action_result else 'No result'
-                         raise Exception(f"BrowsingAgent action failed: {error_msg}")
-                    else:
-                         self.logger.info(f"Step {step_num} ({action_type} on {platform}) delegated successfully.")
-                         step_status = "success"
-                         step_result_msg = action_result.get("post_id", "Interaction successful")
-                         # TODO: Delegate task to fetch metrics for this post/interaction
+                if not action_result or action_result.get("status") != "success":
+                     error_msg = action_result.get('message', 'Unknown error') if action_result else 'No result'
+                     raise Exception(f"Delegated action '{action_to_delegate}' to {target_agent} failed: {error_msg}")
                 else:
-                     step_status = "skipped"
-                     step_result_msg = "No valid action defined for step."
-
-                # Random delay
-                await asyncio.sleep(random.uniform(15, 90))
-
+                     step_status = "success"; step_result_msg = action_result.get("message", "Step successful.")
             except Exception as e:
-                self.logger.error(f"Error executing campaign plan step {step_num}: {e}", exc_info=True)
-                step_status = "error"
-                step_result_msg = str(e)
-                # Decide on error handling (e.g., stop campaign?)
-
-            plan_execution_log.append({"step": step_num, "action": action_type, "platform": platform, "status": step_status, "result": step_result_msg})
+                self.logger.error(f"Error executing campaign plan step {step_id}: {e}", exc_info=True)
+                step_status = "error"; step_result_msg = str(e)
+            plan_execution_log.append({"step_id": step_id, "action_delegated": action_to_delegate, "target_agent": target_agent, "status": step_status, "result": step_result_msg})
+            await asyncio.sleep(random.uniform(self.config.get("SMM_CAMPAIGN_STEP_DELAY_MIN_S",5), self.config.get("SMM_CAMPAIGN_STEP_DELAY_MAX_S",20)))
 
         self.logger.info("Finished executing campaign plan.")
-        await self.log_operation('info', f"Campaign plan execution finished. Results: {plan_execution_log}")
-        # Log results to KB
-        await self.log_knowledge_fragment(
-            agent_source=self.AGENT_NAME, data_type="social_campaign_execution_log",
-            content=plan_execution_log, tags=["execution_log", "social_media"], relevance_score=0.8
-        )
-        self.internal_state['current_campaign_plan'] = None # Clear plan
+        if self.think_tool:
+            await self.think_tool.execute_task({"action": "log_knowledge_fragment", "fragment_data":{
+                "agent_source": self.AGENT_NAME, "data_type": "social_campaign_execution_log",
+                "content": {"original_plan_kf_id": plan_kf_id, "execution_log": plan_execution_log},
+                "tags": ["execution_log", "social_media", "campaign_results", f"plan_{plan_kf_id}"], "relevance_score": 0.85 }})
+        self.internal_state['current_campaign_plan_id'] = None
 
-    # --- Standardized LLM Interaction ---
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
-    async def _call_llm_with_retry(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1024, is_json_output: bool = False) -> Optional[str]:
-        """Calls the LLM via the Orchestrator with retry logic."""
-        self.logger.debug(f"Calling LLM via Orchestrator. Temp={temperature}, MaxTokens={max_tokens}, JSON={is_json_output}")
+
+    async def _handle_repurpose_content(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+        # ... (Code from v3.1, ensuring it calls _generate_post_content with a repurposing brief) ...
+        source_kf_id = task_details.get("source_kf_id")
+        target_platforms = task_details.get("target_platforms", [])
+        num_variations_per_platform = task_details.get("num_variations", 2)
+        self.logger.info(f"Repurposing KF ID {source_kf_id} for platforms: {target_platforms}")
+
+        if not self.think_tool or not source_kf_id or not target_platforms:
+            return {"status": "failure", "message": "Missing ThinkTool, source KF ID, or target platforms for repurposing."}
+
+        source_fragment_list = await self.think_tool.query_knowledge_base(content_query=f'"id": {source_kf_id}', limit=1) # Query by ID
+        if not source_fragment_list: return {"status": "failure", "message": f"Source KF ID {source_kf_id} not found."}
+        
+        source_content_str = source_fragment_list[0].content
+        try: source_content_data = json.loads(source_content_str)
+        except: source_content_data = {"text_content": source_content_str}
+        original_text_summary = source_content_data.get("summary", source_content_data.get("text_content", str(source_content_data)))[:300]
+
+        repurposed_posts_count = 0; generated_directives_for_posting = []
+        for platform in target_platforms:
+            for i in range(num_variations_per_platform):
+                await self._internal_think(f"Generating repurposed content {i+1}/{num_variations_per_platform} for {platform} from KF {source_kf_id}")
+                repurpose_directive_for_llm = { # This is the content_directive for _generate_post_content
+                    "content_brief": f"**Repurpose Task:** Adapt the core message from the following content for {platform}. Original content summary: '{original_text_summary}...'. Create Variation #{i+1}. Focus on a unique angle/hook suitable for {platform}, potentially using a different tone or format (e.g., question, bold claim, short story snippet).",
+                    "goal": f"repurposed_engagement_{platform}",
+                    "target_persona_profile": task_details.get("target_persona_profile", {}), # Pass through if provided
+                    "platform_algorithm_insights": task_details.get("platform_algorithm_insights", "N/A"),
+                    "content_tags": [platform, "repurposed", f"source_kf_{source_kf_id}"] + task_details.get("additional_tags", [])
+                }
+                generated_details = await self._generate_post_content(platform, repurpose_directive_for_llm)
+                if generated_details and generated_details.get("text"):
+                    self.logger.info(f"Generated repurposed content for {platform} (Var {i+1}): {generated_details['text'][:70]}...")
+                    # Instead of just logging, create a directive for ThinkTool to schedule the post
+                    posting_directive_content = {
+                        "platform": platform,
+                        "content_directive": { # This is the rich directive for _handle_post_action
+                            "content_brief": f"Post this AI-repurposed content (Var {i+1} from KF {source_kf_id}) for {platform}. Original goal: {task_details.get('original_goal', 'engagement')}",
+                            "generated_text": generated_details["text"], # The actual text to post
+                            "image_path": generated_details.get("image_path"), # If an image was generated/selected
+                            "video_path": generated_details.get("video_path"), # If video
+                            "tags_to_use": generated_details.get("generated_tags", []),
+                            "target_persona_profile": repurpose_directive_for_llm["target_persona_profile"], # Pass along context
+                            "platform_algorithm_insights": repurpose_directive_for_llm["platform_algorithm_insights"],
+                        },
+                        "account_group": task_details.get("account_group_for_posting", "Brand Voice Prime"), # Specify account group
+                        "goal": f"post_repurposed_kf{source_kf_id}_var{i+1}"
+                    }
+                    generated_directives_for_posting.append({
+                        "target_agent": self.AGENT_NAME, # SMM handles posting
+                        "directive_type": "post_content",
+                        "content": posting_directive_content,
+                        "priority": task_details.get("posting_priority", 6) # Medium priority for repurposed content
+                    })
+                    repurposed_posts_count +=1
+
+        if self.think_tool and generated_directives_for_posting:
+            await self.think_tool.execute_task({
+                "action": "batch_create_directives", # Assume ThinkTool can handle batch creation
+                "content": {"directives_to_create": generated_directives_for_posting}
+            })
+        return {"status": "success", "message": f"Generated {repurposed_posts_count} repurposed content pieces. Posting directives sent to ThinkTool."}
+
+    async def _run_algorithmic_probe(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
+        # ... (Code from v3.1, ensuring it uses _handle_post_action with specific probe directives) ...
+        platform = task_details.get("platform")
+        probe_content_variations = task_details.get("probe_directives") # List of full content_directives
+        account_group_hint = task_details.get("account_group", "Algorithmic Probes")
+        if not platform or not probe_content_variations or not isinstance(probe_content_variations, list):
+            return {"status": "failure", "message": "Missing platform or probe_directives for probe."}
+
+        self.logger.info(f"Running algorithmic probe on {platform} with {len(probe_content_variations)} variations.")
+        probe_results = []
+        for i, content_directive_variation in enumerate(probe_content_variations):
+            await self._internal_think(f"Algorithmic Probe {i+1}/{len(probe_content_variations)} on {platform}")
+            # content_directive_variation is already the rich object needed by _generate_post_content
+            post_result = await self._handle_post_action({
+                "platform": platform,
+                "content_directive": content_directive_variation,
+                "account_group": account_group_hint,
+                "goal": f"algorithmic_probe_var_{i+1}_{content_directive_variation.get('content_brief','')[:20].replace(' ','_')}"
+            })
+            probe_results.append({"variation_directive": content_directive_variation, "post_outcome": post_result})
+            await asyncio.sleep(random.uniform(self.config.get("SMM_PROBE_DELAY_MIN_S", 300), self.config.get("SMM_PROBE_DELAY_MAX_S", 900)))
+
+        if self.think_tool:
+            await self.think_tool.execute_task({"action": "log_knowledge_fragment", "fragment_data": {
+                "agent_source": self.AGENT_NAME, "data_type": "algorithmic_probe_results",
+                "content": {"platform": platform, "probe_results": probe_results, "timestamp": datetime.now(timezone.utc).isoformat()},
+                "tags": ["algorithmic_probe", platform, "experiment"], "relevance_score": 0.85 }}) # Higher relevance
+        return {"status": "success", "message": f"Algorithmic probe completed for {platform}.", "results": probe_results}
+
+    async def learning_loop(self):
+        self.logger.info(f"{self.AGENT_NAME} L35+ learning loop: Advanced performance & algorithmic shift detection.")
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(self.internal_state.get('learning_interval_seconds', 3600 * 1))
+                if self._stop_event.is_set(): break
+                current_time = datetime.now(timezone.utc)
+                self.internal_state['last_learning_run'] = current_time
+                await self._internal_think("Learning loop: Analyzing multi-vector performance, detecting anomalies, querying ThinkTool for insights.")
+
+                if not self.think_tool: self.logger.warning("ThinkTool not available for SMM learning."); continue
+
+                # 1. Gather recent performance data (from internal cache and KB)
+                recent_posts_summary = list(self.internal_state['recent_post_performance'])
+                # Query KB for aggregated metrics if available (e.g., from a daily ThinkTool summary)
+                aggregated_perf_frags = await self.think_tool.query_knowledge_base(
+                    data_types=["social_platform_daily_summary"], time_window=timedelta(days=2), limit=10
+                )
+                
+                # 2. Basic Anomaly Detection (Example: Engagement Drop)
+                # This is a simplified version. Real anomaly detection is complex.
+                anomalies_detected = []
+                for platform, metrics in self.internal_state.get('performance_metrics_cache', {}).items():
+                    current_eng_rate = metrics.get("engagement_rate", {}).get("value")
+                    prev_eng_rate = metrics.get("engagement_rate", {}).get("previous_value") # Assume cache stores this
+                    if current_eng_rate is not None and prev_eng_rate is not None and prev_eng_rate > 0:
+                        if current_eng_rate < prev_eng_rate * 0.6: # 40% drop
+                            anomalies_detected.append(f"Significant engagement drop on {platform} (from {prev_eng_rate:.2f} to {current_eng_rate:.2f}).")
+                
+                # 3. Formulate strategic questions for ThinkTool
+                strategic_query_for_thinktool = {
+                    "task_type": "analyze_smm_performance_and_adapt_strategy",
+                    "recent_posts_sample": recent_posts_summary[-20:], # Last 20 posts
+                    "aggregated_platform_perf": [json.loads(f.content) for f in aggregated_perf_frags if f.content],
+                    "detected_anomalies": anomalies_detected,
+                    "current_account_health_summary": {
+                        p: {
+                            "active": sum(1 for acc in accs if acc.get('status_db') == 'active' and acc.get('health_status') == 'good'),
+                            "risky_or_watch": sum(1 for acc in accs if acc.get('health_status') in ['risky', 'watch']),
+                            "total": len(accs)
+                        } for p, accs in self.internal_state.get('managed_accounts', {}).items()
+                    },
+                    "request": "Analyze this SMM performance data. Identify key insights, underperforming areas, potential algorithmic shifts, or new opportunities. Suggest 2-3 high-impact strategic adjustments or experiments (e.g., new content angles, platform focus shift, probe directives)."
+                }
+
+                await self.think_tool.execute_task({
+                    "action": "process_agent_learning_cycle_input", # New ThinkTool action
+                    "content": {"agent_name": self.AGENT_NAME, "learning_data": strategic_query_for_thinktool}
+                })
+                self.logger.info("Sent detailed SMM performance data and strategic queries to ThinkTool.")
+
+            except asyncio.CancelledError: self.logger.info(f"{self.AGENT_NAME} learning loop cancelled."); break
+            except Exception as e:
+                self.logger.error(f"Error in {self.AGENT_NAME} learning loop: {e}", exc_info=True)
+                await self._report_error(f"Learning loop error: {e}")
+                await asyncio.sleep(60 * 20)
+
+    async def self_critique(self) -> Dict[str, Any]:
+        self.logger.info(f"{self.AGENT_NAME} (L35+): Performing deep self-critique.")
+        critique = {"status": "ok", "feedback": "Critique pending comprehensive analysis."}
+        try:
+            # Gather more detailed internal state and recent performance for critique
+            insights = await self.collect_insights() # Gets basic operational stats
+            
+            # Get recent campaign outcomes from KB (via ThinkTool)
+            campaign_outcomes_summary = "N/A"
+            if self.think_tool:
+                campaign_logs = await self.think_tool.query_knowledge_base(
+                    data_types=["social_campaign_execution_log"], time_window=timedelta(days=14), limit=5
+                )
+                if campaign_logs:
+                    campaign_outcomes_summary = [json.loads(log.content).get("execution_log", [])[-3:] for log in campaign_logs if log.content] # Last 3 steps of recent campaigns
+
+            # Get summary of ThinkTool's directives for SMM
+            smm_directives_summary = "N/A"
+            if self.think_tool:
+                directives = await self.think_tool.get_active_directives(target_agent=self.AGENT_NAME, limit=5) # Get pending/active
+                smm_directives_summary = [{"type": d.directive_type, "content_preview": d.content[:100], "status": d.status} for d in directives]
+
+            critique_context = {
+                "task": "Deep Strategic Critique of SocialMediaManager Performance",
+                "current_operational_insights": insights,
+                "recent_campaign_outcomes_summary": campaign_outcomes_summary,
+                "active_or_recent_directives_for_smm": smm_directives_summary,
+                "meta_prompt_guidelines": self.meta_prompt[:1000], # Remind LLM of its core mandate
+                "desired_output_format": "JSON: { \"overall_strategic_effectiveness_rating\": str ('Excellent'|'Good'|'Needs Improvement'|'Poor'), \"key_achievements_aligned_with_mandate\": [str], \"critical_weaknesses_or_deviations\": [str], \"algorithmic_adaptation_effectiveness\": str, \"grey_area_tactic_utilization_assessment\": str ('Effective & Calculated'|'Conservative'|'Needs More Aggression'|'Risky/Ineffective'), \"top_3_actionable_recommendations_for_thinktool\": [\"Directive for ThinkTool to issue to SMM or other agents to improve SMM effectiveness (e.g., 'Directive: SMM to test X new content format on TikTok for 7 days', 'Directive: ThinkTool to re-evaluate proxy strategy for Instagram accounts')\"] }"
+            }
+            prompt = await self.generate_dynamic_prompt(critique_context)
+            llm_model_pref = self.config.get("OPENROUTER_MODELS", {}).get('think_critique') # Use a very strong model
+            
+            critique_json = await self._call_llm_with_retry(
+                 prompt, model=llm_model_pref, temperature=0.3, max_tokens=1800, is_json_output=True
+            )
+
+            if critique_json:
+                 try:
+                     critique_result = self._parse_llm_json(critique_json)
+                     if not critique_result: raise ValueError("Parsed critique is None")
+                     critique['feedback'] = critique_result.get('overall_strategic_effectiveness_rating', 'Critique generated.')
+                     critique['details'] = critique_result
+                     self.logger.info(f"Self-Critique Assessment: {critique['feedback']}")
+                     if self.think_tool:
+                         await self.think_tool.execute_task({
+                             "action": "log_knowledge_fragment", "fragment_data":{
+                                 "agent_source": self.AGENT_NAME, "data_type": "self_critique_summary_L35",
+                                 "content": critique_result, "tags": ["critique", "social_media", self.AGENT_NAME, "L35"], "relevance_score": 0.9 }})
+                         # If critique suggests directives for ThinkTool, pass them on
+                         if critique_result.get("top_3_actionable_recommendations_for_thinktool"):
+                             await self.think_tool.execute_task({
+                                 "action": "process_internal_agent_recommendations",
+                                 "content": {
+                                     "source_agent": self.AGENT_NAME,
+                                     "recommendations": critique_result["top_3_actionable_recommendations_for_thinktool"]
+                                 }
+                             })
+                 except Exception as e:
+                      self.logger.error(f"Failed to parse L35+ self-critique LLM response: {e}")
+                      critique['feedback'] += " Failed to parse LLM critique."
+                      critique['status'] = 'error'
+            else:
+                 critique['feedback'] += " LLM critique call failed."
+                 critique['status'] = 'error'
+        except Exception as e:
+            self.logger.error(f"Error during L35+ self-critique: {e}", exc_info=True)
+            critique['status'] = 'error'; critique['feedback'] = f"Self-critique failed: {e}"
+        self.internal_state['last_critique_run'] = time.time()
+        return critique
+
+    async def collect_insights(self) -> Dict[str, Any]:
+        self.logger.debug("SocialMediaManager collect_insights called.")
+        active_campaign_kf_id = self.internal_state.get('current_campaign_plan_id')
+        managed_account_summary = {}
+        for platform, acc_list in self.internal_state.get('managed_accounts', {}).items():
+            managed_account_summary[platform] = {
+                "total": len(acc_list),
+                "active_db": sum(1 for acc in acc_list if acc.get('status_db') == 'active'),
+                "health_good": sum(1 for acc in acc_list if acc.get('health_status') == 'good'),
+                "health_risky_watch": sum(1 for acc in acc_list if acc.get('health_status') in ['risky', 'watch']),
+            }
+        
+        # Simplified recent performance from deque
+        recent_posts = list(self.internal_state['recent_post_performance'])
+        recent_success_count = sum(1 for p in recent_posts if p.get('status') == 'success')
+        recent_failure_count = len(recent_posts) - recent_success_count
+
+        return {
+            "agent_name": self.AGENT_NAME, "status": self.status,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "active_campaign_kf_id": active_campaign_kf_id,
+            "managed_accounts_summary": managed_account_summary,
+            "recent_posts_analyzed_count": len(recent_posts),
+            "recent_posts_success_count": recent_success_count,
+            "recent_posts_failure_count": recent_failure_count,
+            "last_learning_run": datetime.fromtimestamp(self.internal_state['last_learning_run']).isoformat() if self.internal_state.get('last_learning_run') else None,
+            "last_critique_run": datetime.fromtimestamp(self.internal_state['last_critique_run']).isoformat() if self.internal_state.get('last_critique_run') else None,
+        }
+
+    # --- Helper methods from v3.1 ---
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=3, max=20), retry=retry_if_exception_type(Exception))
+    async def _call_llm_with_retry(self, prompt: str, model: Optional[str] = None, temperature: float = 0.7, max_tokens: int = 1500, is_json_output: bool = False) -> Optional[str]:
         if not hasattr(self.orchestrator, 'call_llm'):
              self.logger.error("Orchestrator does not have 'call_llm' method.")
              return None
         try:
-            response_content = await self.orchestrator.call_llm(
+            response_data = await self.orchestrator.call_llm(
                 agent_name=self.AGENT_NAME, prompt=prompt, temperature=temperature,
-                max_tokens=max_tokens, is_json_output=is_json_output
+                max_tokens=max_tokens, is_json_output=is_json_output,
+                model_preference=[model] if model else None # Pass as list
             )
-            content = response_content.get('content') if isinstance(response_content, dict) else str(response_content)
-            return content.strip() if content else None
+            content = response_data.get('content') if isinstance(response_data, dict) else str(response_data)
+            return content.strip() if content and content.strip() else None
         except Exception as e:
             self.logger.warning(f"LLM call failed (attempt): {e}")
             raise
 
     def _get_platform_config(self, platform: str) -> Dict[str, Any]:
-        """Retrieves platform-specific configurations (URLs, selectors)."""
         platform_key = platform.lower().replace("https://", "").replace("www.", "")
-        # Check cache first
         if platform_key in self.internal_state['platform_configs']:
             return self.internal_state['platform_configs'][platform_key]
-
-        self.logger.debug(f"Retrieving configuration for platform: {platform_key}")
-        # Load from config file or DB in production
-        # Using self.config.get for platform-specific selectors defined in settings.py or DEFAULT_CONFIG
         config = {
             "login_url": self.config.get(f"{platform_key.upper()}_LOGIN_URL", f"https://{platform_key}/login"),
-            "post_url": self.config.get(f"{platform_key.upper()}_POST_URL", f"https://{platform_key}/"),
-            "selectors": {
+            "post_url": self.config.get(f"{platform_key.upper()}_POST_URL", f"https://{platform_key}/"), # May not always be used if posting from feed
+            "selectors": { # These are examples, specific selectors are crucial and vary wildly
+                "username_field": self.config.get(f"{platform_key.upper()}_USERNAME_SELECTOR"),
+                "password_field": self.config.get(f"{platform_key.upper()}_PASSWORD_SELECTOR"),
+                "login_button": self.config.get(f"{platform_key.upper()}_LOGIN_BUTTON_SELECTOR"),
                 "post_textarea": self.config.get(f"{platform_key.upper()}_POST_TEXTAREA_SELECTOR"),
-                "submit_button": self.config.get(f"{platform_key.upper()}_SUBMIT_BUTTON_SELECTOR"),
-                # Add more common selectors needed by BrowsingAgent actions
-                "like_button": self.config.get(f"{platform_key.upper()}_LIKE_BUTTON_SELECTOR"),
-                "comment_input": self.config.get(f"{platform_key.upper()}_COMMENT_INPUT_SELECTOR"),
-                "comment_submit": self.config.get(f"{platform_key.upper()}_COMMENT_SUBMIT_SELECTOR"),
+                "submit_post_button": self.config.get(f"{platform_key.upper()}_SUBMIT_POST_BUTTON_SELECTOR"),
+                "like_button_generic": self.config.get(f"{platform_key.upper()}_LIKE_BUTTON_SELECTOR"), # For generic like actions
+                "comment_field_generic": self.config.get(f"{platform_key.upper()}_COMMENT_FIELD_SELECTOR"),
+                "submit_comment_button_generic": self.config.get(f"{platform_key.upper()}_SUBMIT_COMMENT_SELECTOR"),
             }
         }
-        # Remove None values from selectors
         config["selectors"] = {k: v for k, v in config["selectors"].items() if v is not None}
-        self.internal_state['platform_configs'][platform_key] = config # Cache it
+        self.internal_state['platform_configs'][platform_key] = config
         return config
 
-    async def _get_credentials_for_account(self, account_details: Dict[str, Any]) -> Optional[Dict[str, str]]:
-         """Securely fetches credentials from Vault."""
-         if not account_details or not account_details.get('vault_path'): return None
-         if not self.orchestrator or not hasattr(self.orchestrator, 'secure_storage'):
-              self.logger.error("Secure storage unavailable via Orchestrator.")
-              return None
-         try:
-             creds_json = await self.orchestrator.secure_storage.get_secret(account_details['vault_path'])
-             return json.loads(creds_json) if creds_json else None
-         except Exception as e:
-              self.logger.error(f"Failed to fetch/parse credentials from Vault path {account_details['vault_path']}: {e}")
-              return None
-
     async def _get_proxy_for_action(self, purpose: str) -> Optional[Dict[str, Any]]:
-         """Requests a proxy from the orchestrator for a specific action."""
          if self.orchestrator and hasattr(self.orchestrator, 'get_proxy'):
-              try:
-                  return await self.orchestrator.get_proxy(purpose=purpose)
-              except Exception as e:
-                   self.logger.error(f"Failed to get proxy for purpose '{purpose}': {e}")
-                   return None
-         self.logger.warning("Orchestrator cannot provide proxies.")
-         return None
+              try: return await self.orchestrator.get_proxy(purpose=purpose, quality_level='high') # Request high quality for social
+              except Exception as e: self.logger.error(f"Failed to get proxy for purpose '{purpose}': {e}"); return None
+         self.logger.warning("Orchestrator cannot provide proxies."); return None
 
-    # --- Abstract Method Implementations ---
-
-    async def learning_loop(self):
-        """Analyzes social media performance data to refine strategies."""
-        while True:
-            try:
-                interval = self.internal_state.get('learning_interval_seconds', 3600 * 3)
-                await asyncio.sleep(interval)
-                current_time = datetime.now(timezone.utc)
-                self.internal_state['last_learning_run'] = current_time
-                self.logger.info(f"{self.AGENT_NAME} learning loop: Analyzing performance.")
-
-                await self._internal_think("Learning loop: Fetching performance data, analyzing trends, updating strategy state.")
-
-                # 1. Fetch performance data from KB
-                performance_fragments = await self.query_knowledge_base(
-                    data_types=["social_post_outcome", "social_media_analysis"],
-                    time_window=timedelta(days=7), # Analyze last 7 days
-                    limit=500
-                )
-                if not performance_fragments:
-                    self.logger.info("Learning Loop: No recent performance data found in KB.")
-                    continue
-
-                # 2. Analyze Data (Example: Engagement per platform/content type)
-                platform_engagement = Counter() # platform: [list of engagement scores/indicators]
-                content_type_performance = Counter() # content_type_tag: {'success': N, 'fail': N}
-
-                for frag in performance_fragments:
-                    try:
-                        data = json.loads(frag.content)
-                        platform = data.get('platform')
-                        if frag.data_type == "social_post_outcome":
-                             status = data.get('status')
-                             # TODO: Define how to extract content type/style tags from original post/plan
-                             content_tags = ["general"] # Placeholder
-                             for tag in content_tags:
-                                 if tag not in content_type_performance: content_type_performance[tag] = {'success': 0, 'fail': 0}
-                                 if status == 'success': content_type_performance[tag]['success'] += 1
-                                 else: content_type_performance[tag]['fail'] += 1
-                        elif frag.data_type == "social_media_analysis":
-                             # TODO: Extract quantitative metrics if analysis provides them
-                             pass
-                    except (json.JSONDecodeError, TypeError, KeyError):
-                        self.logger.warning(f"Could not parse performance fragment ID {frag.id}")
-
-                # 3. Update Internal State (Example: Preferred content style)
-                best_style = None
-                highest_success_rate = -1.0
-                for style, stats in content_type_performance.items():
-                    total = stats['success'] + stats['fail']
-                    if total >= 10: # Minimum samples
-                        rate = stats['success'] / total
-                        if rate > highest_success_rate:
-                            highest_success_rate = rate
-                            best_style = style
-
-                if best_style and best_style != self.internal_state.get('preferred_content_style'):
-                    self.internal_state['preferred_content_style'] = best_style
-                    self.logger.info(f"Learning Loop: Updated preferred content style to '{best_style}' (Success Rate: {highest_success_rate:.2f})")
-                    await self.log_learned_pattern(
-                        pattern_description=f"Content style '{best_style}' shows high success rate ({highest_success_rate:.2f}) on social media.",
-                        supporting_fragment_ids=[], # Link to analysis fragments if possible
-                        confidence_score=0.75,
-                        implications=f"Prioritize generating content with style '{best_style}'.",
-                        tags=["social_media", "content_strategy", "performance_optimized"]
-                    )
-
-                # TODO: Add analysis for account health, platform algorithm changes, etc.
-
-            except asyncio.CancelledError:
-                self.logger.info(f"{self.AGENT_NAME} learning loop cancelled.")
-                break
-            except Exception as e:
-                self.logger.error(f"Error in SocialMediaManager learning loop: {e}", exc_info=True)
-                await asyncio.sleep(60 * 30) # Wait longer after error
-
-    async def self_critique(self) -> Dict[str, Any]:
-        """Evaluates campaign effectiveness, content quality, and anti-ban success."""
-        self.logger.info(f"{self.AGENT_NAME}: Performing self-critique.")
-        critique = {"status": "ok", "feedback": "Critique pending analysis."}
+    async def _get_account_details_from_db(self, account_id: int) -> Optional[Dict[str, Any]]:
+        """ Helper to fetch account details (non-sensitive) if needed by a method. """
+        if not self.session_maker: return None
         try:
-            # Fetch recent performance/health data
-            insights = await self.collect_insights()
-            # Query KB for recent errors or ban indicators related to social media tasks
-            error_fragments = await self.query_knowledge_base(
-                data_types=["social_post_outcome", "task_outcome"],
-                tags=["failure", "error", "social_media"],
-                time_window=timedelta(days=3), limit=20
-            )
-            ban_rate_estimate = "N/A" # Placeholder - calculate based on errors/account status checks
+            async with self.session_maker() as session:
+                acc = await session.get(Account, account_id)
+                if acc: return {"id": acc.id, "identifier": acc.account_identifier, "service": acc.service, "status_db": acc.status, "notes": acc.notes}
+        except Exception as e: self.logger.error(f"Error fetching account details for ID {account_id}: {e}")
+        return None
 
-            # Use LLM for critique
-            await self._internal_think("Generating self-critique using LLM based on recent insights and errors.")
-            critique_context = {
-                "task": "Critique Social Media Manager Performance",
-                "current_insights": insights,
-                "recent_errors": [json.loads(f.content) for f in error_fragments if f.content],
-                "estimated_ban_rate": ban_rate_estimate,
-                "desired_output_format": "JSON: { \"overall_assessment\": str, \"strengths\": list[str], \"weaknesses\": list[str] (e.g., low engagement on X, high error rate posting to Y), \"suggestions_for_improvement\": list[str] (e.g., 'Refine content style for Facebook', 'Investigate BrowsingAgent errors on TikTok', 'Rotate proxies more aggressively') }"
-            }
-            critique_prompt = await self.generate_dynamic_prompt(critique_context)
-            critique_json = await self._call_llm_with_retry(
-                 critique_prompt, model=self.config.get("OPENROUTER_MODELS", {}).get('agent_critique', "google/gemini-pro"),
-                 temperature=0.5, max_tokens=800, is_json_output=True
-            )
+    # --- KB Interaction Helpers (Simplified, assuming ThinkTool handles complex KB logic) ---
+    async def log_knowledge_fragment(self, agent_source: str, data_type: str, content: Union[str, dict], relevance_score: float = 0.5, tags: Optional[List[str]] = None, related_client_id: Optional[int] = None, source_reference: Optional[str] = None):
+        if self.think_tool and hasattr(self.think_tool, 'log_knowledge_fragment'):
+            await self.think_tool.execute_task({"action": "log_knowledge_fragment", "fragment_data": locals()}) # Pass all params
+        else: self.logger.error("ThinkTool unavailable for logging KB fragment.")
 
-            if critique_json:
-                 try:
-                     critique_result = json.loads(critique_json[critique_json.find('{'):critique_json.rfind('}')+1])
-                     critique['feedback'] = critique_result.get('overall_assessment', 'LLM critique generated.')
-                     critique['details'] = critique_result
-                     self.logger.info(f"Self-Critique Assessment: {critique['feedback']}")
-                     await self.log_knowledge_fragment(
-                         agent_source=self.AGENT_NAME, data_type="self_critique_summary",
-                         content=critique_result, tags=["critique", "social_media"], relevance_score=0.8
-                     )
-                 except (json.JSONDecodeError, ValueError, KeyError) as e:
-                      self.logger.error(f"Failed to parse self-critique LLM response: {e}")
-                      critique['feedback'] += " Failed to parse LLM critique."
-            else:
-                 critique['feedback'] += " LLM critique call failed."
-                 critique['status'] = 'error'
+    async def query_knowledge_base(self, data_types: Optional[List[str]] = None, tags: Optional[List[str]] = None, min_relevance: float = 0.0, time_window: Optional[timedelta] = None, limit: int = 10, related_client_id: Optional[int] = None, content_query: Optional[str] = None) -> List[Any]:
+        if self.think_tool and hasattr(self.think_tool, 'query_knowledge_base'):
+            # This is a simplified call; ThinkTool's query_knowledge_base is more direct
+            # For SMM to query, it would likely be a directive to ThinkTool
+            # For now, this direct call is a placeholder for a more complex interaction pattern
+            return await self.think_tool.query_knowledge_base(data_types=data_types, tags=tags, min_relevance=min_relevance, time_window=time_window, limit=limit, related_client_id=related_client_id, content_query=content_query)
+        self.logger.error("ThinkTool unavailable for querying KB."); return []
 
-        except Exception as e:
-            self.logger.error(f"Error during self-critique: {e}", exc_info=True)
-            critique['status'] = 'error'
-            critique['feedback'] = f"Self-critique failed: {e}"
+    async def log_learned_pattern(self, pattern_description: str, supporting_fragment_ids: List[int], confidence_score: float, implications: str, tags: Optional[List[str]] = None):
+         if self.think_tool and hasattr(self.think_tool, 'log_learned_pattern'):
+             await self.think_tool.execute_task({"action": "log_learned_pattern", "pattern_data": locals()})
+         else: self.logger.error("ThinkTool unavailable for logging learned pattern.")
 
-        return critique
+    # --- Abstract method implementations (from GeniusAgentBase) ---
+    async def plan_task(self, task_details: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        # SMM primarily executes plans from ThinkTool or handles single-action tasks.
+        # Complex planning is delegated.
+        action = task_details.get('action')
+        if action == 'post_content':
+            return [{"step": 1, "action": "Execute Post Content", "tool": "internal_smm", "params": task_details}]
+        elif action == 'strategic_interaction':
+            return [{"step": 1, "action": "Execute Strategic Interaction", "tool": "internal_smm", "params": task_details}]
+        self.logger.debug(f"No specific plan generated by SMM for action '{action}'. Relying on execute_task logic.")
+        return None # Let execute_task handle it directly or delegate further.
 
-    async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
-        """Constructs prompts for LLM calls."""
-        self.logger.debug(f"Generating dynamic prompt for SocialMediaManager task: {task_context.get('task')}")
-        prompt_parts = [SOCIAL_MEDIA_MANAGER_META_PROMPT]
-
-        prompt_parts.append("\n--- Current Task Context ---")
-        for key, value in task_context.items():
-             # Limit length of potentially large context items
-             value_str = str(value)
-             if len(value_str) > 1000: value_str = value_str[:1000] + "..."
-             prompt_parts.append(f"{key.replace('_', ' ').title()}: {value_str}")
-
-        # Add relevant context from KB (Example)
-        prompt_parts.append("\n--- Relevant Knowledge (KB - Placeholder) ---")
-        prompt_parts.append("- Trend: Short-form video dominates TikTok engagement.")
-        prompt_parts.append("- Competitor X uses strategy Y (Source: OSINT ID 123).")
-        prompt_parts.append(f"- Preferred Style ({task_context.get('platform', 'general')}): {self.internal_state.get('content_style_preferences', {}).get(task_context.get('platform'), 'Direct & Value-Driven')}")
-
-        prompt_parts.append("\n--- Instructions ---")
-        task_type = task_context.get('task')
-        # Add specific instructions based on task_type (similar to previous implementation)
-        if task_type == 'Refine social media content':
-            prompt_parts.append(f"1. Adapt 'Original Content' for platform '{task_context.get('platform')}' aiming for goal '{task_context.get('goal')}'.")
-            prompt_parts.append("2. Ensure tone is engaging, human-like, platform-appropriate, and avoids AI detection triggers.")
-            prompt_parts.append("3. Include relevant hashtags, emojis, and a clear CTA.")
-            prompt_parts.append(f"4. **Output Format:** {task_context.get('desired_output_format')}")
-        elif task_type == 'Create Social Media Campaign Plan':
-             prompt_parts.append("1. Generate a structured campaign plan based on goal, platform(s), duration, audience.")
-             prompt_parts.append("2. Incorporate strategies like 9-to-1 funnels, multi-account interactions.")
-             prompt_parts.append("3. Specify target account groups, action types, detailed content briefs, interaction targets, timing.")
-             prompt_parts.append(f"4. **Output Format:** {task_context.get('desired_output_format')}")
-        elif task_type == 'Analyze social media data':
-             prompt_parts.append(f"1. Analyze 'Fetched Data Summary' focusing on metric: '{task_context.get('metric')}'.")
-             prompt_parts.append("2. Identify key trends, insights, anomalies, and actionable takeaways.")
-             prompt_parts.append(f"3. **Output Format:** {task_context.get('desired_output_format')}")
-        elif task_type == 'Generate post content from brief':
-             prompt_parts.append(f"1. Generate engaging post content for platform '{task_context.get('platform')}' based on the 'Content Brief'.")
-             prompt_parts.append(f"2. Target audience: {task_context.get('target_audience')}. Tone: Engaging, human-like.")
-             prompt_parts.append("3. Include hashtags and CTA if appropriate.")
-             prompt_parts.append(f"4. **Output Format:** {task_context.get('desired_output_format')}")
-        elif task_type == 'Generate relevant social media comment':
-             prompt_parts.append("1. Generate a relevant, engaging, human-like comment based on the 'Target Post Context'.")
-             prompt_parts.append("2. Avoid generic phrases. Aim to add value or initiate conversation.")
-             prompt_parts.append("3. Keep it concise and platform-appropriate.")
-             prompt_parts.append(f"4. **Output Format:** Plain text comment.")
-        else:
-            prompt_parts.append("Analyze the provided context and generate the required output based on the task description.")
-
-        if "JSON" in task_context.get('desired_output_format', ''): prompt_parts.append("\n```json")
-
-        final_prompt = "\n".join(prompt_parts)
-        self.logger.debug(f"Generated dynamic prompt for SocialMediaManager (length: {len(final_prompt)} chars)")
-        return final_prompt
-
-    async def collect_insights(self) -> Dict[str, Any]:
-        """Collects insights about social media performance and account status."""
-        self.logger.debug("SocialMediaManager collect_insights called.")
-        active_campaign = self.internal_state.get('current_campaign_plan') is not None
-        managed_account_summary = {p: len(a) for p, a in self.internal_state.get('managed_accounts', {}).items()}
-        # TODO: Query DB/KB for actual performance metrics (e.g., avg engagement rate last 7d)
-        avg_engagement_rate = "N/A" # Placeholder
-        account_health_summary = "N/A" # Placeholder (e.g., % accounts active/warned/banned)
-
-        return {
-            "agent_name": self.AGENT_NAME, "status": self.status,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "active_campaign": active_campaign,
-            "managed_accounts": managed_account_summary,
-            "avg_engagement_rate_7d": avg_engagement_rate,
-            "account_health_summary": account_health_summary,
-            "key_observations": ["Performance metric aggregation needed for full insights."]
-        }
-
-    # --- KB Interaction Helpers (Delegate or Direct) ---
-    async def log_knowledge_fragment(self, *args, **kwargs):
-        if self.kb_interface and hasattr(self.kb_interface, 'log_knowledge_fragment'): return await self.kb_interface.log_knowledge_fragment(*args, **kwargs)
-        elif self.think_tool and hasattr(self.think_tool, 'log_knowledge_fragment'): return await self.think_tool.log_knowledge_fragment(*args, **kwargs)
-        else: self.logger.error("No mechanism available to log knowledge fragment."); return None
-
-    async def query_knowledge_base(self, *args, **kwargs):
-        if self.kb_interface and hasattr(self.kb_interface, 'query_knowledge_base'): return await self.kb_interface.query_knowledge_base(*args, **kwargs)
-        elif self.think_tool and hasattr(self.think_tool, 'query_knowledge_base'): return await self.think_tool.query_knowledge_base(*args, **kwargs)
-        else: self.logger.error("No mechanism available to query knowledge base."); return []
-
-    async def log_learned_pattern(self, *args, **kwargs):
-         if self.kb_interface and hasattr(self.kb_interface, 'log_learned_pattern'): return await self.kb_interface.log_learned_pattern(*args, **kwargs)
-         elif self.think_tool and hasattr(self.think_tool, 'log_learned_pattern'): return await self.think_tool.log_learned_pattern(*args, **kwargs)
-         else: self.logger.error("No mechanism available to log learned pattern."); return None
+    async def execute_step(self, step: Dict[str, Any], task_context: Dict[str, Any]) -> Dict[str, Any]:
+        # This method is less used if execute_task directly handles actions or delegates.
+        # If plan_task returns steps, this would execute them.
+        self.logger.warning(f"SMM execute_step called with: {step}. Most SMM actions are handled by execute_task directly.")
+        if step.get("tool") == "internal_smm":
+            return await self.execute_task(step.get("params", {})) # Route back to main handler
+        return {"status": "failure", "message": "SMM execute_step does not handle this step type."}
 
 # --- End of agents/social_media_manager.py ---

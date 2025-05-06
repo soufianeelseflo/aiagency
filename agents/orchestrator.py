@@ -1,7 +1,6 @@
-
 # Filename: agents/orchestrator.py
 # Description: Central coordinator for the AI Agency, managing core agents, workflows, and resources.
-# Version: 3.2 (Removed Optional API Key Logic)
+# Version: 3.2 (Removed Optional API Key Logic & Prometheus)
 
 import os
 import asyncio
@@ -36,6 +35,7 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
+# REMOVED Prometheus imports
 
 # --- Project Imports ---
 from config.settings import settings
@@ -72,8 +72,12 @@ from models import (
 logger = logging.getLogger(__name__)
 op_logger = logging.getLogger("OperationalLog")
 
+# --- Circuit Breakers ---
+llm_client_breaker = pybreaker.CircuitBreaker(
+    fail_max=3, reset_timeout=60 * 5, name="LLMClientBreaker"
+)
+
 # --- Global Shutdown Event ---
-# Used to signal shutdown across async tasks
 shutdown_event = asyncio.Event()
 
 
@@ -89,6 +93,8 @@ class Orchestrator:
             __name__, template_folder="../ui/templates", static_folder="../ui/static"
         )
         self.setup_routes() # Call route setup here
+
+        # REMOVED Prometheus setup
 
         self.meta_prompt = self.config.META_PROMPT
         self.approved = False
@@ -119,7 +125,7 @@ class Orchestrator:
         # Secure Storage Interface
         self.secure_storage = self._DatabaseSecureStorage(self.session_maker)
 
-        logger.info("Orchestrator v3.2 (Removed Optional API Key Logic) initialized.")
+        logger.info("Orchestrator v3.2 (Removed Optional API Key Logic & Prometheus) initialized.")
 
     # --- Initialization Methods ---
     async def initialize_database(self):
@@ -204,6 +210,8 @@ class Orchestrator:
                     logger.info("Initialized ProgrammerAgent.")
                 except ImportError: logger.warning("Found programmer_agent.py but failed to import ProgrammerAgent class.")
             else: logger.info("ProgrammerAgent file not found, skipping initialization.")
+
+            # REMOVED Prometheus gauge setting
 
             if initialization_failed: raise RuntimeError("Failed to initialize critical agents due to missing secrets.")
 
@@ -601,9 +609,11 @@ class Orchestrator:
         logger.info(f"Delegating task {task_id} ({task_details.get('action', 'N/A')}) to {agent_name}.")
         try:
             result = await agent.execute_task(task_details)
+            # REMOVED Prometheus counter
             return result
         except Exception as e:
             logger.error(f"Error during task delegation to {agent_name} (Task ID: {task_id}): {e}", exc_info=True)
+            # REMOVED Prometheus counter
             await self.report_error(agent_name, f"Task delegation failed: {e}", task_id)
             return {"status": "error", "message": f"Exception during task execution: {e}"}
 
@@ -640,6 +650,7 @@ class Orchestrator:
         log_msg = f"ERROR reported by {agent_name}: {error_message}"
         if task_id: log_msg += f" (Task: {task_id})"
         logger.error(log_msg)
+        # REMOVED Prometheus counter
         # await self.send_notification(f"Agent Error: {agent_name}", log_msg)
 
     async def send_notification(self, title: str, message: str, level: str = "info"):
