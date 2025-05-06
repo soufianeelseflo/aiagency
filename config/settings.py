@@ -52,25 +52,25 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY_2: Optional[str] = Field(default=None, description="Additional OpenRouter API Key 2. Load from env var 'OPENROUTER_API_KEY_2'.")
     OPENROUTER_MODELS: Dict[str, str] = {
         # --- High Power (Keep Pro/Opus/GPT-4o) ---
-        "think_synthesize": "anthropic/claude-3-opus-20240229",
-        "think_strategize": "anthropic/claude-3-opus-20240229",
-        "think_critique": "anthropic/claude-3-sonnet-20240229",
-        "legal_analysis": "anthropic/claude-3-sonnet-20240229",
-        "browsing_visual_analysis": "google/gemini-1.5-pro-latest",
-        "email_draft": "anthropic/claude-3-sonnet-20240229",
+        "think_synthesize": "google/gemini-2.5-pro-preview-03-25",
+        "think_strategize": "google/gemini-2.5-pro-preview-03-25",
+        "think_critique": "google/gemini-2.5-pro-preview-03-25",
+        "legal_analysis": "google/gemini-2.5-pro-preview-03-25",
+        "browsing_visual_analysis": "google/gemini-2.5-flash-preview:thinking",
+        "email_draft": "google/gemini-2.5-flash-preview:thinking",
 
         # --- Medium Power (Sonnet / Gemini Pro / GPT-4o-mini?) ---
-        "think_radar": "anthropic/claude-3-sonnet-20240229",
-        "browsing_extract": "anthropic/claude-3-sonnet-20240229",
+        "think_radar": "google/gemini-2.5-flash-preview:thinking",
+        "browsing_extract": "google/gemini-2.5-flash-preview:thinking",
 
         # --- Fast & Cheap (Haiku / Gemini Flash) ---
-        "default_llm": "anthropic/claude-3-haiku-20240307",
-        "think_validate": "anthropic/claude-3-haiku-20240307",
-        "think_user_education": "anthropic/claude-3-haiku-20240307",
-        "email_humanize": "anthropic/claude-3-haiku-20240307",
-        "voice_intent": "anthropic/claude-3-haiku-20240307",
-        "voice_response": "anthropic/claude-3-haiku-20240307",
-        "browsing_summarize": "anthropic/claude-3-haiku-20240307",
+        "default_llm": "google/gemini-2.5-flash-preview",
+        "think_validate": "google/gemini-2.5-flash-preview",
+        "think_user_education": "google/gemini-2.5-flash-preview",
+        "email_humanize": "google/gemini-2.5-flash-preview",
+        "voice_intent": "google/gemini-2.5-flash-preview",
+        "voice_response": "google/gemini-2.5-flash-preview",
+        "browsing_summarize": "google/gemini-2.5-flash-preview",
     }
     OPENROUTER_API_TIMEOUT_S: float = Field(default=120.0, gt=0, description="Timeout in seconds for OpenRouter API calls.")
 
@@ -84,7 +84,6 @@ class Settings(BaseSettings):
     # SMTP_PORT: Optional[int] = Field(default=None, description="SMTP port (Fallback Only).") # REMOVED/OPTIONAL
     HOSTINGER_IMAP_PORT: int = Field(default=993, description="IMAP port (usually 993 for SSL).")
     SENDER_NAME: str = Field(default="Alex Reed", description="Name to use in the 'From' field of emails.")
-    SENDER_TITLE: Optional[str] = Field(default="Growth Strategist", description="Optional title for sender in email signature.")
     SENDER_COMPANY_ADDRESS: str = Field(..., description="Physical company address required by CAN-SPAM. Load from env var 'SENDER_COMPANY_ADDRESS'.") # Required by CAN-SPAM
     EMAIL_AGENT_MAX_CONCURRENCY: int = Field(default=10, gt=0, description="Max concurrent email sending tasks.")
     EMAIL_AGENT_MAX_PER_DAY: int = Field(default=500, ge=0, description="Global daily email sending limit for the agent.")
