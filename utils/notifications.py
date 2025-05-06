@@ -1,6 +1,6 @@
 # Filename: utils/notifications.py
 # Description: Handles sending operational notifications (e.g., email to operator).
-# Version: 1.0
+# Version: 1.1 (SyntaxError Fix for f-string backslash)
 
 import logging
 import asyncio
@@ -9,7 +9,7 @@ from typing import Optional, Any
 # Import settings AFTER it's defined and validated
 from config.settings import settings
 
-# Import MailerSend client if available (used by EmailAgent, can reuse here)
+# Import MailerSend client if available
 try:
     from mailersend import emails as MailerSendEmails
     MAILERSEND_AVAILABLE = True
@@ -41,8 +41,13 @@ async def send_notification(title: str, message: str, level: str = "info", confi
             mail_from = {"name": sender_name, "email": sender_email}
             recipients = [{"email": user_email}]
             subject = f"[{level.upper()}] Synapse Notification: {title}"
+            
+            # --- SYNTAX FIX IS HERE ---
+            # Pre-process the message for HTML replacement outside the f-string expression part
+            message_html_compatible = message.replace('\n', '<br>')
             text_content = f"Notification Level: {level.upper()}\n\n{message}"
-            html_content = f"<p><strong>Notification Level: {level.upper()}</strong></p><p>{message.replace('\n', '<br>')}</p>"
+            html_content = f"<p><strong>Notification Level: {level.upper()}</strong></p><p>{message_html_compatible}</p>"
+            # --- END OF SYNTAX FIX ---
 
             mailer.set_mail_from(mail_from, mail_body)
             mailer.set_mail_to(recipients, mail_body)
