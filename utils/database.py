@@ -118,8 +118,8 @@ def decrypt_data(encrypted_data_b64: Optional[str]) -> Optional[str]:
         # Minimum length check: salt + nonce + tag (16 bytes for GCM)
         min_len = SALT_BYTES + NONCE_BYTES + 16
         if len(encrypted_payload) < min_len:
-             logger.error(f"Decryption failed: Payload too short ({len(encrypted_payload)} bytes). Expected format: salt+nonce+ciphertext+tag.")
-             return None
+            logger.error(f"Decryption failed: Payload too short ({len(encrypted_payload)} bytes). Expected format: salt+nonce+ciphertext+tag.")
+            return None
 
         salt = encrypted_payload[:SALT_BYTES]
         nonce = encrypted_payload[SALT_BYTES : SALT_BYTES + NONCE_BYTES]

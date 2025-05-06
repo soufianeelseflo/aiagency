@@ -1,6 +1,6 @@
 # Filename: agents/browsing_agent.py
 # Description: Agentic Browsing Agent with enhanced plan execution.
-# Version: 3.4 (Added Input Variable Handling for Plans)
+# Version: 3.5 (Removed hardcoded OpenAI model preference)
 
 import asyncio
 import logging
@@ -177,7 +177,7 @@ class BrowsingAgent(GeniusAgentBase):
     Browsing Agent (Genius Level - Fully Autonomous): Handles web scraping, visual UI automation,
     autonomous multi-account management including creation, Google Dorking, credential acquisition,
     and data extraction with human emulation.
-    Version: 3.4 (Added Input Variable Handling)
+    Version: 3.5 (Removed hardcoded OpenAI model preference)
     """
     AGENT_NAME = "BrowsingAgent"
 
@@ -208,7 +208,7 @@ class BrowsingAgent(GeniusAgentBase):
         # Initialize Temp Mail Service (replace with actual implementation/config)
         self.temp_mail_service = TempMailService(api_key=self.config.get("TEMP_MAIL_API_KEY"))
 
-        self.logger.info(f"{self.AGENT_NAME} v3.4 (Input Var Handling) initialized. Max Contexts: {self.internal_state['max_concurrent_contexts']}")
+        self.logger.info(f"{self.AGENT_NAME} v3.5 (Removed hardcoded OpenAI model) initialized. Max Contexts: {self.internal_state['max_concurrent_contexts']}")
 
     async def log_operation(self, level: str, message: str):
         """Helper to log to the operational log file."""
@@ -548,11 +548,13 @@ class BrowsingAgent(GeniusAgentBase):
                             "desired_output_format": "JSON containing the extracted data according to instructions."
                         }
                         llm_prompt = await self.generate_dynamic_prompt(llm_task_context)
+                        # --- MODIFIED: Removed hardcoded model_preference ---
                         llm_response_str = await self.orchestrator.call_llm(
                             agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.1,
                             max_tokens=2000, is_json_output=True,
-                            image_data=screenshot_bytes, model_preference=["openai/gpt-4o"]
+                            image_data=screenshot_bytes # Let orchestrator pick model based on image_data presence
                         )
+                        # --- END MODIFICATION ---
                         if llm_response_str:
                              try:
                                  parsed_data = self._parse_llm_json(llm_response_str)
@@ -637,13 +639,13 @@ class BrowsingAgent(GeniusAgentBase):
                              automation_task_context["special_focus"] = "A CAPTCHA might be present. Identify it and determine the interaction needed (e.g., click checkbox, describe image challenge)."
 
                         llm_prompt = await self.generate_dynamic_prompt(automation_task_context)
-                        llm_model_pref = "openai/gpt-4o"
-
+                        # --- MODIFIED: Removed hardcoded model_preference ---
                         action_json_str = await self.orchestrator.call_llm(
                             agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.05,
                             max_tokens=800, is_json_output=True,
-                            image_data=screenshot_bytes, model_preference=[llm_model_pref]
+                            image_data=screenshot_bytes # Let orchestrator pick model
                         )
+                        # --- END MODIFICATION ---
 
                         if not action_json_str:
                             last_action_summary = "LLM failed to determine next action."
@@ -834,7 +836,12 @@ class BrowsingAgent(GeniusAgentBase):
                             screenshot_bytes = await page.screenshot()
                             llm_check_context = {"task": "Check for Google search block/CAPTCHA", "current_url": page.url, "desired_output_format": "JSON: {\"is_blocked\": boolean, \"reason\": \"<description if blocked>\"}"}
                             llm_prompt = await self.generate_dynamic_prompt(llm_check_context)
-                            check_response = await self.orchestrator.call_llm(agent_name=self.AGENT_NAME, prompt=llm_prompt, image_data=screenshot_bytes, model_preference=["openai/gpt-4o"], max_tokens=100, is_json_output=True, temperature=0.1)
+                            # --- MODIFIED: Removed hardcoded model_preference ---
+                            check_response = await self.orchestrator.call_llm(
+                                agent_name=self.AGENT_NAME, prompt=llm_prompt, image_data=screenshot_bytes,
+                                max_tokens=100, is_json_output=True, temperature=0.1
+                            )
+                            # --- END MODIFICATION ---
                             block_check = self._parse_llm_json(check_response)
 
                             if block_check and block_check.get("is_blocked"):
@@ -893,12 +900,13 @@ class BrowsingAgent(GeniusAgentBase):
                                 "desired_output_format": "JSON list of findings: [{\"type\": \"password|api_key|secret|db_conn|config_file|login_form|ssh_key|other_sensitive\", \"value_snippet\": \"<relevant text snippet>\", \"context_snippet\": \"<surrounding text>\", \"location_hint\": \"<e.g., form input, code block, plain text>\"}] or empty list []."
                             }
                             llm_prompt = await self.generate_dynamic_prompt(analysis_task_context)
+                            # --- MODIFIED: Removed hardcoded model_preference ---
                             findings_json_str = await self.orchestrator.call_llm(
                                 agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.1,
                                 max_tokens=1500, is_json_output=True,
-                                image_data=screenshot_bytes, # Analyze visually
-                                model_preference=["openai/gpt-4o"]
+                                image_data=screenshot_bytes # Let orchestrator pick model
                             )
+                            # --- END MODIFICATION ---
 
                             if findings_json_str:
                                 findings_found = self._parse_llm_json(findings_json_str, expect_type=list)
@@ -1355,10 +1363,12 @@ class BrowsingAgent(GeniusAgentBase):
                       automation_task_context["special_focus"] = "Email verification might be required. Check page for confirmation status or decide to trigger 'check_email_verification' action."
 
                  llm_prompt = await self.generate_dynamic_prompt(automation_task_context)
+                 # --- MODIFIED: Removed hardcoded model_preference ---
                  action_json_str = await self.orchestrator.call_llm(
                      agent_name=self.AGENT_NAME, prompt=llm_prompt, temperature=0.05,
-                     max_tokens=800, is_json_output=True, image_data=screenshot_bytes,
-                     model_preference=["openai/gpt-4o"] )
+                     max_tokens=800, is_json_output=True, image_data=screenshot_bytes # Let orchestrator pick model
+                 )
+                 # --- END MODIFICATION ---
 
                  if not action_json_str: last_action_summary = "LLM failed to determine signup action."; continue
 
@@ -1812,5 +1822,3 @@ class BrowsingAgent(GeniusAgentBase):
         except Exception as e:
             self.logger.error(f"Unexpected error during JSON parsing: {e}", exc_info=True)
             return None
-
-# --- End of agents/browsing_agent.py ---

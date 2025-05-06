@@ -186,7 +186,7 @@ async def main():
 
         # Explicitly stop the orchestrator (handles agent shutdown)
         if orchestrator_instance and hasattr(orchestrator_instance, 'stop'):
-             # Check if orchestrator is already stopping/stopped to avoid redundant calls
+            # Check if orchestrator is already stopping/stopped to avoid redundant calls
             if orchestrator_instance.status not in [orchestrator_instance.STATUS_STOPPING, orchestrator_instance.STATUS_STOPPED]:
                 logger.info("Calling orchestrator stop method...")
                 try:
@@ -194,9 +194,9 @@ async def main():
                 except Exception as stop_err:
                     logger.error(f"Error during orchestrator stop: {stop_err}", exc_info=True)
             else:
-                 logger.info(f"Orchestrator already in state: {orchestrator_instance.status}. Skipping stop call.")
+                logger.info(f"Orchestrator already in state: {orchestrator_instance.status}. Skipping stop call.")
         else:
-             logger.warning("Orchestrator instance not available for final stop call.")
+            logger.warning("Orchestrator instance not available for final stop call.")
 
         logger.info("-------------------- Application Stopping --------------------")
         logging.shutdown() # Ensure all logs are flushed before exiting
@@ -208,7 +208,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Shutdown requested via KeyboardInterrupt (Ctrl+C).")
     except SystemExit as e:
-         logger.info(f"System exit requested: {e}")
+        logger.info(f"System exit requested: {e}")
     except Exception as e:
         # Catch any unexpected errors that might occur outside the main async loop
         print(f"CRITICAL UNHANDLED ERROR at top level: {e}", file=sys.stderr)

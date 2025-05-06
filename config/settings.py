@@ -1,7 +1,7 @@
 # Filename: config/settings.py
 # Description: Configuration settings for the Synapse AI Sales System,
 #              validated using Pydantic. Secrets loaded from environment variables.
-# Version: 2.3 (Pydantic V2 Validator Fix - Keeping User Models)
+# Version: 2.4 (Removed Redundant Validator, User Models)
 
 import os
 import json
@@ -16,19 +16,7 @@ from typing import Dict, List, Optional, Any, Union
 logger = logging.getLogger(__name__)
 
 # --- Helper Functions ---
-def get_env_variable(var_name: str, default: Optional[str] = None) -> Optional[str]:
-    """Retrieves an environment variable, logging a warning if not found and no default is set."""
-    value = os.environ.get(var_name)
-    if value is None:
-        if default is None:
-            # Log only once per variable to avoid spamming logs during startup
-            if not hasattr(get_env_variable, 'logged_warnings'):
-                get_env_variable.logged_warnings = set() # type: ignore
-            if var_name not in get_env_variable.logged_warnings: # type: ignore
-                logger.warning(f"Environment variable '{var_name}' not set and no default provided.")
-                get_env_variable.logged_warnings.add(var_name) # type: ignore
-        return default
-    return value
+# Removed get_env_variable as BaseSettings handles it
 
 class Settings(BaseSettings):
     """
@@ -37,9 +25,9 @@ class Settings(BaseSettings):
     """
     # --- Core Application Settings ---
     APP_NAME: str = Field(default="Synapse AI Sales System", description="Name of the application.")
-    APP_VERSION: str = Field(default="3.2-Genius-Cleaned", description="Version of the application.") # Updated version
+    APP_VERSION: str = Field(default="3.2-Genius-Cleaned", description="Version of the application.")
     DEBUG: bool = Field(default=False, description="Enable debug logging and potentially other debug features.")
-    AGENCY_BASE_URL: AnyUrl = Field(..., description="Base URL where the agency is hosted (e.g., for webhooks, asset hosting). Must include scheme. Example: 'https://agency.nichenova.store'") # Required, use AnyUrl for flexibility
+    AGENCY_BASE_URL: AnyUrl = Field(..., description="Base URL where the agency is hosted (e.g., for webhooks, asset hosting). Must include scheme. Example: 'https://agency.nichenova.store'")
 
     # --- Database Configuration ---
     DATABASE_URL: PostgresDsn = Field(..., description="Async PostgreSQL connection string. Load from env var 'DATABASE_URL'.")
@@ -51,7 +39,7 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY_2: Optional[str] = Field(default=None, description="Additional OpenRouter API Key 2. Load from env var 'OPENROUTER_API_KEY_2'.")
     # --- USING MODELS FROM USER'S <fgh> tag ---
     OPENROUTER_MODELS: Dict[str, str] = {
-        # --- High Power (Keep Pro/Opus/GPT-4o) ---
+        # --- High Power ---
         "think_synthesize": "google/gemini-2.5-pro-preview-03-25",
         "think_strategize": "google/gemini-2.5-pro-preview-03-25",
         "think_critique": "google/gemini-2.5-pro-preview-03-25",
@@ -59,11 +47,11 @@ class Settings(BaseSettings):
         "browsing_visual_analysis": "google/gemini-2.5-flash-preview:thinking",
         "email_draft": "google/gemini-2.5-flash-preview:thinking",
 
-        # --- Medium Power (Sonnet / Gemini Pro / GPT-4o-mini?) ---
+        # --- Medium Power ---
         "think_radar": "google/gemini-2.5-flash-preview:thinking",
         "browsing_extract": "google/gemini-2.5-flash-preview:thinking",
 
-        # --- Fast & Cheap (Haiku / Gemini Flash) ---
+        # --- Fast & Cheap ---
         "default_llm": "google/gemini-2.5-flash-preview",
         "think_validate": "google/gemini-2.5-flash-preview",
         "think_user_education": "google/gemini-2.5-flash-preview",
@@ -160,15 +148,7 @@ class Settings(BaseSettings):
     )
 
     # --- Custom Validators (Pydantic V2 Syntax) ---
-    @field_validator('*', mode='before')
-    @classmethod
-    def load_from_env_first(cls, v: Any, info: ValidationInfo) -> Any:
-        """Ensure environment variable takes precedence over .env file or defaults if set."""
-        if not info.field_name: return v
-        env_var_name = info.field_name.upper()
-        env_val = os.environ.get(env_var_name)
-        if env_val is None: env_val = os.environ.get(info.field_name)
-        return env_val if env_val is not None else v
+    # REMOVED load_from_env_first validator - BaseSettings handles precedence
 
     @field_validator(
         'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY', 'HOSTINGER_IMAP_PASS',
@@ -183,6 +163,7 @@ class Settings(BaseSettings):
         field_name = info.field_name
         if not field_name: return v
         env_var_name = field_name.upper()
+        # Value 'v' already includes the value loaded from environment by BaseSettings
         value = v
 
         essential_secrets = {
@@ -198,7 +179,7 @@ class Settings(BaseSettings):
             raise ValueError(f"CRITICAL: Required secret '{field_name}' (env var '{env_var_name}') is not set.")
         elif field_name in optional_secrets and not value:
             logger.warning(f"Optional secret '{field_name}' (env var '{env_var_name}') is not set. Related features will be disabled.")
-        elif field_name == 'DATABASE_ENCRYPTION_KEY' and value and len(value) < 32:
+        elif field_name == 'DATABASE_ENCRYPTION_KEY' and value and len(str(value)) < 32: # Ensure value is treated as string for len check
             raise ValueError(f"CRITICAL: '{field_name}' must be at least 32 characters long.")
 
         return value
@@ -214,6 +195,7 @@ class Settings(BaseSettings):
         field_name = info.field_name
         if not field_name: return v
         env_var_name = field_name.upper()
+        # Value 'v' already includes the value loaded from environment by BaseSettings
         if not v:
             raise ValueError(f"CRITICAL: Required setting '{field_name}' (env var '{env_var_name}') is not set.")
         return v
@@ -242,10 +224,10 @@ class Settings(BaseSettings):
         if hasattr(self, secret_name):
             value = getattr(self, secret_name)
             if secret_name in secret_fields and value:
-                return value
+                return str(value) # Ensure return value is string
             elif secret_name not in secret_fields:
                  logger.warning(f"Attempted to get non-secret attribute '{secret_name}' via get_secret.")
-                 return value
+                 return str(value) if value is not None else None
             else:
                  return None
         else:
@@ -257,6 +239,7 @@ try:
     settings = Settings()
     logger.info(f"Settings loaded for App: {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Log Level: {settings.LOG_LEVEL}, Debug Mode: {settings.DEBUG}")
+    # Ensure DATABASE_URL is treated as an object with attributes after validation
     db_host = getattr(settings.DATABASE_URL, 'host', 'N/A') if settings.DATABASE_URL else 'N/A'
     logger.info(f"Database URL Host: {db_host}")
     logger.info(f"Base Agency URL: {settings.AGENCY_BASE_URL}")
@@ -266,5 +249,3 @@ except ValueError as e:
 except Exception as e:
     logger.critical(f"CRITICAL ERROR: Unexpected error during settings initialization: {e}", exc_info=True)
     raise SystemExit(f"Unexpected settings initialization error: {e}")
-
-# --- End of config/settings.py ---
