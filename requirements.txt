@@ -2,39 +2,32 @@
 # Description: Python dependencies for the Synapse AI Sales System.
 # Version: 4.1 (Updated May 6, 2025 for compatibility & security)
 
-# --- Core Framework & Web ---
-quart>=0.19.6,<0.20.0
+
+quart>=0.20.0
 sqlalchemy>=2.0.35,<2.1.0
-asyncpg>=0.29.0,<0.31.0 # Updated for Python 3.10+ & SQLAlchemy 2
+asyncpg>=0.29.0,<0.31.0 
 psutil>=5.9.8,<6.1.0
-aiohttp>=3.9.5,<3.11.0 # Includes security fixes
+aiohttp>=3.9.5,<3.11.0 
 
-# --- AI & LLMs ---
-openai>=1.30.0,<1.36.0 # Stable recent version
+openai>=1.30.0,<1.36.0 
 
-# --- Web Interaction & Scraping ---
-playwright>=1.44.0,<1.48.0 # Keep within a reasonable range
+playwright>=1.44.0,<1.48.0 
 beautifulsoup4>=4.12.3,<4.13.0
-# fake-useragent can be problematic, consider removing if not essential
-# fake-useragent>=1.5.1,<1.6.0
-faker>=24.0.0,<27.0.0 # For Browsing/Gmail agents
+faker>=24.0.0,<27.0.0 
 
-# --- External Services ---
-twilio>=9.0.0,<9.4.0 # Stable recent version
-deepgram-sdk>=3.4.0,<3.8.0 # Stable recent version
-websockets>=12.0,<13.2 # Stable recent version
-pydantic-settings>=2.0.0,<2.4.0 # Keep compatible with Pydantic V2
+twilio>=9.0.0,<9.4.0 
+deepgram-sdk>=3.4.0,<3.8.0 
+websockets>=12.0,<13.2 
+pydantic-settings>=2.0.0,<2.4.0 
 
 # --- Utilities ---
 tenacity>=8.2.0,<9.1.0
 pybreaker>=1.1.0,<1.3.0
 python-dotenv>=1.0.1,<1.1.0
 pytz>=2024.1,<2025.0
-cryptography>=42.0.0,<44.0.0 # Includes security fixes
-requests>=2.31.0,<2.33.0 # Includes security fixes
+cryptography>=44.0.1
+requests>=2.31.0,<2.33.0
 
-# --- Monitoring ---
 prometheus-client>=0.20.0,<0.22.0
 
-# --- Other Dependencies ---
-numpy>=1.26.4,<1.27.0 # Keep for potential use by other libs
+numpy>=1.26.4,<1.27.0 
