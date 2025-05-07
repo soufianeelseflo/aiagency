@@ -377,37 +377,33 @@ class LegalAgent(GeniusAgentBase):
             return fallback_result
 
     # --- Utility Methods ---
-    async def get_invoice_legal_note(self, client_country: str) -> str:
-        """Generates a standardized, agency-favoring legal note for invoices."""
-        self.logger.debug(f"Generating STRATEGIC invoice legal note for country: {client_country}")
+    # In agents/legal_agent.py
 
-        # Fetch static info securely from settings
-        # These values are read from environment variables by the settings object
-        # The AI model itself does NOT see the environment variables.
-        w8_name = self.config.get('W8_NAME', '[Operator Name/Company]')
-        w8_country = self.config.get('W8_COUNTRY', '[Operator Country]')
-        # Expecting IBAN primarily, but allow for SWIFT/RIB if user includes them in the single env var string
-        bank_account_info = self.config.get('MOROCCAN_BANK_ACCOUNT', '[Operator Bank IBAN/SWIFT/RIB]')
+    async def get_invoice_legal_note(self, client_country: Optional[str] = None) -> str:
+        """
+        Generates a strategically worded, professional legal note for invoices.
+        Focuses on core protections while deferring specific jurisdiction to a separate agreement.
+        """
+        self.logger.debug(f"Generating STRATEGIC invoice legal note (Client Country: {client_country or 'Unknown'}).")
 
-        # --- Aggressive, Pro-Agency Terms ---
-        # Focus: Clarity, Finality, Limited Liability, Jurisdiction
-        # NOTE: This is aggressive legal language crafted based on user request.
-        # Real legal counsel is strongly advised to ensure enforceability and manage actual legal risk.
-        # This aims to meet the user's "bend the rules", "no refund" intent within the text placed on the invoice.
+        # Fetch necessary details (assuming they are configured)
+        sender_name = self.config.get('SENDER_NAME', 'Nolli Agency') # Use configured name
+        bank_account_info = self.config.get('MOROCCAN_BANK_ACCOUNT', '[Configure Bank Details]')
+
+        # --- Revised Pro-Agency Terms (Less Specific Jurisdiction on Invoice) ---
+        # Focus: Finality, Non-Refundable, Limited Liability, Reference to Agreement
         terms = (
-            f"SERVICE PROVIDER: {w8_name}, {w8_country}. "
-            f"PAYMENT TO: {bank_account_info}. "
-            "PAYMENT = FINAL, IRREVOCABLE ACCEPTANCE of services AS IS upon delivery/commencement. "
-            "ALL PAYMENTS ARE NON-REFUNDABLE UNDER ANY CIRCUMSTANCES. NO CHARGEBACKS PERMITTED. "
-            "Agency liability strictly limited to the service fee paid. No indirect or consequential damages whatsoever. "
-            "Disputes governed exclusively by Moroccan law, courts of Rabat have sole jurisdiction. Client explicitly waives rights to other jurisdictions or dispute mechanisms."
+            f"SERVICE PROVIDER: {sender_name}. PAYMENT TO: {bank_account_info}. "
+            "PAYMENT CONSTITUTES FINAL AND IRREVOCABLE ACCEPTANCE of services rendered or commenced. "
+            "ALL PAYMENTS ARE NON-REFUNDABLE. NO CHARGEBACKS. " # Keep strong non-refundable clause
+            "Provider liability is strictly limited to the total service fee paid for this invoice. "
+            "Provider is not liable for any indirect, consequential, or incidental damages. "
+            "This transaction and all services are governed by the terms of the Master Service Agreement previously agreed upon by the parties, which includes governing law and dispute resolution clauses." # Points to external agreement
         )
-        # --- End Aggressive Terms ---
+        # --- End Revised Terms ---
 
-        # Combine with a minimal base note for clarity on the invoice
-        # The current date will be added by the invoice generation process itself, not here.
-        final_note = f"Payment Terms: Due Upon Receipt. Review Full Terms: {terms}" # Slightly clearer presentation
-        self.logger.info(f"Generated Aggressive Invoice Note for {client_country}")
+        final_note = f"Payment Terms: Due Upon Receipt. See Master Service Agreement for full terms. Key Terms Summary: {terms}"
+        self.logger.info(f"Generated Revised Strategic Invoice Note (Client Country: {client_country or 'Unknown'})")
         return final_note
 
     def _parse_llm_json(self, json_string: str, expect_type: Type = dict) -> Union[Dict, List, None]:
