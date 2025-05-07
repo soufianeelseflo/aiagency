@@ -28,7 +28,27 @@ try:
     from agents.base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
 except ImportError:
     logging.warning("Production base agent not found, using GeniusAgentBase.")
-    from base_agent import GeniusAgentBase
+    # Define a dummy base class if the real one isn't found
+    class GeniusAgentBase:
+        AGENT_NAME = "DummyBaseAgent"
+        STATUS_IDLE="idle"; STATUS_EXECUTING="executing"; STATUS_ERROR="error"; STATUS_RUNNING="running"; STATUS_STOPPING="stopping"; STATUS_STOPPED="stopped"
+        def __init__(self, *args, **kwargs):
+            self.agent_name = self.AGENT_NAME; self.logger = logging.getLogger(f"agent.{self.agent_name}")
+            self.orchestrator = kwargs.get('orchestrator'); self.config = kwargs.get('config'); self.session_maker = kwargs.get('session_maker')
+            self._stop_event = asyncio.Event(); self._status = self.STATUS_IDLE
+        async def _internal_think(self, *args, **kwargs): pass
+        async def _report_error(self, *args, **kwargs): pass
+        async def log_knowledge_fragment(self, *args, **kwargs): pass
+        async def get_status_summary(self) -> dict: return {"status": "dummy"}
+        async def stop(self, timeout: float = 1.0): self._stop_event.set(); await asyncio.sleep(0.01)
+        async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str: return "Dummy prompt"
+        async def plan_task(self, task_details: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]: return None
+        async def execute_step(self, step: Dict[str, Any], task_context: Dict[str, Any]) -> Dict[str, Any]: return {"status":"failure"}
+        async def learning_loop(self): await asyncio.sleep(3600)
+        async def self_critique(self) -> Dict[str, Any]: return {"status":"ok", "feedback":"dummy"}
+        async def collect_insights(self) -> Dict[str, Any]: return {}
+        async def run(self): self._status = self.STATUS_RUNNING; await asyncio.sleep(3600) # Dummy run
+        async def update_directive_status(self, *args, **kwargs): pass # Dummy method
 
 from models import (
     KnowledgeFragment, LearnedPattern, StrategicDirective, PromptTemplate,
@@ -205,7 +225,7 @@ class ThinkTool(GeniusAgentBase):
         if not api_key: self.logger.error("Clay.com API key not found."); return {"status": "failure", "message": "Clay API key not configured."}
         if not endpoint.startswith('/'): endpoint = '/' + endpoint
         clay_url = f"https://api.clay.com{endpoint}"; headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json"}
-        
+
         # Include custom metadata if provided, for tracking/correlation
         payload = data.copy()
         if custom_metadata:
@@ -278,7 +298,7 @@ class ThinkTool(GeniusAgentBase):
                 if time_window: stmt = stmt.where(KnowledgeFragment.timestamp >= (datetime.now(timezone.utc) - time_window))
                 if content_query: stmt = stmt.where(KnowledgeFragment.content.ilike(f'%{content_query}%'))
                 if tags: tag_conditions = [KnowledgeFragment.tags.like(f'%"{tag}"%') for tag in tags]; stmt = stmt.where(or_(*tag_conditions))
-                
+
                 order_by_clause = [desc(KnowledgeFragment.relevance_score), desc(KnowledgeFragment.timestamp)] # Default order
                 if order_by == "timestamp_desc": order_by_clause = [desc(KnowledgeFragment.timestamp), desc(KnowledgeFragment.relevance_score)]
                 elif order_by == "timestamp_asc": order_by_clause = [asc(KnowledgeFragment.timestamp), desc(KnowledgeFragment.relevance_score)]
@@ -544,12 +564,12 @@ class ThinkTool(GeniusAgentBase):
                         proposed_directives.append({
                             "target_agent": "ThinkTool", "directive_type": "execute_clay_call",
                             "content": {"endpoint": self.clay_endpoints.get("enrich_person"), "data": {"linkedin_url": linkedin_url}, "context": {"client_id": client_data['id'], "reason": "Initial enrichment for outreach"}, "custom_metadata_for_clay": {"client_id": client_data['id'], "directive_source": "ThinkToolSynthesis"}}, "priority": 6 })
-            
+
             # 2. Prepare Context for LLM Synthesis
             fragments_summary = [{"id": f.id, "type": f.data_type, "src": f.agent_source, "preview": (f.content if isinstance(f.content, str) else json.dumps(f.content))[:70]+"...", "relevance": f.relevance_score} for f in recent_fragments[:30]] # More fragments, include relevance
             patterns_summary = [{"id": p.id, "desc": p.pattern_description, "conf": p.confidence_score, "type": p.pattern_type, "exploit_details": p.potential_exploit_details} for p in recent_patterns[:15]] # More patterns, include type/exploit
             perf_summary_str = f"Email Statuses (7d): {Counter(d['status'] for d in perf_data if d['type']=='email')}. Call Outcomes (7d): {Counter(d['outcome'] for d in perf_data if d['type']=='call')}. Paid Invoices (7d): ${sum(d['amount'] for d in perf_data if d['type']=='invoice' and d['status']=='paid'):.2f}."
-            
+
             task_context = {
                 "task": "Grand Strategic Synthesis & AI Exploit Identification",
                 "current_system_time_utc": datetime.now(timezone.utc).isoformat(),
@@ -624,7 +644,7 @@ class ThinkTool(GeniusAgentBase):
                 "unconventional growth hacking forums discussing new automation exploits"
             ]
             search_query = f"Urgent Scan: {random.choice(search_vectors)} - focus on actionable, potentially grey-area intelligence for immediate competitive advantage or profit generation. Include code snippets or PoC links if found."
-            
+
             # Delegate to BrowsingAgent with instructions to try deeper web if possible
             browsing_task_params = {
                 "action": "deep_web_search_and_summarize", # Assume BrowsingAgent has an enhanced action
@@ -637,7 +657,7 @@ class ThinkTool(GeniusAgentBase):
 
             search_result_data = await self.orchestrator.delegate_task("BrowsingAgent", browsing_task_params)
             search_results_summary = search_result_data.get("summary", "") if search_result_data and search_result_data.get("status") == "success" else None
-            
+
             if not search_results_summary: self.logger.info("Radar: No significant findings from deep web search."); return
 
             task_context = {
@@ -735,7 +755,7 @@ class ThinkTool(GeniusAgentBase):
         radar_interval = timedelta(seconds=int(self.config.get("THINKTOOL_RADAR_INTERVAL_SECONDS", 3600 * 3))) # 3 hours
         market_shift_interval = timedelta(seconds=int(self.config.get("THINKTOOL_MARKET_SHIFT_INTERVAL_SECONDS", 3600 * 6))) # 6 hours
         purge_interval = timedelta(seconds=int(self.config.get("DATA_PURGE_INTERVAL_SECONDS", 86400))) # 24 hours
-        
+
         now = datetime.now(timezone.utc)
         self.last_synthesis_run = now - synthesis_interval
         self.last_radar_run = now - radar_interval
@@ -845,6 +865,47 @@ class ThinkTool(GeniusAgentBase):
                      if original_directive_id: await self.update_directive_status(original_directive_id, 'failed', 'Missing endpoint/data')
             # Note: process_clay_result is now primarily for direct calls, webhook has its own handler.
             # For other actions like 'reflect_on_action', 'validate_output', etc., ensure they use the L75 enhanced methods.
+            elif action == 'log_knowledge_fragment': # Allow direct logging via task
+                frag_data = task_details.get('fragment_data', {})
+                kf = await self.log_knowledge_fragment(**frag_data)
+                result = {"status": "success" if kf else "failure", "message": f"Logged KF ID: {kf.id}" if kf else "Failed to log KF."}
+            elif action == 'log_learned_pattern': # Allow direct logging via task
+                pattern_data = task_details.get('pattern_data', {})
+                lp = await self.log_learned_pattern(**pattern_data)
+                result = {"status": "success" if lp else "failure", "message": f"Logged Learned Pattern ID: {lp.id}" if lp else "Failed to log pattern."}
+            elif action == 'process_feedback': # Allow direct feedback processing via task
+                feedback_data = task_details.get('feedback_data', {})
+                await self.handle_feedback(feedback_data)
+                result = {"status": "success", "message": "Feedback processing initiated."}
+            elif action == 'self_critique_prompt': # Allow direct prompt critique via task
+                content = task_details.get('content', {})
+                await self.self_critique_prompt(content.get('agent_name'), content.get('prompt_key'), content.get('feedback_context', 'Triggered via task.'))
+                result = {"status": "success", "message": "Prompt critique initiated."}
+            elif action == 'create_directive': # Allow direct directive creation via task
+                content = task_details.get('content', {})
+                directive = await self._create_directive(content)
+                result = {"status": "success" if directive else "failure", "message": f"Created directive ID: {directive.id}" if directive else "Failed to create directive."}
+            elif action == 'update_directive_status': # Allow direct status update via task
+                content = task_details.get('content', {})
+                await self.update_directive_status(content.get('directive_id'), content.get('status'), content.get('result_summary'))
+                result = {"status": "success", "message": "Directive status update attempted."}
+            elif action == 'initiate_video_generation_workflow': # Handle video workflow planning
+                params = task_details.get('params', {})
+                plan = await self._plan_video_workflow(params)
+                if plan:
+                    # Create directive to execute the plan (Orchestrator or SMM might handle this)
+                    await self.orchestrator.delegate_task("ThinkTool", {
+                        "action": "create_directive",
+                        "content": {
+                            "target_agent": "Orchestrator", # Or SMM if it executes plans
+                            "directive_type": "execute_workflow_plan",
+                            "content": {"plan": plan, "workflow_type": "video_generation"},
+                            "priority": 5
+                        }
+                    })
+                    result = {"status": "success", "message": "Video generation workflow planned and execution directive created."}
+                else:
+                    result = {"status": "failure", "message": "Failed to plan video generation workflow."}
             else:
                 self.logger.warning(f"Unhandled action in ThinkTool.execute_task: {action}")
                 result = {"status": "failure", "message": f"ThinkTool does not handle action: {action}"}
@@ -882,7 +943,7 @@ class ThinkTool(GeniusAgentBase):
             "task": "Generate Detailed Video Workflow Plan", "workflow_goal": params.get("goal", "Generate sample UGC videos"),
             "num_videos_to_generate": num_videos, "base_video_path": base_video_path, "image_generation_prompt": image_prompt,
             "knowledge_base_context": kb_context_str or "No specific KB context found on Descript/AIStudio.",
-            "desired_output_format": """JSON list of steps... Ensure the final step emails the video link(s) to the operator using USER_EMAIL from settings.""" # Same as v5.8
+            "desired_output_format": """JSON list of steps: [{"step": int, "target_agent": str, "task_details": {"action": str, "params": dict}, "description": str}] - Steps should cover: 1. Image gen (AIStudio via BrowsingAgent), 2. Video editing (Descript via BrowsingAgent - upload base, add image, export), 3. Store final artifact (Orchestrator). Ensure the final step emails the video link(s) to the operator using USER_EMAIL from settings.""" # Same as v5.8
         }
         plan_prompt = await self.generate_dynamic_prompt(task_context) # Calls L75 prompt gen
         llm_model_pref = settings.OPENROUTER_MODELS.get('think_strategize')
@@ -914,7 +975,7 @@ class ThinkTool(GeniusAgentBase):
                 continue
 
             await self._internal_think("Periodic Meta-Reflection on ThinkTool's Strategic Learning & Effectiveness.")
-            
+
             try:
                 # 1. Gather data about ThinkTool's own performance
                 async with self.session_maker() as session:
@@ -947,7 +1008,7 @@ class ThinkTool(GeniusAgentBase):
                 }
                 prompt = await self.generate_dynamic_prompt(meta_critique_context)
                 llm_model_pref = settings.OPENROUTER_MODELS.get('think_critique') # Use the most powerful model
-                
+
                 meta_critique_json = await self._call_llm_with_retry(prompt, model=llm_model_pref, temperature=0.4, max_tokens=2000, is_json_output=True)
 
                 if meta_critique_json:
@@ -988,7 +1049,7 @@ class ThinkTool(GeniusAgentBase):
             # Example: Success rate of "exploit" type directives
             # Example: Rate of new "LearnedPattern" generation and their impact
             # This data gathering would be more extensive for L75+
-            
+
             async with self.session_maker() as session:
                 kf_count = await session.scalar(select(func.count(KnowledgeFragment.id))) or 0
                 pattern_count = await session.scalar(select(func.count(LearnedPattern.id)).where(LearnedPattern.confidence_score > 0.7)) or 0 # High confidence patterns
@@ -1007,7 +1068,7 @@ class ThinkTool(GeniusAgentBase):
                 "recent_synthesis_assessment_preview": (await self.query_knowledge_base(data_types=["strategic_assessment_summary"], limit=1, order_by="timestamp_desc"))[0].content[:500] if await self.query_knowledge_base(data_types=["strategic_assessment_summary"], limit=1) else "N/A",
                 "recent_radar_assessment_preview": (await self.query_knowledge_base(data_types=["overall_radar_assessment"], limit=1, order_by="timestamp_desc"))[0].content[:500] if await self.query_knowledge_base(data_types=["overall_radar_assessment"], limit=1) else "N/A",
                 "core_mandate_reminder": "Exponential Profit & Market Domination, AI-Native Exploitation, Calculated Audacity.",
-                "desired_output_format": "JSON ONLY: {{\"overall_effectiveness_rating_L75\": str ('Exceptional'|'Strong'|'Adequate'|'Subpar'|'Critical_Failure'), \"alignment_with_L75_mandate\": \"<Detailed assessment of how well ThinkTool is fulfilling its advanced mandate>\", \"key_strategic_successes_L75\": [\"<Examples of successful high-level strategies or adaptations>\"], \"critical_strategic_blindspots_or_inefficiencies_L75\": [\"<Areas where ThinkTool is underperforming or missing opportunities>\"], \"effectiveness_of_exploit_identification_L75\": str, \"suggestions_for_radical_self_improvement_L75\": [\"<Bold, concrete ideas to elevate ThinkTool's own strategic capabilities, prompt alchemy, or learning processes. Consider new periodic tasks or analytical frameworks for itself.\>\"], \"proposed_meta_prompt_refinement_for_thinktool\": str? (Suggest a key change to its own meta-prompt if beneficial)}"
+                "desired_output_format": "JSON ONLY: {{\"overall_effectiveness_rating_L75\": str ('Exceptional'|'Strong'|'Adequate'|'Subpar'|'Critical_Failure'), \"alignment_with_L75_mandate\": \"<Detailed assessment of how well ThinkTool is fulfilling its advanced mandate>\", \"key_strategic_successes_L75\": [\"<Examples of successful high-level strategies or adaptations>\"], \"critical_strategic_blindspots_or_inefficiencies_L75\": [\"<Areas where ThinkTool is underperforming or missing opportunities>\"], \"effectiveness_of_exploit_identification_L75\": str, \"suggestions_for_radical_self_improvement_L75\": [\"<Bold, concrete ideas to elevate ThinkTool's own strategic capabilities, prompt alchemy, or learning processes. Consider new periodic tasks or analytical frameworks for itself.\>\"], \"proposed_meta_prompt_refinement_for_thinktool\": str? (Suggest a key change to its own meta-prompt if beneficial)}}"
             }
             critique_prompt = await self.generate_dynamic_prompt(task_context) # Calls L75 prompt gen
             llm_model_pref = settings.OPENROUTER_MODELS.get('think_critique') # Strongest model
@@ -1059,7 +1120,7 @@ class ThinkTool(GeniusAgentBase):
             if key in task_context and task_context[key] is not None:
                  value = task_context[key]; value_str = ""; max_len = 3000 # Default increased
                  if key in ['recent_knowledge_fragments_summary', 'active_learned_patterns_summary', 'feedback_data', 'current_prompt_text_to_be_critiqued', 'relevant_knowledge_base_context', 'report_summary_and_key_findings', 'content_snippet']: max_len = 7000 # Allow very large context for core tasks
-                 
+
                  if isinstance(value, str): value_str = value[:max_len] + ("..." if len(value) > max_len else "")
                  elif isinstance(value, (dict, list)):
                      try: value_str = json.dumps(value, default=str, indent=2); value_str = value_str[:max_len] + ("..." if len(value_str) > max_len else "")
@@ -1067,7 +1128,7 @@ class ThinkTool(GeniusAgentBase):
                  else: value_str = str(value)[:max_len] + "..."
                  prompt_key = key.replace('_', ' ').title()
                  prompt_parts.append(f"**{prompt_key}**: {value_str}")
-        
+
         other_params = {k: v for k, v in task_context.items() if k not in priority_keys and k not in ['desired_output_format']}
         if other_params:
             prompt_parts.append("\n**Other Task-Specific Parameters:**")
@@ -1090,6 +1151,20 @@ class ThinkTool(GeniusAgentBase):
         elif task_type == 'Critique and Rewrite Agent Prompt for Max Profit/Exploit Potential & AI-Native Operation':
             prompt_parts.append(f"Ruthlessly critique the current prompt for '{task_context.get('agent_name_whose_prompt_is_critiqued')}/{task_context.get('prompt_key_being_critiqued')}' based on '{task_context.get('triggering_feedback_or_context')}'. Focus on enhancing its ability to drive profit, enable AI-native operations, and uncover/execute grey-area exploits. Rewrite the *entire prompt* to be significantly more potent and strategically aligned.")
         # ... (other task instructions from v5.8, ensuring they reflect L75+ strategic depth)
+        elif task_type == 'Analyze Agent Feedback':
+             prompt_parts.append("Analyze the raw feedback from agents. Identify critical issues, successes, and actionable insights. Propose specific directives to address issues or capitalize on successes. Identify prompts needing critique. Extract key insights suitable for logging as new KFs.")
+        elif task_type == 'Generate Educational Content':
+             prompt_parts.append("Generate concise, high-impact educational text on the specified topic. Focus on the 'why' and relevance to agency goals (profit, AI-native thinking, exploitation). Avoid jargon.")
+        elif task_type == 'Validate Agent Output':
+             prompt_parts.append("Validate the provided output against the criteria. Reference learned patterns. Provide clear feedback and actionable suggestions if invalid.")
+        elif task_type == 'Generate Detailed Video Workflow Plan':
+             prompt_parts.append("Generate a step-by-step plan using available tools (BrowsingAgent for Descript/AIStudio, Orchestrator for storage). Ensure steps are logical and parameters are passed correctly. Include final notification step.")
+        elif task_type == 'Devise Strategy for Persistent Service Failure':
+             prompt_parts.append(f"Analyze the persistent failure for '{task_context.get('service_name')}'. Hypothesize root cause based on context. Suggest concrete, diverse actions (proxy, identity, timing, debug runs, cooldowns) to overcome the issue. Assess if escalation is needed.")
+        elif task_type == f"Refine Account Creation Strategy for {task_context.get('service_name')}":
+             prompt_parts.append(f"Based on the performance analysis for '{task_context.get('service_name')}' account creation, recommend specific strategic adjustments and parameter updates to improve success rate. Consider known platform behaviors and KB insights.")
+        elif task_type == "Convert Agent Suggestion into Strategic Directive":
+             prompt_parts.append("Parse the free-text suggestion. Identify the core intent. Determine the most appropriate target agent and directive type. Structure the necessary information into the 'content' field for the directive. Assign a reasonable priority.")
         else:
             prompt_parts.append("Provide a clear, concise, strategically astute, and actionable response. Prioritize solutions that offer asymmetric advantages and leverage AI capabilities to their fullest.")
 
@@ -1127,19 +1202,23 @@ class ThinkTool(GeniusAgentBase):
         try:
             match = None; start_char, end_char = '{', '}'
             if expect_type == list: start_char, end_char = '[', ']'
-            match = re.search(rf'(?:```(?:json)?\s*)?(\{start_char}.*\{end_char})\s*(?:```)?', json_string, re.DOTALL)
+            # Enhanced regex to handle optional markdown and leading/trailing whitespace around JSON
+            match = re.search(rf'^\s*(?:```(?:json)?\s*)?(\{start_char}.*\{end_char})\s*(?:```)?\s*$', json_string, re.DOTALL | re.MULTILINE)
             parsed_json = None
             if match:
                 potential_json = match.group(1)
                 try: parsed_json = json.loads(potential_json)
                 except json.JSONDecodeError as e:
                     self.logger.warning(f"Initial JSON parsing failed ({e}), attempting to clean and retry: {potential_json[:100]}...")
+                    # Attempt to fix common issues like trailing commas
                     cleaned_json = re.sub(r',\s*([\}\]])', r'\1', potential_json)
-                    cleaned_json = re.sub(r'^\s*|\s*$', '', cleaned_json)
+                    # Remove potential leading/trailing whitespace/newlines within the matched block if any
+                    cleaned_json = cleaned_json.strip()
                     try: parsed_json = json.loads(cleaned_json)
                     except json.JSONDecodeError as e2: self.logger.error(f"JSON cleaning failed ({e2}), unable to parse: {potential_json[:200]}..."); return None
+            # Fallback for cases where the string IS the JSON object without markdown
             elif json_string.strip().startswith(start_char) and json_string.strip().endswith(end_char):
-                 try: parsed_json = json.loads(json_string)
+                 try: parsed_json = json.loads(json_string.strip())
                  except json.JSONDecodeError as e: self.logger.error(f"Direct JSON parsing failed ({e}): {json_string[:200]}..."); return None
             else: self.logger.warning(f"Could not find expected JSON structure ({expect_type}) in LLM output: {json_string[:200]}..."); return None
 
@@ -1194,10 +1273,19 @@ class ThinkTool(GeniusAgentBase):
         clay_data_payload = clay_api_result.get("data", {})
         enriched_items = []
         if is_webhook:
-            if isinstance(clay_data_payload.get("results"), list):
+            # Handle potential variations in webhook structure
+            # Check if the payload itself is the item (common for single-item webhooks)
+            if isinstance(clay_data_payload, dict) and clay_data_payload.get("_correlation_id"): # Check for our correlation ID
+                 enriched_items = [clay_data_payload]
+            # Check if payload contains a list under a common key like 'results' or 'data'
+            elif isinstance(clay_data_payload.get("results"), list):
                 enriched_items = clay_data_payload.get("results", [])
-            elif isinstance(clay_data_payload, dict): # If results are not nested under 'results' for some reason
-                enriched_items = [clay_data_payload]
+            elif isinstance(clay_data_payload.get("data"), list):
+                 enriched_items = clay_data_payload.get("data", [])
+            # Fallback if structure is unexpected but it's a dict
+            elif isinstance(clay_data_payload, dict):
+                 self.logger.warning("Unexpected Clay webhook structure, attempting to process top-level dict as single item.")
+                 enriched_items = [clay_data_payload]
         elif isinstance(clay_data_payload, dict): # Direct call result
              enriched_items = [clay_data_payload]
         elif isinstance(clay_data_payload, list): # Direct call might return a list
@@ -1229,6 +1317,9 @@ class ThinkTool(GeniusAgentBase):
             processed_info['company_description'] = item_data.get('company',{}).get('description') or item_data.get('current_company',{}).get('short_description')
             processed_info['skills'] = item_data.get('person',{}).get('skills', [])
             processed_info['interests_from_clay'] = item_data.get('person',{}).get('interests', []) # Avoid conflict with Client.interests
+            # Capture the correlation ID if present (especially from webhooks)
+            correlation_id = item_data.get("_correlation_id")
+            if correlation_id: processed_info["_correlation_id"] = correlation_id
 
             processed_info = {k: v for k, v in processed_info.items() if v is not None and v != '' and v != []}
 
@@ -1238,13 +1329,20 @@ class ThinkTool(GeniusAgentBase):
                     async with self.session_maker() as session:
                         async with session.begin():
                             target_client_id = client_id_from_context; target_client = None
-                            if target_client_id: target_client = await session.get(Client, target_client_id)
-                            
-                            if not target_client: # Try to match existing client
+                            # Try matching via correlation ID first if available
+                            if correlation_id:
+                                 stmt_corr = select(Client.id).where(Client.source_reference == f"clay_corr_{correlation_id}").limit(1)
+                                 target_client_id = (await session.execute(stmt_corr)).scalar_one_or_none()
+                                 if target_client_id: target_client = await session.get(Client, target_client_id)
+                                 else: self.logger.info(f"No client found matching correlation ID: {correlation_id}")
+
+                            if not target_client and target_client_id: # If context ID was passed but didn't match correlation
+                                target_client = await session.get(Client, target_client_id)
+
+                            if not target_client: # Try matching via email/linkedin if no correlation match or context ID
                                 conditions = []
                                 if processed_info.get('verified_email'): conditions.append(Client.email == processed_info['verified_email'])
                                 if processed_info.get('linkedin_url'): conditions.append(Client.source_reference == processed_info['linkedin_url'])
-                                # Add more matching conditions if possible (e.g., name + company)
                                 if conditions:
                                     target_client = (await session.execute(select(Client).where(or_(*conditions)).limit(1))).scalar_one_or_none()
                                     if target_client: target_client_id = target_client.id
@@ -1267,7 +1365,7 @@ class ThinkTool(GeniusAgentBase):
                             elif processed_info.get('verified_email') and processed_info.get('full_name'): # Create new
                                 new_client = Client(
                                     name=processed_info['full_name'], email=processed_info['verified_email'],
-                                    source_reference=processed_info.get('linkedin_url', source_reference),
+                                    source_reference=processed_info.get('linkedin_url', source_reference or (f"clay_corr_{correlation_id}" if correlation_id else None)), # Store correlation ID if no other ref
                                     company=processed_info.get('company_name'), job_title=processed_info.get('job_title'),
                                     industry=processed_info.get('industry'), location=processed_info.get('location'),
                                     interests=json.dumps(list(set(processed_info.get('skills', []) + processed_info.get('interests_from_clay', [])))),
@@ -1281,8 +1379,9 @@ class ThinkTool(GeniusAgentBase):
 
                             fragment_tags = ["clay", "enrichment", "lead_data", "webhook_processed" if is_webhook else "direct_call_processed"]
                             if target_client_id: fragment_tags.append(f"client_{target_client_id}")
+                            if correlation_id: fragment_tags.append(f"corr_{correlation_id}") # Add correlation ID tag
                             await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="clay_enrichment_result_processed", content=processed_info, tags=fragment_tags, relevance_score=0.9, related_client_id=target_client_id, source_reference=processed_info.get('linkedin_url', source_reference))
-                            
+
                             if processed_info.get('verified_email') and target_client_id:
                                 outreach_directive_content = {
                                     "target_identifier": processed_info['verified_email'], "client_id": target_client_id,
@@ -1313,9 +1412,12 @@ class ThinkTool(GeniusAgentBase):
         # For example, if you passed `{"metadata": {"internal_client_id": 123}}` to Clay:
         # client_id_from_meta = original_input_parameters.get("metadata", {}).get("internal_client_id")
         # Or if Clay adds it to a run object that's part of the webhook (less likely for input params)
+        # Check for correlation ID passed back in the enriched data itself
+        correlation_id = enriched_data.get("_correlation_id")
+        if correlation_id:
+             self.logger.debug(f"Found correlation ID in webhook data: {correlation_id}")
+             # We can use this in _process_clay_result for matching
 
-        # For now, we rely on source_reference (e.g. LinkedIn URL) for matching,
-        # _process_clay_result will handle the lookup.
         await self._process_clay_result(
             clay_api_result={"status": "success", "data": enriched_data}, # Simulate the direct call result structure
             source_directive_id=None, # No direct directive ID for webhook, but could log clay_run_id
@@ -1353,7 +1455,9 @@ class ThinkTool(GeniusAgentBase):
                     target_agent = "ThinkTool" # Default to self for strategy changes
                     if "Proxy" in suggested_action.get("action_type",""): target_agent = "Orchestrator"
                     elif "BrowsingAgent" in suggested_action.get("action_type",""): target_agent = "BrowsingAgent" # e.g. for a debug run
-                    
+                    elif "Identity" in suggested_action.get("action_type","") and service_name == "GmailCreation": target_agent = "GmailCreatorAgent"
+                    elif "Cooldown" in suggested_action.get("action_type","") and service_name == "GmailCreation": target_agent = "GmailCreatorAgent"
+
                     await self.orchestrator.delegate_task("ThinkTool", { # ThinkTool creates directives
                         "action": "create_directive",
                         "content": {
@@ -1409,7 +1513,7 @@ class ThinkTool(GeniusAgentBase):
         """
         self.logger.info(f"L75+ Assessing initial/stale account health (services: {service_filter_list or 'all relevant'}, batch: {batch_size})...")
         await self._internal_think("Initial/Stale Account Health Assessment", details={"services": service_filter_list, "batch_size": batch_size})
-        
+
         if not self.session_maker or not self.orchestrator or not hasattr(self.orchestrator, 'delegate_task'):
             self.logger.error("DB session_maker or Orchestrator unavailable for account health assessment.")
             return
@@ -1421,17 +1525,17 @@ class ThinkTool(GeniusAgentBase):
                 # This requires AccountCredentials to have a 'last_successful_use_ts' or similar field,
                 # or we infer from last successful task involving this account.
                 # For now, let's simplify: prioritize 'unknown', then 'active' ordered by last_status_update_ts (older first)
-                
+
                 # Subquery for accounts that have recent failure KFs
                 # This is a conceptual sketch, actual implementation depends on how failures are logged
                 # For now, we'll focus on status in AccountCredentials
-                
+
                 stmt = select(AccountCredentials.id, AccountCredentials.service, AccountCredentials.account_identifier, AccountCredentials.status, AccountCredentials.last_status_update_ts)\
                     .where(AccountCredentials.status.in_(['unknown', 'active', 'needs_review', 'limited'])) # Include more statuses to re-verify
-                
+
                 if service_filter_list:
                     stmt = stmt.where(AccountCredentials.service.in_(service_filter_list))
-                
+
                 # Order by status priority ('unknown' first), then by oldest update
                 stmt = stmt.order_by(
                     case(
@@ -1476,7 +1580,7 @@ class ThinkTool(GeniusAgentBase):
                     "expected_outcome_on_success": "Successful login, navigation to main dashboard/feed if applicable.",
                     "report_failure_reason_specifically": True
                 }
-                
+
                 # This directive will be picked up by Orchestrator and routed to BrowsingAgent
                 # BrowsingAgent's execute_step for "test_account_login" will then attempt login
                 # and upon success/failure, it (or ThinkTool processing its outcome KF) will call _flag_account_issue.
@@ -1626,7 +1730,7 @@ class ThinkTool(GeniusAgentBase):
                 scan_result = await self.orchestrator.delegate_task("BrowsingAgent", scan_task)
                 if scan_result and scan_result.get("status") == "success":
                     market_data_summary = scan_result.get("summary", market_data_summary)
-            
+
             # 2. Analyze with LLM
             task_context = {
                 "task": "Analyze Market Scan Data for New Opportunities/Threats (L75+)",
@@ -1653,5 +1757,62 @@ class ThinkTool(GeniusAgentBase):
             else: self.logger.error("LLM failed to analyze market shift data.")
         except Exception as e: self.logger.error(f"Error in proactive market shift analysis: {e}", exc_info=True)
         self.last_market_shift_analysis_run = datetime.now(timezone.utc)
+
+    # --- Abstract Method Implementations ---
+    async def plan_task(self, task_details: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        # ThinkTool's core loop handles planning via directives. This method is less used.
+        self.logger.debug("ThinkTool plan_task called, typically handled by core loop/execute_task.")
+        return None
+
+    async def execute_step(self, step: Dict[str, Any], task_context: Dict[str, Any]) -> Dict[str, Any]:
+        # ThinkTool doesn't execute simple steps; it executes complex tasks or generates directives.
+        self.logger.error(f"ThinkTool execute_step called unexpectedly: {step}")
+        return {"status": "failure", "message": "ThinkTool does not execute planned steps directly."}
+
+    async def _create_directive(self, directive_data: Dict[str, Any]) -> Optional[StrategicDirective]:
+        """Helper to create and store a directive in the database."""
+        if not self.session_maker: return None
+        try:
+            async with self.session_maker() as session:
+                async with session.begin():
+                    new_directive = StrategicDirective(
+                        source=directive_data.get("source", self.AGENT_NAME),
+                        timestamp=datetime.now(timezone.utc),
+                        status=directive_data.get("status", 'pending'),
+                        content=json.dumps(directive_data.get('content')) if isinstance(directive_data.get('content'), dict) else str(directive_data.get('content')),
+                        target_agent=directive_data.get('target_agent'),
+                        directive_type=directive_data.get('directive_type'),
+                        priority=directive_data.get('priority', 5),
+                        notes=directive_data.get('notes')
+                    )
+                    session.add(new_directive)
+                await session.refresh(new_directive)
+                self.logger.info(f"Created directive ID {new_directive.id} for {new_directive.target_agent}.")
+                return new_directive
+        except Exception as e:
+            self.logger.error(f"Failed to create directive: {e}", exc_info=True)
+            return None
+
+    async def update_directive_status(self, directive_id: int, status: str, result_summary: Optional[str] = None):
+        """Updates the status and result of a StrategicDirective."""
+        if not self.session_maker: return
+        try:
+            async with self.session_maker() as session:
+                async with session.begin():
+                    stmt = update(StrategicDirective).where(StrategicDirective.id == directive_id).values(status=status, result_summary=result_summary)
+                    await session.execute(stmt)
+                self.logger.info(f"Updated directive {directive_id} status to '{status}'.")
+        except Exception as e: self.logger.error(f"Failed to update directive {directive_id} status: {e}")
+
+    async def get_active_directives(self, target_agent: Optional[str] = None, limit: int = 20) -> List[StrategicDirective]:
+        """Retrieves active/pending directives."""
+        if not self.session_maker: return []
+        try:
+            async with self.session_maker() as session:
+                stmt = select(StrategicDirective).where(StrategicDirective.status.in_(['pending', 'active'])).order_by(asc(StrategicDirective.priority), asc(StrategicDirective.timestamp)).limit(limit)
+                if target_agent: stmt = stmt.where(StrategicDirective.target_agent == target_agent)
+                results = await session.execute(stmt)
+                return list(results.scalars().all())
+        except Exception as e: self.logger.error(f"Failed to get active directives: {e}"); return []
 
 # --- End of agents/think_tool.py ---
