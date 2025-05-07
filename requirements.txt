@@ -1,6 +1,6 @@
 # Filename: requirements.txt
 # Description: Python dependencies for the Nolli AI Sales System.
-# Version: 4.2 (Added email-validator, Removed prometheus)
+# Version: 4.3 (Added mailersend, verified deepgram range)
 
 # --- Core Framework & Web ---
 Quart>=0.20.0
@@ -19,10 +19,11 @@ faker>=24.0.0,<27.0.0
 
 # --- External Services ---
 twilio>=9.0.0,<9.4.0
-deepgram-sdk>=3.4.0,<3.8.0
+deepgram-sdk>=3.4.0,<3.8.0 # Ensure this version range is compatible with imports
 websockets>=12.0,<13.2
 pydantic-settings>=2.0.0,<2.4.0
-email-validator>=2.0.0,<2.2.0 # <-- ADDED FOR EmailStr VALIDATION
+email-validator>=2.0.0,<2.2.0
+mailersend>=0.6.0,<0.7.0 # <-- ADDED
 
 # --- Utilities ---
 tenacity>=8.2.0,<9.1.0
@@ -30,7 +31,9 @@ pybreaker>=1.1.0,<1.3.0
 python-dotenv>=1.0.1,<1.1.0
 pytz>=2024.1,<2025.0
 cryptography>=44.0.1
-requests>=2.31.0,<2.33.0    
+requests>=2.31.0,<2.33.0
 
 # --- Other Dependencies ---
 numpy>=1.26.4,<1.27.0
+# Add PDF library here when chosen, e.g.:
+# reportlab>=4.0.0,<4.1.0
