@@ -221,42 +221,99 @@ class GmailCreatorAgent(GeniusAgentBase):
             creation_details.update({"status": "failure", "error": str(e)})
             return False, creation_details
 
-    async def _generate_strategic_identity(self, hint: Optional[str]) -> Optional[Dict[str, Any]]:
-        """Generates identity, potentially guided by ThinkTool or a hint."""
-        if not self.faker: return None
-        # Basic generation, ThinkTool could provide more nuanced profiles via KB
+    async def _generate_strategic_identity(self, hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Generates identity. Attempts to get a strategic profile from ThinkTool first,
+        then falls back to Faker-based generation.
+        Hint could be e.g., "US_young_male_gamer" or "EU_female_professional_finance"
+        """
+        if not self.faker:
+            self.logger.error("Faker tool not available for identity generation.")
+            return None
+
+        identity_profile_from_thinktool: Optional[Dict[str, Any]] = None
+        if self.think_tool and hint:
+            try:
+                await self._internal_think(f"Requesting identity profile from ThinkTool with hint: {hint}")
+                directive_content = {
+                    "action": "get_identity_profile_for_creation", # New ThinkTool action
+                    "content": {
+                        "service_target": "google.com", # Or more general "account_creation"
+                        "identity_hint": hint,
+                        "required_fields": ["first_name", "last_name", "birth_year_range_min", "birth_year_range_max", "gender_preference", "username_style_hint", "region_bias"]
+                    }
+                }
+                # This is a direct call, assuming ThinkTool can respond synchronously or it's a quick lookup
+                # For a longer process, it would be a directive.
+                # For now, let's assume ThinkTool has a quick way to provide this.
+                # This part is conceptual for direct call; a directive pattern is more robust.
+                # For a more robust implementation, this would be:
+                # response = await self.orchestrator.delegate_task("ThinkTool", directive_content)
+                # if response and response.get("status") == "success":
+                # identity_profile_from_thinktool = response.get("identity_profile")
+                
+                # Simplified conceptual call for now:
+                self.logger.info(f"Conceptual: Would ask ThinkTool for identity profile based on hint: {hint}")
+                # In a real L75+ ThinkTool, it might have pre-generated profiles or generate one on the fly.
+                # For this example, we'll simulate ThinkTool not having a specific match, forcing fallback.
+                identity_profile_from_thinktool = None # Simulate no profile found for now
+
+            except Exception as e:
+                self.logger.warning(f"Error requesting identity profile from ThinkTool: {e}. Falling back to Faker.")
+
+        if identity_profile_from_thinktool:
+            self.logger.info(f"Using identity profile from ThinkTool for hint: {hint}")
+            # Assume profile contains keys like 'first_name', 'last_name', 'birth_year', etc.
+            # and potentially more nuanced fields like 'username_base_suggestion'
+            # This requires ThinkTool to have a robust identity profile generation/storage mechanism.
+            # For now, this part is more about the intent.
+            # Example of using a (hypothetical) ThinkTool profile:
+            # first_name = identity_profile_from_thinktool.get("first_name", self.faker.first_name())
+            # ... and so on for other fields.
+            # For this implementation, we will proceed to Faker if ThinkTool doesn't provide a full profile.
+            pass # Fall through to Faker if not fully implemented by ThinkTool response
+
+        # Fallback to Faker-based generation if ThinkTool doesn't provide a profile
         first_name = self.faker.first_name()
         last_name = self.faker.last_name()
-        dob = self.faker.date_of_birth(minimum_age=20, maximum_age=55) # More plausible age range
+        min_age = identity_profile_from_thinktool.get("birth_year_range_max", 20) if identity_profile_from_thinktool else 20 # e.g. 2004 -> 20 years old in 2024
+        max_age = identity_profile_from_thinktool.get("birth_year_range_min", 55) if identity_profile_from_thinktool else 55
+        dob = self.faker.date_of_birth(minimum_age=min_age, maximum_age=max_age)
 
-        # Create more varied and less predictable username suggestions
         fn_clean = re.sub(r'[^a-z]', '', first_name.lower())
         ln_clean = re.sub(r'[^a-z]', '', last_name.lower())
         year_short = str(dob.year)[-2:]
         random_nums = str(random.randint(100,9999))
+        
+        username_style_hint = identity_profile_from_thinktool.get("username_style_hint", "mixed") if identity_profile_from_thinktool else "mixed"
 
-        username_options = [
-            f"{fn_clean}{ln_clean}",
-            f"{fn_clean}.{ln_clean}",
-            f"{fn_clean}{ln_clean}{year_short}",
-            f"{fn_clean}_{ln_clean}{random_nums[:2]}",
-            f"{ln_clean}{fn_clean}{random.choice(['', num_part for num_part in [year_short, random_nums[:2], random_nums[-2:]] if num_part])}"
-        ]
+        username_options = []
+        if username_style_hint == "professional" or "mixed":
+            username_options.extend([ f"{fn_clean}.{ln_clean}", f"{first_name.lower()}{ln_clean[0] if ln_clean else ''}{year_short}", f"{fn_clean[0] if fn_clean else ''}{ln_clean}{random_nums[:2]}"])
+        if username_style_hint == "casual" or "mixed":
+            username_options.extend([f"{fn_clean}{ln_clean}{random_nums[:3]}", f"{self.faker.word().lower()}{fn_clean}{year_short}", f"{fn_clean}_{random.word().lower()}"])
+        if not username_options: # Fallback if style hint was too restrictive
+             username_options = [f"{fn_clean}{ln_clean}", f"{fn_clean}.{ln_clean}", f"{fn_clean}{ln_clean}{year_short}"]
+
+
         email_suggestion = random.choice(username_options)
-        # Ensure username is within typical length limits (e.g., 6-30 chars for Gmail)
         email_suggestion = (email_suggestion[:25] + random_nums[:5]) if len(email_suggestion) > 25 else email_suggestion
-        email_suggestion = (email_suggestion + random_nums[:(6-len(email_suggestion))]) if len(email_suggestion) < 6 else email_suggestion
+        email_suggestion = (email_suggestion + random_nums[:max(0, 6-len(email_suggestion))]) if len(email_suggestion) < 6 else email_suggestion
+        email_suggestion = re.sub(r'_+', '.', email_suggestion) # Replace multiple underscores with one dot
+        email_suggestion = re.sub(r'\.+', '.', email_suggestion) # Replace multiple dots with one
+        email_suggestion = email_suggestion.strip('.') # Remove leading/trailing dots
 
+        generated_gender = identity_profile_from_thinktool.get("gender_preference", random.choice(["Male", "Female"])) if identity_profile_from_thinktool else random.choice(["Male", "Female"])
 
         return {
             "first_name": first_name, "last_name": last_name,
-            "email_suggestion": email_suggestion, # This is the username part for @gmail.com
-            "password": "TEMP_PASSWORD_WILL_BE_REPLACED", # Placeholder, real one generated in _attempt_single_creation
+            "email_suggestion": email_suggestion,
+            "password": "TEMP_PASSWORD_WILL_BE_REPLACED",
             "birth_month": dob.strftime("%B"),
             "birth_day": str(dob.day),
             "birth_year": str(dob.year),
-            "gender": random.choice(["Male", "Female", "Rather not say"]),
-            "region_hint": self.faker.country_code() if random.random() < 0.3 else "US" # Hint for proxy selection
+            "gender": generated_gender,
+            "region_hint": identity_profile_from_thinktool.get("region_bias", self.faker.country_code() if random.random() < 0.4 else "US") if identity_profile_from_thinktool else (self.faker.country_code() if random.random() < 0.4 else "US")
         }
 
     async def learning_loop(self):
