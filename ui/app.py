@@ -1,6 +1,6 @@
 # Filename: ui/app.py
 # Description: Quart backend for the AI Agency Dashboard, handling API requests.
-# Version: 2.1 (Refactored Orchestrator Access, New Endpoints)
+# Version: 2.2 (Verified Logic & Error Handling)
 
 import os
 import asyncio
@@ -8,18 +8,39 @@ import logging
 import json # For potential data export
 import csv # For potential data export
 import io # For streaming CSV data
+import re # For phone number validation
 
 from quart import Quart, render_template, request, jsonify, send_file, Response
 from datetime import datetime, timedelta, timezone
 
 # --- Model Imports (needed for queries/export) ---
-from models import EmailLog, CallLog, Invoice, Client, Base # Import Base for table mapping
-from sqlalchemy import select, func, case
-from sqlalchemy.ext.asyncio import AsyncSession
+# Ensure models are accessible from the root directory or adjust path as needed
+try:
+    from models import EmailLog, CallLog, Invoice, Client, Base # Import Base for table mapping
+    from sqlalchemy import select, func, case
+    from sqlalchemy.ext.asyncio import AsyncSession
+except ImportError as e:
+    logging.critical(f"Failed to import models in ui/app.py: {e}. Check PYTHONPATH.")
+    # Define dummy classes if import fails to allow basic app structure loading
+    class EmailLog: pass
+    class CallLog: pass
+    class Invoice: pass
+    class Client: pass
+    class Base: pass
+    AsyncSession = None # type: ignore
 
 # --- Settings Import ---
 # Assuming settings are validated and loaded correctly by main.py
-from config.settings import settings
+try:
+    from config.settings import settings
+except ImportError as e:
+    logging.critical(f"Failed to import settings in ui/app.py: {e}. Check PYTHONPATH.")
+    # Define a dummy settings object if import fails
+    class DummySettings:
+        DOWNLOAD_PASSWORD = "dummy_password"
+        def get(self, key, default=None): return default
+        def get_secret(self, key): return None
+    settings = DummySettings() # type: ignore
 
 # --- Orchestrator Access ---
 # We rely on the single instance created in main.py
@@ -50,18 +71,8 @@ def get_orchestrator_instance_from_main():
 # but we need a way to register routes *before* the server starts.
 # Solution: Define routes using a Blueprint or attach them directly in Orchestrator.__init__.
 # For simplicity here, we'll assume routes are attached to the app instance obtained from the orchestrator later.
-# This means this file might primarily contain route *handler* functions
+# This means this file primarily contains route *handler* functions
 # that are registered elsewhere (e.g., in Orchestrator or main.py).
-
-# Let's define the route handlers. Registration would happen in Orchestrator or main.py.
-# Example (how registration might look in Orchestrator.__init__):
-# self.app = Quart(...)
-# self.app.register_blueprint(ui_blueprint) # Assuming handlers below are in a Blueprint
-
-# Or direct registration:
-# self.app.route('/')(index_route_handler)
-# self.app.route('/api/status_kpi')(get_status_and_kpi_handler)
-# ... etc.
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +85,9 @@ async def index_route_handler():
         # Assuming 'ui/templates' exists relative to project root
         template_path = os.path.join(os.path.dirname(__file__), 'templates', 'index.html')
         if os.path.exists(template_path):
-             # Use Quart's render_template for better practice if templates are configured
-             # return await render_template('index.html')
              # Manual reading for now if render_template setup is complex:
-             with open(template_path, 'r') as f:
-                 return f.read(), 200, {'Content-Type': 'text/html'}
+             with open(template_path, 'r', encoding='utf-8') as f:
+                 return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
         else:
              logger.error(f"UI Template not found at {template_path}")
              return jsonify({"error": "UI Template not found."}), 404
@@ -110,11 +119,12 @@ async def get_status_and_kpi_handler():
 
     try:
         # Get agent statuses from the running orchestrator
-        if hasattr(orchestrator, 'agents'):
-            agent_statuses = {name: agent.get_status_summary() for name, agent in orchestrator.agents.items() if hasattr(agent, 'get_status_summary')}
+        if hasattr(orchestrator, 'agents') and isinstance(orchestrator.agents, dict):
+            agent_statuses = {name: agent.get_status_summary() for name, agent in orchestrator.agents.items() if hasattr(agent, 'get_status_summary') and callable(agent.get_status_summary)}
         # Get LLM status from the running orchestrator
-        if hasattr(orchestrator, '_llm_client_status'):
-            llm_status = {key: info['status'] for key, info in orchestrator._llm_client_status.items()}
+        if hasattr(orchestrator, '_llm_client_status') and isinstance(orchestrator._llm_client_status, dict):
+            # Adapt based on actual structure in Orchestrator v3.2
+            llm_status = {"primary": orchestrator._llm_client_status.get("status", "unknown")}
 
         # Query Database for KPIs using the orchestrator's session maker
         async with orchestrator.session_maker() as session:
@@ -188,7 +198,7 @@ async def approve_agency_handler():
         orchestrator.approved = True
         logger.info("!!! AGENCY APPROVED FOR FULL OPERATION via API !!!")
         # Use orchestrator's notification method
-        if hasattr(orchestrator, 'send_notification'):
+        if hasattr(orchestrator, 'send_notification') and callable(orchestrator.send_notification):
             # Run notification in background to avoid blocking response
             asyncio.create_task(orchestrator.send_notification("Agency Approved", "Agency is now fully operational via UI."))
         else:
@@ -206,6 +216,7 @@ async def export_data_handler():
 
     try:
         data = await request.get_json()
+        if not data: return jsonify({"error": "Missing request body"}), 400
         password = data.get('password')
         export_type = data.get('type', 'clients') # Default to exporting clients
 
@@ -257,6 +268,7 @@ async def submit_feedback_handler():
 
     try:
         data = await request.get_json()
+        if not data: return jsonify({"error": "Missing request body"}), 400
         feedback_text = data.get('feedback')
 
         if not feedback_text or not isinstance(feedback_text, str):
@@ -275,9 +287,12 @@ async def submit_feedback_handler():
             "description": "Process feedback submitted via UI Dashboard"
         }
         # Run task delegation in background
-        asyncio.create_task(orchestrator.delegate_task("ThinkTool", feedback_task))
-
-        return jsonify({"status": "success", "message": "Feedback submitted for processing."}), 202 # Accepted
+        if hasattr(orchestrator, 'delegate_task') and callable(orchestrator.delegate_task):
+            asyncio.create_task(orchestrator.delegate_task("ThinkTool", feedback_task))
+            return jsonify({"status": "success", "message": "Feedback submitted for processing."}), 202 # Accepted
+        else:
+            logger.error("Orchestrator cannot delegate task for feedback.")
+            return jsonify({"error": "Internal error: Cannot delegate feedback task."}), 500
 
     except Exception as e:
         logger.error(f"Error submitting feedback: {e}", exc_info=True)
@@ -290,6 +305,7 @@ async def test_voice_call_handler():
 
     try:
         data = await request.get_json()
+        if not data: return jsonify({"error": "Missing request body"}), 400
         phone_number = data.get('phone_number')
 
         if not phone_number or not isinstance(phone_number, str):
@@ -301,18 +317,19 @@ async def test_voice_call_handler():
 
         logger.info(f"Received request to initiate test call to: {phone_number}")
 
-        # Create a temporary dummy client record or find an existing test client
-        # For simplicity, we'll just pass the number directly, assuming VoiceAgent can handle it
-        # OR better: Create a specific task for VoiceAgent like 'initiate_test_call'
+        # Create a specific task for VoiceAgent like 'initiate_test_call'
         test_call_task = {
             "action": "initiate_test_call", # Define this action for VoiceSalesAgent
             "phone_number": phone_number,
             "description": f"Initiate test call to {phone_number} from UI"
         }
         # Run task delegation in background
-        asyncio.create_task(orchestrator.delegate_task("VoiceSalesAgent", test_call_task))
-
-        return jsonify({"status": "success", "message": f"Test call initiation requested for {phone_number}."}), 202 # Accepted
+        if hasattr(orchestrator, 'delegate_task') and callable(orchestrator.delegate_task):
+            asyncio.create_task(orchestrator.delegate_task("VoiceSalesAgent", test_call_task))
+            return jsonify({"status": "success", "message": f"Test call initiation requested for {phone_number}."}), 202 # Accepted
+        else:
+            logger.error("Orchestrator cannot delegate task for test call.")
+            return jsonify({"error": "Internal error: Cannot delegate test call task."}), 500
 
     except Exception as e:
         logger.error(f"Error initiating test call: {e}", exc_info=True)
@@ -341,9 +358,12 @@ async def generate_videos_handler():
             "description": "Initiate video generation workflow requested via UI"
         }
         # Run task delegation in background
-        asyncio.create_task(orchestrator.delegate_task("ThinkTool", video_workflow_task))
-
-        return jsonify({"status": "success", "message": "Video generation workflow initiated."}), 202 # Accepted
+        if hasattr(orchestrator, 'delegate_task') and callable(orchestrator.delegate_task):
+            asyncio.create_task(orchestrator.delegate_task("ThinkTool", video_workflow_task))
+            return jsonify({"status": "success", "message": "Video generation workflow initiated."}), 202 # Accepted
+        else:
+            logger.error("Orchestrator cannot delegate task for video generation.")
+            return jsonify({"error": "Internal error: Cannot delegate video generation task."}), 500
 
     except Exception as e:
         logger.error(f"Error initiating video generation: {e}", exc_info=True)
@@ -361,6 +381,8 @@ def register_ui_routes(app: Quart):
     app.route('/api/submit_feedback', methods=['POST'])(submit_feedback_handler)
     app.route('/api/test_voice_call', methods=['POST'])(test_voice_call_handler)
     app.route('/api/generate_videos', methods=['POST'])(generate_videos_handler)
+    # Add registration for /hosted_audio/<path:filename> if not handled by Orchestrator directly
+    # Example: app.route('/hosted_audio/<path:filename>')(serve_hosted_audio_handler) # Assuming handler is defined
     logger.info("UI API routes registered.")
 
 # Note: This file itself doesn't run the app. It defines handlers

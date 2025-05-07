@@ -1,5 +1,5 @@
 # Filename: requirements.txt
-# Description: Python dependencies for the Synapse AI Sales System.
+# Description: Python dependencies for the Nolli AI Sales System.
 # Version: 4.2 (Added email-validator, Removed prometheus)
 
 # --- Core Framework & Web ---

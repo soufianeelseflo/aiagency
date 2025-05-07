@@ -31,7 +31,7 @@ async def send_notification(title: str, message: str, level: str = "info", confi
 
     mailersend_api_key = cfg.get_secret("MAILERSEND_API_KEY")
     sender_email = cfg.get("HOSTINGER_EMAIL")
-    sender_name = cfg.get("SENDER_NAME", "Synapse AI Agency")
+    sender_name = cfg.get("SENDER_NAME", "Nolli AI Agency")
 
     if MAILERSEND_AVAILABLE and mailersend_api_key and sender_email:
         logger.info(f"Attempting to send notification email via MailerSend to {user_email}")
@@ -40,7 +40,7 @@ async def send_notification(title: str, message: str, level: str = "info", confi
             mail_body = {}
             mail_from = {"name": sender_name, "email": sender_email}
             recipients = [{"email": user_email}]
-            subject = f"[{level.upper()}] Synapse Notification: {title}"
+            subject = f"[{level.upper()}] Nolli Notification: {title}"
             
             # --- SYNTAX FIX IS HERE ---
             # Pre-process the message for HTML replacement outside the f-string expression part

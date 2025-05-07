@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,51 +10,90 @@
         body {
             font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
             margin: 0;
-            background-color: #121212; /* Dark background */
-            color: #e0e0e0; /* Light text */
+            background-color: #121212;
+            /* Dark background */
+            color: #e0e0e0;
+            /* Light text */
             padding: 20px;
             line-height: 1.6;
         }
+
         .container {
-            max-width: 1400px; /* Increased max-width */
+            max-width: 1400px;
+            /* Increased max-width */
             margin: auto;
-            background-color: #1e1e1e; /* Slightly lighter dark shade */
+            background-color: #1e1e1e;
+            /* Slightly lighter dark shade */
             padding: 25px;
             border-radius: 10px;
             box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
         }
-        h1, h2, h3 {
-            color: #00bcd4; /* Cyan accent */
+
+        h1,
+        h2,
+        h3 {
+            color: #00bcd4;
+            /* Cyan accent */
             border-bottom: 1px solid #444;
             padding-bottom: 10px;
             margin-bottom: 20px;
         }
-        h1 { text-align: center; font-size: 2em; }
-        h2 { font-size: 1.6em; }
-        h3 { font-size: 1.2em; color: #bb86fc; border-bottom: 1px solid #555; padding-bottom: 5px; margin-top: 0; }
+
+        h1 {
+            text-align: center;
+            font-size: 2em;
+        }
+
+        h2 {
+            font-size: 1.6em;
+        }
+
+        h3 {
+            font-size: 1.2em;
+            color: #bb86fc;
+            border-bottom: 1px solid #555;
+            padding-bottom: 5px;
+            margin-top: 0;
+        }
 
         /* Grid Layout */
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); /* Slightly wider cards */
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            /* Slightly wider cards */
             gap: 25px;
             margin-bottom: 35px;
         }
 
         /* Card Styles */
         .card {
-            background-color: #2a2a2a; /* Darker card background */
+            background-color: #2a2a2a;
+            /* Darker card background */
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
             transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
         }
+
         .card:hover {
             transform: translateY(-3px);
             box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
         }
-        .card p { margin: 8px 0; font-size: 1.4em; font-weight: bold; color: #03dac6; /* Teal accent */ }
-        .card span { font-size: 0.9em; color: #aaa; display: block; margin-top: 5px; }
+
+        .card p {
+            margin: 8px 0;
+            font-size: 1.4em;
+            font-weight: bold;
+            color: #03dac6;
+            /* Teal accent */
+        }
+
+        .card span {
+            font-size: 0.9em;
+            color: #aaa;
+            display: block;
+            margin-top: 5px;
+        }
 
         /* Status Indicators */
         .status-indicator {
@@ -65,36 +105,105 @@
             vertical-align: middle;
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
-        .status-running, .status-available, .status-success { background-color: #00e676; /* Bright Green */ }
-        .status-stopped, .status-unavailable, .status-failure, .status-error, .status-banned { background-color: #ff1744; /* Bright Red */ }
-        .status-warning, .status-limited { background-color: #ffea00; /* Yellow */ }
-        .status-idle, .status-pending, .status-unknown { background-color: #607d8b; /* Blue Grey */ }
-        .status-executing, .status-working, .status-active { background-color: #29b6f6; /* Light Blue */ }
-        .status-planning { background-color: #ab47bc; /* Purple */ }
-        .status-learning { background-color: #ffa726; /* Orange */ }
-        .status-stopping { background-color: #ff7043; /* Deep Orange */ }
-        .status-skipped, .status-cancelled { background-color: #bdbdbd; /* Grey */ }
+
+        /* Color mapping based on GeniusAgentBase status constants and common terms */
+        .status-running,
+        .status-available,
+        .status-success,
+        .status-active,
+        .status-completed {
+            background-color: #00e676;
+            /* Bright Green */
+        }
+
+        .status-stopped,
+        .status-unavailable,
+        .status-failure,
+        .status-error,
+        .status-banned,
+        .status-failed {
+            background-color: #ff1744;
+            /* Bright Red */
+        }
+
+        .status-warning,
+        .status-limited,
+        .status-needs_review,
+        .status-needs-review {
+            background-color: #ffea00;
+            /* Yellow */
+        }
+
+        .status-idle,
+        .status-pending,
+        .status-unknown,
+        .status-initializing {
+            background-color: #607d8b;
+            /* Blue Grey */
+        }
+
+        .status-executing,
+        .status-working {
+            background-color: #29b6f6;
+            /* Light Blue */
+        }
+
+        .status-planning {
+            background-color: #ab47bc;
+            /* Purple */
+        }
+
+        .status-learning {
+            background-color: #ffa726;
+            /* Orange */
+        }
+
+        .status-stopping {
+            background-color: #ff7043;
+            /* Deep Orange */
+        }
+
+        .status-skipped,
+        .status-cancelled,
+        .status-halted-by-reflection {
+            background-color: #bdbdbd;
+            /* Grey */
+        }
+
 
         /* Control Panel & Buttons */
-        .control-panel, .actions-panel {
+        .control-panel,
+        .actions-panel {
             text-align: center;
             margin-bottom: 30px;
             padding: 15px;
             background-color: #2a2a2a;
             border-radius: 8px;
         }
+
         .actions-panel section {
             margin-bottom: 20px;
             padding-bottom: 20px;
             border-bottom: 1px solid #444;
         }
+
         .actions-panel section:last-child {
             border-bottom: none;
             margin-bottom: 0;
             padding-bottom: 0;
         }
-        .actions-panel label { display: block; margin-bottom: 8px; font-weight: bold; color: #00bcd4; }
-        button, input[type="text"], input[type="tel"], textarea {
+
+        .actions-panel label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #00bcd4;
+        }
+
+        button,
+        input[type="text"],
+        input[type="tel"],
+        textarea {
             padding: 10px 18px;
             font-size: 1em;
             border-radius: 5px;
@@ -103,17 +212,37 @@
             background-color: #333;
             color: #e0e0e0;
         }
+
         button {
-            background-color: #0097a7; /* Darker Cyan */
+            background-color: #0097a7;
+            /* Darker Cyan */
             border: none;
             color: #fff;
             cursor: pointer;
             transition: background-color 0.3s, transform 0.1s;
         }
-        button:hover { background-color: #00bcd4; /* Lighter Cyan */ transform: translateY(-1px); }
-        button:active { transform: translateY(0px); }
-        input[type="text"], input[type="tel"], textarea { width: calc(100% - 40px); max-width: 400px; }
-        textarea { min-height: 80px; resize: vertical; }
+
+        button:hover {
+            background-color: #00bcd4;
+            /* Lighter Cyan */
+            transform: translateY(-1px);
+        }
+
+        button:active {
+            transform: translateY(0px);
+        }
+
+        input[type="text"],
+        input[type="tel"],
+        textarea {
+            width: calc(100% - 40px);
+            max-width: 400px;
+        }
+
+        textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
 
         /* Approval Status Banner */
         #approval-status {
@@ -124,31 +253,45 @@
             border-radius: 6px;
             font-size: 1.1em;
         }
-        .approved { background-color: #2e7d32; color: #c8e6c9; }
-        .not-approved { background-color: #c62828; color: #ffcdd2; }
 
-        /* Grafana Placeholder */
-        .grafana-placeholder {
-            border: 1px dashed #555;
-            padding: 30px;
-            text-align: center;
-            color: #888;
-            margin-top: 30px;
-            border-radius: 8px;
-            background-color: #2a2a2a;
+        .approved {
+            background-color: #2e7d32;
+            color: #c8e6c9;
         }
-        .grafana-placeholder code { background-color: #333; padding: 2px 5px; border-radius: 3px; font-family: monospace; }
+
+        .not-approved {
+            background-color: #c62828;
+            color: #ffcdd2;
+        }
+
 
         /* Responsive Design */
         @media (max-width: 600px) {
-            .grid { grid-template-columns: 1fr; }
-            h1 { font-size: 1.6em; }
-            h2 { font-size: 1.3em; }
-            .card p { font-size: 1.2em; }
-            input[type="text"], input[type="tel"], textarea { width: calc(100% - 30px); }
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            h1 {
+                font-size: 1.6em;
+            }
+
+            h2 {
+                font-size: 1.3em;
+            }
+
+            .card p {
+                font-size: 1.2em;
+            }
+
+            input[type="text"],
+            input[type="tel"],
+            textarea {
+                width: calc(100% - 30px);
+            }
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <h1>Genius AI Sales System Dashboard</h1>
@@ -156,9 +299,11 @@
         <div id="approval-status">Loading Approval Status...</div>
 
         <div class="control-panel">
-            <button id="approve-button" onclick="approveAgency()" style="display: none;">Approve Agency Operation</button>
+            <button id="approve-button" onclick="approveAgency()" style="display: none;">Approve Agency
+                Operation</button>
             <button onclick="exportData('clients')">Export Client Data (CSV)</button>
-            </div>
+            <!-- Add other global controls here if needed -->
+        </div>
 
         <h2>Key Performance Indicators</h2>
         <div class="grid">
@@ -192,12 +337,12 @@
                 <p id="kpi-calls-success">0</p>
                 <span id="kpi-call-success-rate">Rate: 0.0%</span>
             </div>
-             <div class="card">
+            <div class="card">
                 <h3>Avg. Client Score</h3>
                 <p id="kpi-avg-score">0.0</p>
                 <span>Across active clients</span>
             </div>
-             <div class="card">
+            <div class="card">
                 <h3>Active Clients</h3>
                 <p id="kpi-active-clients">0</p>
                 <span>Opted-in clients</span>
@@ -214,43 +359,37 @@
                 <h3>LLM Clients</h3>
                 <div id="status-llm">Loading...</div>
             </div>
+            <!-- Add other core system status cards if needed -->
         </div>
 
         <h2>Agent Status</h2>
         <div class="grid" id="agent-status-grid">
             <p>Loading agent statuses...</p>
+            <!-- Agent status cards will be populated by JavaScript -->
         </div>
 
         <h2>Actions & Testing</h2>
         <div class="actions-panel">
-             <section>
+            <section>
                 <h3>Submit Feedback</h3>
                 <label for="feedback-text">Provide feedback on agent performance or strategy:</label>
                 <textarea id="feedback-text" placeholder="Enter your feedback here..."></textarea><br>
                 <button onclick="submitFeedback()">Submit Feedback</button>
-             </section>
+            </section>
 
-             <section>
+            <section>
                 <h3>Test Voice Call</h3>
                 <label for="test-call-number">Enter phone number (E.164 format, e.g., +15551234567):</label>
                 <input type="tel" id="test-call-number" placeholder="+15551234567"><br>
                 <button onclick="testVoiceCall()">Initiate Test Call</button>
-             </section>
+            </section>
 
-             <section>
+            <section>
                 <h3>Generate Sample Videos</h3>
                 <p>Trigger the workflow to generate 3 sample UGC videos and email them to the operator.</p>
                 <button onclick="generateVideos()">Generate Videos</button>
-             </section>
-        </div>
-
-
-        <h2>Detailed Monitoring (Grafana)</h2>
-        <div class="grafana-placeholder">
-            Grafana iframe placeholder. Configure your Grafana dashboard in Coolify and embed the panel URL here using an iframe tag. Example:<br>
-            <code>&lt;iframe src="YOUR_GRAFANA_PANEL_URL_HERE" width="100%" height="600" frameborder="0"&gt;&lt;/iframe&gt;</code>
-            <br><br>
-            Ensure the Grafana panel allows embedding (check Grafana server settings `allow_embedding = true` and panel share options).
+            </section>
+            <!-- Add more action sections as needed -->
         </div>
 
     </div>
@@ -283,24 +422,31 @@
         async function fetchStatus() {
             console.debug("Fetching status and KPIs...");
             try {
-                const response = await fetch('/api/status_kpi');
+                const response = await fetch('/api/status_kpi'); // Endpoint defined in ui/app.py
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status} ${response.statusText}`);
+                    // Handle non-2xx responses gracefully
+                    let errorMsg = `HTTP error! status: ${response.status} ${response.statusText}`;
+                    try {
+                        const errorData = await response.json();
+                        errorMsg = errorData.error || errorMsg;
+                    } catch (e) { /* Ignore if response is not JSON */ }
+                    throw new Error(errorMsg);
                 }
                 const data = await response.json();
                 console.debug("Status data received:", data);
 
+                // Update UI elements safely
                 updateApprovalStatus(data.approved_for_operation);
                 updateKpis(data.kpis);
                 updateOrchestratorStatus(data.orchestrator_status);
-                updateLlmStatus(data.llm_client_status);
+                updateLlmStatus(data.llm_client_status); // Pass the specific LLM status object
                 updateAgentStatuses(data.agent_statuses);
 
             } catch (error) {
                 console.error('Error fetching status:', error);
                 approvalStatusDiv.textContent = `Error fetching status: ${error.message}`;
                 approvalStatusDiv.className = 'not-approved'; // Use error styling
-                // Clear other potentially stale data
+                // Clear other potentially stale data or show error state
                 statusOrchestrator.innerHTML = `<span class="status-indicator status-error"></span>Error`;
                 statusLlm.innerHTML = `<p>Error loading LLM status.</p>`;
                 agentStatusGrid.innerHTML = '<p>Error loading agent statuses.</p>';
@@ -320,6 +466,7 @@
         }
 
         function updateKpis(kpis = {}) {
+            // Use nullish coalescing (??) for safer defaults
             kpiElements.total_profit.textContent = `$${kpis.total_profit?.toFixed(2) ?? '0.00'}`;
             kpiElements.emails_sent_24h.textContent = kpis.emails_sent_24h ?? 0;
             kpiElements.emails_opened_24h.textContent = kpis.emails_opened_24h ?? 0;
@@ -329,12 +476,12 @@
             kpiElements.avg_client_score.textContent = kpis.avg_client_score?.toFixed(3) ?? '0.0';
             kpiElements.active_clients.textContent = kpis.active_clients ?? 0;
 
-            // Calculate Rates
-            const sent = kpis.emails_sent_24h ?? 0;
-            const opened = kpis.emails_opened_24h ?? 0;
-            const responded = kpis.emails_responded_24h ?? 0;
-            const callsMade = kpis.calls_made_24h ?? 0;
-            const callsSuccess = kpis.calls_success_24h ?? 0;
+            // Calculate Rates safely
+            const sent = Number(kpis.emails_sent_24h ?? 0);
+            const opened = Number(kpis.emails_opened_24h ?? 0);
+            const responded = Number(kpis.emails_responded_24h ?? 0);
+            const callsMade = Number(kpis.calls_made_24h ?? 0);
+            const callsSuccess = Number(kpis.calls_success_24h ?? 0);
 
             const openRate = sent > 0 ? (opened / sent * 100).toFixed(1) : '0.0';
             const responseRate = sent > 0 ? (responded / sent * 100).toFixed(1) : '0.0';
@@ -346,47 +493,55 @@
         }
 
         function updateOrchestratorStatus(orchStatus = 'unknown') {
-            const statusClass = `status-${orchStatus.toLowerCase().replace('_', '-')}`;
-            statusOrchestrator.innerHTML = `<span class="status-indicator ${statusClass}"></span>${orchStatus.charAt(0).toUpperCase() + orchStatus.slice(1)}`;
+            const statusClass = `status-${String(orchStatus).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`; // Sanitize class name
+            const statusText = String(orchStatus).charAt(0).toUpperCase() + String(orchStatus).slice(1);
+            statusOrchestrator.innerHTML = `<span class="status-indicator ${statusClass}"></span>${statusText}`;
         }
 
         function updateLlmStatus(llmStatuses = {}) {
             let llmHtml = '';
-            if (Object.keys(llmStatuses).length > 0) {
+            // Expecting format like {"primary": "available", "secondary": "unavailable"}
+            if (llmStatuses && typeof llmStatuses === 'object' && Object.keys(llmStatuses).length > 0) {
                 for (const [keyId, status] of Object.entries(llmStatuses)) {
-                    const statusClass = `status-${status.toLowerCase()}`;
-                    // Display only last 4 chars of key ID for brevity/security
-                    const displayKeyId = keyId.length > 4 ? `...${keyId.slice(-4)}` : keyId;
-                    llmHtml += `<p><span class="status-indicator ${statusClass}"></span>Key ${displayKeyId}: ${status}</p>`;
+                    const statusClass = `status-${String(status).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`; // Sanitize
+                    const statusText = String(status).charAt(0).toUpperCase() + String(status).slice(1);
+                    // Display a more descriptive key name if possible
+                    const displayKeyName = keyId === 'primary' ? 'Primary LLM' : `LLM (${keyId})`;
+                    llmHtml += `<p><span class="status-indicator ${statusClass}"></span>${displayKeyName}: ${statusText}</p>`;
                 }
             } else {
-                llmHtml = '<p>No LLM clients initialized or status unavailable.</p>';
+                llmHtml = '<p><span class="status-indicator status-unknown"></span>LLM status unavailable.</p>';
             }
             statusLlm.innerHTML = llmHtml;
         }
 
         function updateAgentStatuses(agentStatuses = {}) {
             agentStatusGrid.innerHTML = ''; // Clear previous statuses
-            if (Object.keys(agentStatuses).length > 0) {
+            if (agentStatuses && typeof agentStatuses === 'object' && Object.keys(agentStatuses).length > 0) {
                 // Sort agents alphabetically for consistent order
                 const sortedAgentNames = Object.keys(agentStatuses).sort();
                 sortedAgentNames.forEach(agentName => {
-                    const statusInfo = agentStatuses[agentName];
+                    const statusInfo = agentStatuses[agentName] || {}; // Default to empty object
                     const status = statusInfo.status || 'unknown';
-                    const statusClass = `status-${status.toLowerCase().replace('_', '-')}`;
+                    const statusClass = `status-${String(status).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`; // Sanitize
+                    const statusText = String(status).charAt(0).toUpperCase() + String(status).slice(1);
                     const card = document.createElement('div');
                     card.className = 'card';
-                    // Display more detailed info if available
+
+                    // Safely access nested properties
                     const queueSize = statusInfo.queue_size ?? 'N/A';
                     const tasksProcessed = statusInfo.tasks_processed_session ?? 0;
                     const errors = statusInfo.errors_encountered_session ?? 0;
-                    const currentTask = statusInfo.current_task_id ? ` | Task: ${statusInfo.current_task_id.substring(0, 8)}...` : '';
+                    const currentTaskId = statusInfo.current_task_id;
+                    const currentTaskDisplay = currentTaskId ? ` | Task: ${String(currentTaskId).substring(0, 8)}...` : '';
+                    const lastErrorTs = statusInfo.last_error_ts;
+                    const lastErrorDisplay = lastErrorTs ? `<span style="color: #ffea00;">Last Error: ${new Date(lastErrorTs).toLocaleString()}</span>` : '';
 
                     card.innerHTML = `
                         <h3>${agentName}</h3>
-                        <p><span class="status-indicator ${statusClass}"></span>${status.charAt(0).toUpperCase() + status.slice(1)}</p>
-                        <span>Queue: ${queueSize} | Tasks: ${tasksProcessed} | Errors: ${errors}${currentTask}</span>
-                        ${statusInfo.last_error_ts ? `<span style="color: #ffea00;">Last Error: ${new Date(statusInfo.last_error_ts).toLocaleString()}</span>` : ''}
+                        <p><span class="status-indicator ${statusClass}"></span>${statusText}</p>
+                        <span>Queue: ${queueSize} | Tasks: ${tasksProcessed} | Errors: ${errors}${currentTaskDisplay}</span>
+                        ${lastErrorDisplay}
                     `;
                     agentStatusGrid.appendChild(card);
                 });
@@ -401,6 +556,7 @@
         async function approveAgency() {
             if (!confirm('Are you sure you want to approve the agency for full operation? This enables potentially costly actions.')) return;
             try {
+                // Use the correct endpoint defined in ui/app.py
                 const response = await fetch('/api/approve_agency', { method: 'POST' });
                 const data = await response.json();
                 if (response.ok && data.status === 'approved') {
@@ -416,7 +572,7 @@
         }
 
         async function exportData(exportType = 'clients') {
-            const password = prompt("Enter password to export data:");
+            const password = prompt("Enter download password to export data:"); // Use configured password
             if (!password) return;
             try {
                 const response = await fetch('/api/export_data', {
@@ -438,7 +594,7 @@
                         const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
                         const matches = filenameRegex.exec(disposition);
                         if (matches != null && matches[1]) {
-                          filename = matches[1].replace(/['"]/g, '');
+                            filename = matches[1].replace(/['"]/g, '');
                         }
                     }
                     a.download = filename;
@@ -446,7 +602,7 @@
                     a.click();
                     window.URL.revokeObjectURL(url);
                     document.body.removeChild(a);
-                    alert(`${exportType} data export started.`);
+                    // No alert needed, download starts automatically
                 } else {
                     const data = await response.json();
                     alert(`Export failed: ${data.error || response.statusText}`);
@@ -535,4 +691,5 @@
 
     </script>
 </body>
+
 </html>

@@ -1,5 +1,5 @@
 # Filename: config/settings.py
-# Description: Configuration settings for the Synapse AI Sales System,
+# Description: Configuration settings for the Nolli AI Sales System,
 #              validated using Pydantic. Secrets loaded from environment variables.
 # Version: 2.5 (Removed Optional API Keys, Pydantic V2 Fix, User Models)
 
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     Reads from environment variables automatically (case-insensitive).
     """
     # --- Core Application Settings ---
-    APP_NAME: str = Field(default="Synapse AI Sales System", description="Name of the application.")
+    APP_NAME: str = Field(default="Nolli AI Sales System", description="Name of the application.")
     APP_VERSION: str = Field(default="3.2-Genius-Cleaned", description="Version of the application.")
     DEBUG: bool = Field(default=False, description="Enable debug logging and potentially other debug features.")
     AGENCY_BASE_URL: AnyUrl = Field(..., description="Base URL where the agency is hosted (e.g., for webhooks, asset hosting). Must include scheme. Example: 'https://agency.nichenova.store'")
@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     MAILERCHECK_API_KEY: Optional[str] = Field(default=None, description="API Key for MailerCheck. Load from env var 'MAILERCHECK_API_KEY'.")
 
     # --- Operational ---
-    META_PROMPT: str = Field(default="You are a component of the Synapse AI Sales System. Your goal is profit maximization.", description="Default meta prompt fallback.")
+    META_PROMPT: str = Field(default="You are a component of the Nolli AI Sales System. Your goal is profit maximization.", description="Default meta prompt fallback.")
     LOG_LEVEL: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).")
     LOG_FILE_PATH: Optional[str] = Field(default=None, description="Path to the main log file. Set to empty string or None to disable file logging.") # Default to None
     OPERATIONAL_LOG_FILE_PATH: Optional[str] = Field(default=None, description="Path to the operational/human-readable log file. Set to empty or None to disable.") # Default to None

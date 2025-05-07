@@ -19,7 +19,6 @@ Base = declarative_base()
 def utcnow():
     return datetime.now(timezone.utc)
 
-# --- Core Operational Models ---
 
 class Client(Base):
     __tablename__ = 'clients'
