@@ -1,6 +1,6 @@
 # Filename: requirements.txt
 # Description: Python dependencies for the Nolli AI Sales System.
-# Version: 4.3 (Added mailersend, verified deepgram range)
+# Version: 4.4 (Added reportlab for PDF generation)
 
 # --- Core Framework & Web ---
 Quart>=0.20.0
@@ -23,7 +23,7 @@ deepgram-sdk>=3.4.0,<3.8.0 # Ensure this version range is compatible with import
 websockets>=12.0,<13.2
 pydantic-settings>=2.0.0,<2.4.0
 email-validator>=2.0.0,<2.2.0
-mailersend>=0.6.0,<0.7.0 # <-- ADDED
+mailersend>=0.6.0,<0.7.0
 
 # --- Utilities ---
 tenacity>=8.2.0,<9.1.0
@@ -32,8 +32,7 @@ python-dotenv>=1.0.1,<1.1.0
 pytz>=2024.1,<2025.0
 cryptography>=44.0.1
 requests>=2.31.0,<2.33.0
+reportlab>=4.0.0,<4.3.0 # <-- ADDED for PDF Generation
 
 # --- Other Dependencies ---
 numpy>=1.26.4,<1.27.0
-# Add PDF library here when chosen, e.g.:
-# reportlab>=4.0.0,<4.1.0
