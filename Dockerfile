@@ -69,6 +69,6 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl --fail --silent --show-error http://localhost:5000/ || exit 1
 
-# --- Start Command ---
-# Use the absolute path to python to ensure the correct environment and installed modules are found
-CMD ["/usr/local/bin/python", "-m", "quart", "run", "--host", "0.0.0.0", "--port", "5000", "--no-reload"]
+# --- Start Command (TEMPORARY DEBUG) ---
+# This will print Python's path and try importing Quart, then exit.
+CMD ["/usr/local/bin/python", "-c", "import sys; print('---PYTHON SYS.PATH START---'); print(sys.path); print('---PYTHON SYS.PATH END---'); print('---ATTEMPTING QUART IMPORT---'); import quart; print('---QUART IMPORT SUCCEEDED---'); print(f'Quart Version: {quart.__version__}')"]
