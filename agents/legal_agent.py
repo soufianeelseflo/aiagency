@@ -1,6 +1,6 @@
 # Filename: agents/legal_agent.py
 # Description: Genius Agentic Legal/Strategic Advisor - Compliance, Grey Area Exploitation, User Education.
-# Version: 3.3 (Refined Invoice Note, Assumes W8 Access via Config)
+# Version: 3.4 (Fixed tenacity import, Refined Invoice Note)
 
 import asyncio
 import logging
@@ -59,6 +59,8 @@ except ImportError:
         def get_secret(self, key): return None
     settings = DummySettings() # type: ignore
 
+# --- Utility Imports ---
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type # <<< FIXED: Added missing import
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -82,7 +84,7 @@ class LegalAgent(GeniusAgentBase):
     """
     Legal/Strategic Advisor (Genius Level): Focuses on grey area exploitation,
     calculated risk, compliance navigation, and strategic operator education.
-    Version: 3.3 (Refined Invoice Note)
+    Version: 3.4 (Fixed tenacity import, Refined Invoice Note)
     """
     AGENT_NAME = "LegalAgent"
 
@@ -102,7 +104,7 @@ class LegalAgent(GeniusAgentBase):
         self.internal_state['max_education_tokens'] = 2000
         self.internal_state['last_scan_time'] = None
 
-        self.logger.info(f"{self.AGENT_NAME} v3.3 (Refined Invoice Note) initialized.")
+        self.logger.info(f"{self.AGENT_NAME} v3.4 (Fixed Imports, Refined Note) initialized.")
 
     async def log_operation(self, level: str, message: str):
         """Helper to log to the operational log file."""
@@ -237,44 +239,19 @@ class LegalAgent(GeniusAgentBase):
         # (Implementation remains the same as v3.2)
         self.logger.info(f"Generating strategic education on topic: {topic}")
         await self._internal_think(f"Querying KB for insights related to strategic topic: {topic}")
-        kb_context_frags = await self.query_knowledge_base(
-            data_types=['learned_pattern', 'legal_analysis', 'grey_area_analysis', 'learning_material_summary'],
-            tags=['strategy', 'business', 'profit', 'risk', 'negotiation', 'market_dynamics'] + topic.lower().split(),
-            limit=15, min_relevance=0.6
-        )
+        kb_context_frags = await self.query_knowledge_base( data_types=['learned_pattern', 'legal_analysis', 'grey_area_analysis', 'learning_material_summary'], tags=['strategy', 'business', 'profit', 'risk', 'negotiation', 'market_dynamics'] + topic.lower().split(), limit=15, min_relevance=0.6 )
         kb_context_str = "\n".join([f"- {f.data_type} (ID {f.id}, Rel {f.relevance_score:.2f}): {f.content[:150]}..." for f in kb_context_frags])
-        task_context = {
-            "task": "Generate Strategic Education Briefing",
-            "topic": topic,
-            "user_context": context or "Provide high-level, actionable insights for an ambitious entrepreneur aiming for rapid, high-profit growth.",
-            "knowledge_base_context": kb_context_str or "No specific KB context found.",
-            "desired_output_format": """JSON: {
-                "topic": str,
-                "key_takeaway": str (The single most important insight, framed for maximum impact/profit),
-                "actionable_principles": [str] (2-4 core principles/rules to apply, focus on leverage and unconventional tactics),
-                "real_world_examples": [str] (1-2 brief examples of high-level operators applying similar principles),
-                "common_pitfalls_to_exploit": [str] (1-2 common mistakes competitors make that can be exploited),
-                "next_step_recommendation": str (Concrete action the operator should take or investigate next)
-            } - Focus on high-impact, unconventional wisdom where applicable. Be direct and concise."""
-        }
+        task_context = { "task": "Generate Strategic Education Briefing", "topic": topic, "user_context": context or "Provide high-level, actionable insights for an ambitious entrepreneur aiming for rapid, high-profit growth.", "knowledge_base_context": kb_context_str or "No specific KB context found.", "desired_output_format": """JSON: { "topic": str, "key_takeaway": str, "actionable_principles": [str], "real_world_examples": [str], "common_pitfalls_to_exploit": [str], "next_step_recommendation": str } - Focus on high-impact, unconventional wisdom. Be direct and concise.""" }
         prompt = await self.generate_dynamic_prompt(task_context)
         await self._internal_think(f"Calling LLM for strategic education on: {topic}")
-        llm_response_json = await self._call_llm_with_retry(
-            prompt, model=self.config.OPENROUTER_MODELS.get('think_general'),
-            max_tokens=self.internal_state['max_education_tokens'], is_json_output=True, temperature=0.6
-        )
+        llm_response_json = await self._call_llm_with_retry( prompt, model=self.config.OPENROUTER_MODELS.get('think_general'), max_tokens=self.internal_state['max_education_tokens'], is_json_output=True, temperature=0.6 )
         if not llm_response_json: raise RuntimeError("LLM call failed for strategic education.")
         try:
             education_result = self._parse_llm_json(llm_response_json)
             if not education_result or not education_result.get("key_takeaway"): raise ValueError("LLM response missing required keys.")
             await self._internal_think(f"Storing strategic education on '{topic}' in KB.")
-            await self.log_knowledge_fragment(
-                agent_source=self.AGENT_NAME, data_type="strategic_education",
-                content=education_result, tags=["education", "strategy", "business", "profit_maximization"] + topic.lower().split(),
-                relevance_score=0.9
-            )
-            if hasattr(self.orchestrator, 'send_notification'):
-                 await self.orchestrator.send_notification(f"Strategic Briefing Ready: {topic}", education_result.get("key_takeaway"))
+            await self.log_knowledge_fragment( agent_source=self.AGENT_NAME, data_type="strategic_education", content=education_result, tags=["education", "strategy", "business", "profit_maximization"] + topic.lower().split(), relevance_score=0.9 )
+            if hasattr(self.orchestrator, 'send_notification'): await self.orchestrator.send_notification(f"Strategic Briefing Ready: {topic}", education_result.get("key_takeaway"))
             return education_result
         except (json.JSONDecodeError, ValueError, KeyError) as e: raise RuntimeError(f"LLM response parsing failed for education: {e}. Response: {llm_response_json[:500]}")
 
@@ -344,14 +321,10 @@ class LegalAgent(GeniusAgentBase):
         texts_to_process = [(c, t, u) for c, items in updates.items() for t, u in items if t and len(t) > 10]
         if not texts_to_process: self.logger.info("No new, relevant legal update titles require interpretation."); return interpretations
         self.logger.info(f"Requesting interpretation for {len(texts_to_process)} new legal update titles.")
-        task_context = {
-            "task": "Interpret legal updates for strategic opportunities",
-            "updates_list": [{"country": c, "title": t, "url": u} for c, t, u in texts_to_process],
-            "desired_output_format": "JSON array: [{'url', 'country', 'category', 'opportunity_summary', 'risk_level', 'relevance_score', 'actionable_insight'}] Focus on exploitable changes."
-        }
+        task_context = { "task": "Interpret legal updates for strategic opportunities", "updates_list": [{"country": c, "title": t, "url": u} for c, t, u in texts_to_process], "desired_output_format": "JSON array: [{'url', 'country', 'category', 'opportunity_summary', 'risk_level', 'relevance_score', 'actionable_insight'}] Focus on exploitable changes." }
         interpretation_prompt = await self.generate_dynamic_prompt(task_context)
         await self._internal_think(f"Calling LLM to interpret {len(texts_to_process)} legal updates for opportunities.")
-        llm_response_json = await self._call_llm_with_retry(interpretation_prompt, model=self.config.OPENROUTER_MODELS.get('legal_analysis'), max_tokens=self.internal_state['max_interpretation_tokens'], is_json_output=True) # Use legal_analysis model
+        llm_response_json = await self._call_llm_with_retry(interpretation_prompt, model=self.config.OPENROUTER_MODELS.get('legal_analysis'), max_tokens=self.internal_state['max_interpretation_tokens'], is_json_output=True)
         if not llm_response_json: self.logger.error("LLM call for legal interpretation returned empty."); return interpretations
         try:
             json_match = self._parse_llm_json(llm_response_json, expect_type=list)
@@ -376,29 +349,19 @@ class LegalAgent(GeniusAgentBase):
             keywords = [w for w in re.findall(r'\b\w{4,}\b', operation_description.lower()) if w not in ['the', 'a', 'is', 'for', 'to', 'in', 'and', 'with']]
             kb_context_frags = await self.query_knowledge_base(data_types=['legal_analysis', 'regulation_summary', 'compliance_note', 'grey_area_analysis', 'learned_pattern'], tags=list(set(['compliance', 'risk', 'exploit'] + keywords[:5])), limit=15, min_relevance=0.5)
             kb_context_str = "\n".join([f"- {f.data_type} (ID {f.id}, Rel {f.relevance_score:.2f}): {f.content[:150]}..." for f in kb_context_frags])
-            task_context = {
-                "task": "Validate operation compliance and assess strategic risk (PROFIT FOCUSED)",
-                "operation_description": operation_description,
-                "knowledge_base_context": kb_context_str or "No specific KB context found.",
-                "desired_output_format": "JSON object: {'is_compliant_strict': bool (Literal compliance), 'risk_level_realistic': str ('Low'|'Medium'|'High'|'Critical' - based on detection/actual penalty likelihood vs profit), 'showstopper_issues': [str] (Only critical, high-penalty violations), 'grey_area_assessment': str (Is this a calculated risk? Exploit potential?), 'realistic_consequences': [str] (e.g., 'Account ban likely', 'Small fine possible', 'Reputational hit unlikely'), 'mitigation_options': [str] (Ways to reduce detection/impact), 'proceed_recommendation': str ('Proceed - Low Risk/High Reward'|'Proceed Cautiously - Monitor'|'Halt - Unacceptable Risk')}"
-            }
+            task_context = { "task": "Validate operation compliance and assess strategic risk (PROFIT FOCUSED)", "operation_description": operation_description, "knowledge_base_context": kb_context_str or "No specific KB context found.", "desired_output_format": "JSON object: {'is_compliant_strict': bool, 'risk_level_realistic': str, 'showstopper_issues': [str], 'grey_area_assessment': str, 'realistic_consequences': [str], 'mitigation_options': [str], 'proceed_recommendation': str}" } # Simplified format
             validation_prompt = await self.generate_dynamic_prompt(task_context)
             await self._internal_think(f"Calling LLM for strategic operation validation: {operation_description[:60]}...")
-            validation_result_json = await self._call_llm_with_retry(validation_prompt, model=self.config.OPENROUTER_MODELS.get('legal_analysis'), temperature=0.3, max_tokens=self.internal_state['max_validation_tokens'], is_json_output=True) # Use legal_analysis model
+            validation_result_json = await self._call_llm_with_retry(validation_prompt, model=self.config.OPENROUTER_MODELS.get('legal_analysis'), temperature=0.3, max_tokens=self.internal_state['max_validation_tokens'], is_json_output=True)
             if not validation_result_json: raise Exception("LLM call for validation returned empty.")
             try:
                 findings = self._parse_llm_json(validation_result_json)
-                findings.setdefault('is_compliant_strict', False); findings.setdefault('risk_level_realistic', 'Critical')
-                findings.setdefault('showstopper_issues', ['Analysis Failed']); findings.setdefault('grey_area_assessment', 'N/A')
-                findings.setdefault('realistic_consequences', []); findings.setdefault('mitigation_options', [])
-                findings.setdefault('proceed_recommendation', 'Halt - Analysis Failed')
+                findings.setdefault('is_compliant_strict', False); findings.setdefault('risk_level_realistic', 'Critical'); findings.setdefault('showstopper_issues', ['Analysis Failed']); findings.setdefault('grey_area_assessment', 'N/A'); findings.setdefault('realistic_consequences', []); findings.setdefault('mitigation_options', []); findings.setdefault('proceed_recommendation', 'Halt - Analysis Failed')
                 self.logger.info(f"Strategic Validation: CompliantStrict={findings['is_compliant_strict']}, RiskRealistic={findings['risk_level_realistic']}, Recommendation={findings['proceed_recommendation']}")
                 await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="operation_validation", content=findings, tags=["validation", "risk_assessment", findings['risk_level_realistic'].lower()], relevance_score=0.85, source_reference=f"Operation: {operation_description[:50]}...")
-                if findings['risk_level_realistic'] in ['High', 'Critical'] or "halt" in findings['proceed_recommendation'].lower():
-                     await self.orchestrator.send_notification(f"Risk Alert: {findings['risk_level_realistic']}", f"Operation HALTED/High-Risk: {operation_description[:100]}... Issues: {findings['showstopper_issues']}, Risk: {findings['risk_level_realistic']}")
-                elif findings['risk_level_realistic'] == 'Medium' or findings.get('mitigation_options'):
-                     await self.orchestrator.send_notification("Strategic Advisory", f"Operation: {operation_description[:100]}... Risk: {findings['risk_level_realistic']}. Mitigation: {findings['mitigation_options']}")
-                findings['is_compliant'] = "halt" not in findings['proceed_recommendation'].lower() # Simplified go/no-go for other agents
+                if findings['risk_level_realistic'] in ['High', 'Critical'] or "halt" in findings['proceed_recommendation'].lower(): await self.orchestrator.send_notification(f"Risk Alert: {findings['risk_level_realistic']}", f"Operation HALTED/High-Risk: {operation_description[:100]}... Issues: {findings['showstopper_issues']}, Risk: {findings['risk_level_realistic']}")
+                elif findings['risk_level_realistic'] == 'Medium' or findings.get('mitigation_options'): await self.orchestrator.send_notification("Strategic Advisory", f"Operation: {operation_description[:100]}... Risk: {findings['risk_level_realistic']}. Mitigation: {findings['mitigation_options']}")
+                findings['is_compliant'] = "halt" not in findings['proceed_recommendation'].lower()
                 return {"status": "success", "message": "Validation complete.", "findings": findings}
             except (json.JSONDecodeError, ValueError, KeyError) as e: raise RuntimeError(f"LLM validation response parsing failed: {e}. Response: {validation_result_json[:500]}")
         except Exception as e:
@@ -419,18 +382,16 @@ class LegalAgent(GeniusAgentBase):
         # Fetch necessary details (assuming they are configured)
         sender_name = self.config.get('SENDER_NAME', 'Nolli Agency') # Use configured name
         bank_account_info = self.config.get('MOROCCAN_BANK_ACCOUNT', '[Configure Bank Details]')
-        # W8 details (Name, Country) are available via self.config.get but omitted from note text
-        # W8 Address/TIN are also available via self.config but not used in this note
+        # W8 details are available via self.config but omitted from note text
 
         # --- Revised Pro-Agency Terms (Less Specific Jurisdiction on Invoice) ---
-        # Focus: Finality, Non-Refundable, Limited Liability, Reference to Agreement
         terms = (
             f"SERVICE PROVIDER: {sender_name}. PAYMENT TO: {bank_account_info}. "
             "PAYMENT CONSTITUTES FINAL AND IRREVOCABLE ACCEPTANCE of services rendered or commenced. "
-            "ALL PAYMENTS ARE NON-REFUNDABLE. NO CHARGEBACKS. " # Keep strong non-refundable clause
+            "ALL PAYMENTS ARE NON-REFUNDABLE. NO CHARGEBACKS. "
             "Provider liability is strictly limited to the total service fee paid for this invoice. "
             "Provider is not liable for any indirect, consequential, or incidental damages. "
-            "This transaction and all services are governed by the terms of the Master Service Agreement previously agreed upon by the parties, which includes governing law and dispute resolution clauses." # Points to external agreement
+            "This transaction and all services are governed by the terms of the Master Service Agreement previously agreed upon by the parties, which includes governing law and dispute resolution clauses."
         )
         # --- End Revised Terms ---
 
