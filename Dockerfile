@@ -1,8 +1,8 @@
 # Filename: Dockerfile
 # Description: Docker build instructions for the Nolli AI Sales System.
-# Version: 4.3 (Simplified pip install, relies on requirements.txt for deepgram)
+# Version: 4.4 (Aligned CMD with main.py v3.2 using quart run)
 
-# Use a specific Python 3.10 slim image for reproducibility
+# Use a specific Python 3.10 slim image for reproducibility (Debian Bookworm - GLIBC 2.36)
 FROM python:3.10.13-slim-bookworm
 
 WORKDIR /app
@@ -39,7 +39,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
   pip install --no-cache-dir -r requirements.txt
-# REMOVED: Redundant deepgram-sdk install line was here
 
 # Install Playwright browsers (needed by BrowseAgent)
 # This ensures playwright downloads browsers correctly after pip packages are installed
@@ -52,16 +51,15 @@ COPY . .
 RUN mkdir -p /app/invoices && chown -R nobody:nogroup /app/invoices
 
 # Expose the port the UI/API server runs on.
-# Your main.py uses os.getenv('PORT', '5000'), so it will adapt.
-# Coolify usually provides a PORT env var.
-ENV PORT 5000 
-EXPOSE ${PORT} 
+# Coolify usually provides a PORT env var, overriding the default 5000.
+ENV PORT 5000
+EXPOSE ${PORT}
 
 # Healthcheck (Checks if the web server is responding)
 # Ensure your app has a /api/status_kpi endpoint for this to work
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
   CMD curl -f http://localhost:${PORT}/api/status_kpi || exit 1
 
-# Set the default command to run the application using main.py which uses Hypercorn
-# This will be used if Coolify's "Start Command" is empty.
-CMD ["python", "main.py"]
+# Set the default command to run the application using Quart's built-in server
+# Aligned with main.py v3.2
+CMD ["quart", "run", "--host", "0.0.0.0", "--port", "5000"]
