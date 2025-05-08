@@ -49,9 +49,10 @@ RUN playwright install chromium --with-deps
 COPY . .
 
 # --- Create necessary directories ---
-# Ensure directories exist (user permissions might be needed if running as non-root later)
+# Ensure directories exist and are writable by the container process
 RUN mkdir -p /app/logs /app/temp_audio /app/temp_downloads /app/learning_for_AI && \
   chmod -R 777 /app/logs /app/temp_audio /app/temp_downloads
+# Note: 777 is permissive, consider a non-root user and specific ownership for production hardening later.
 
 # --- Expose Port ---
 EXPOSE 5000
