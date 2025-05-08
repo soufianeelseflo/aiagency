@@ -1,6 +1,6 @@
 # Filename: agents/voice_sales_agent.py
 # Description: Production-ready Voice Sales Agent using Twilio, Deepgram, and LLMs.
-# Version: 3.1 (Added UGC Discovery & Hormozi Logic)
+# Version: 3.1 (Corrected Deepgram SDK V3+ Usage)
 
 import asyncio
 import logging
@@ -38,15 +38,23 @@ try:
     import websockets.exceptions
 except ImportError: logging.critical("Websockets library not found."); raise
 try:
-    from deepgram import DeepgramClient, SpeakOptions
-    from deepgram.clients.live.v1.client import LiveClient as DeepgramLiveClient # Alias for clarity
-    from deepgram.clients.speak.v1.client import SpeakClient as DeepgramSpeakClient # Alias for clarity
-    from deepgram.errors import DeepgramError, DeepgramApiError
-except ImportError: logging.critical("Deepgram SDK v3+ not found."); raise
+    from deepgram import (
+        DeepgramClient,
+        SpeakOptions,
+        LiveTranscriptionEvents, # For STT events
+        DeepgramError,
+        DeepgramApiError
+    )
+    # For type hinting the async live client instance
+    from deepgram.clients.live.v1.async_client import AsyncLiveClient as DeepgramAsyncLiveClient
+except ImportError:
+    logging.critical("Deepgram SDK v3+ (with specific components like LiveTranscriptionEvents) not found.")
+    raise
 
 # --- Utilities ---
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import numpy as np
+import aiohttp # Added for retry exceptions, often used with async http calls
 from typing import Optional, Dict, Any, List, Tuple
 
 # Configure logger
@@ -68,8 +76,8 @@ You are Lila, an AI Sales Specialist within the Nolli AI Sales System. Your voic
 4.  **Risk Reversal:** Utilize guarantees or Nolli's commitment to results (if provided by `ThinkTool` via `kb_insights`) to minimize perceived risk at appropriate points.
 5.  **Problem/Solution Fit:** Actively listen (STT) and use sharp, insightful questioning (`needs_assessment` state) to tailor Nolli's $7000 UGC service package as the precise solution to *their* specific challenges and goals.
 6.  **Elite AI Persona (99 Business / 1 Engaging Edge):**
-    *   **(99%):** Be hyper-competent, articulate, efficient, and relentlessly focused on the prospect's business success and closing the deal. Use clear, concise language. Guide the conversation purposefully.
-    *   **(1%):** Project unwavering confidence. Inject brief, intelligent observations or moments of shared understanding to build rapport. Your "charm" is your competence and the tangible value you articulate.
+    * **(99%):** Be hyper-competent, articulate, efficient, and relentlessly focused on the prospect's business success and closing the deal. Use clear, concise language. Guide the conversation purposefully.
+    * **(1%):** Project unwavering confidence. Inject brief, intelligent observations or moments of shared understanding to build rapport. Your "charm" is your competence and the tangible value you articulate.
 7.  **Adaptive Conversation:** Listen intently (STT), understand intent/emotion/needs (LLM via `interpret_intent_and_needs`), adjust conversational flow using the state machine (`update_conversation_state`), and tailor responses using all available context (`discovered_needs`, `enriched_data`, `conversation_history`, `kb_insights`).
 8.  **Firm Pricing & Scope Negotiation (Hormozi):** Guide towards the $7000 close. The price is **firm**. If price is the *only* objection after value is established, reiterate value, then offer to *change the scope/terms* (e.g., a 10-creative 'Spark' package for $5000) but **do not discount the $7000 package.** Reference Hormozi negotiation patterns from KB (`ThinkTool`) if needed.
 9.  **Compliance:** Adhere strictly to `LegalAgent` validation guidelines (call times, disclosures). Check opt-in status via `Client` data.
@@ -81,11 +89,11 @@ You are Lila, an AI Sales Specialist within the Nolli AI Sales System. Your voic
 - Consult `LegalAgent` via `Orchestrator` for pre-call compliance.
 - Initiate call via `TwilioClient`.
 - Manage real-time interaction loop:
-    - Listen: `DeepgramLiveClient` (STT) via `Orchestrator`.
+    - Listen: Deepgram Live STT (`self.deepgram_client.listen.asynclive.v("1")`) via `Orchestrator`.
     - Understand: Call `interpret_intent_and_needs` (uses LLM via `Orchestrator` to get intent, tone, update `discovered_needs`).
     - Decide Flow: Call `update_conversation_state`.
     - Formulate Response: Call `generate_agent_response` (uses LLM via `Orchestrator`, incorporating this Meta-Prompt, current state, `conversation_log`, `discovered_needs`, `enriched_data`, and `kb_insights` from `ThinkTool`).
-    - Speak: Call `speak_response` (uses `DeepgramSpeakClient` TTS via `Orchestrator` audio hosting, then `TwilioClient` playback).
+    - Speak: Call `speak_response` (uses Deepgram Speak TTS REST (`self.deepgram_client.speak.rest.v("1").stream(...)`) via `Orchestrator` audio hosting, then `TwilioClient` playback).
 - Handle objections using value reframing and Hormozi negotiation (Principle 8).
 - Aim for clear closing state (`closing`, `finalizing`, `end_call`). Trigger invoice via `Orchestrator.request_invoice_generation` if `success_sale`.
 - Log call details (`CallLog`), transcript, outcome meticulously to Postgres DB.
@@ -97,7 +105,7 @@ class VoiceSalesAgent(GeniusAgentBase):
     Voice Agent (Genius Level): Manages real-time voice sales calls using Twilio,
     Deepgram, and LLM reasoning. Implements adaptive conversation, dynamic pricing,
     opt-out checks, and contributes to learning loops.
-    Version: 3.1 (Added UGC Discovery & Hormozi Logic)
+    Version: 3.1 (Corrected Deepgram SDK V3+ Usage)
     """
     AGENT_NAME = "VoiceSalesAgent"
 
@@ -145,11 +153,11 @@ class VoiceSalesAgent(GeniusAgentBase):
         try:
             self.deepgram_client = DeepgramClient(self._deepgram_api_key)
             self.logger.info(f"Deepgram client initialized.")
-        except Exception as e:
+        except Exception as e: # Catch generic Exception as DeepgramClient init can raise various things
             self.logger.critical(f"Failed to initialize Deepgram client: {e}", exc_info=True)
             raise ValueError(f"Deepgram client initialization failed: {e}") from e
 
-        self.logger.info(f"{self.AGENT_NAME} v3.1 initialized.")
+        self.logger.info(f"{self.AGENT_NAME} v3.1 (Corrected Deepgram SDK) initialized.")
 
     async def log_operation(self, level: str, message: str):
         """Helper to log to the operational log file."""
@@ -248,11 +256,21 @@ class VoiceSalesAgent(GeniusAgentBase):
             await self._internal_think(f"Initiating Twilio call to {client.name} ({client.phone}) from {self.twilio_voice_number}.")
             # Ensure base URL is correctly configured in settings
             base_url = self.config.get('AGENCY_BASE_URL', 'http://localhost:5000').rstrip('/')
-            websocket_url = f"{base_url}/twilio_call" # Endpoint defined in Orchestrator routes
-            # Use wss:// if AGENCY_BASE_URL uses https://
-            ws_scheme = "wss://" if websocket_url.startswith("https://") else "ws://"
-            ws_host_path = websocket_url.split("://")[-1]
-            stream_url = f"{ws_scheme}{ws_host_path}"
+            websocket_url_path = "/twilio_call" # Endpoint defined in Orchestrator routes (assuming it's a path)
+            
+            # Determine scheme based on base_url
+            if base_url.startswith("https://"):
+                ws_scheme = "wss://"
+                http_scheme = "https://"
+            else:
+                ws_scheme = "ws://"
+                http_scheme = "http://"
+            
+            # Construct stream_url correctly
+            # Remove http(s):// from base_url if present for constructing the host part for ws_scheme
+            host_part = base_url.split("://")[-1]
+            stream_url = f"{ws_scheme}{host_part}{websocket_url_path}"
+
 
             call = await asyncio.to_thread(
                 self.twilio_client.calls.create,
@@ -262,7 +280,7 @@ class VoiceSalesAgent(GeniusAgentBase):
                 record=True # Enable recording
             )
             call_sid = call.sid
-            self.logger.info(f"Initiated outbound call to {client.phone}. Call SID: {call_sid}")
+            self.logger.info(f"Initiated outbound call to {client.phone}. Call SID: {call_sid}, Stream URL: {stream_url}")
             # Store initial state immediately
             self.internal_state['active_calls'][call_sid] = {'state': 'initiating', 'log': [], 'client_id': client.id, 'discovered_needs': {}} # Init discovered_needs
             await self.store_conversation_state_with_retry(call_sid, 'initiating', [], {}) # Store empty needs
@@ -279,7 +297,7 @@ class VoiceSalesAgent(GeniusAgentBase):
     async def handle_call(self, call_sid: str, client: Client, enriched_data: Optional[Dict] = None): # Added enriched_data
         """Manages the real-time voice call interaction loop."""
         self.logger.info(f"{self.AGENT_NAME}: Handling call {call_sid} for client {client.id} ({client.name})")
-        deepgram_ws: Optional[websockets.client.WebSocketClientProtocol] = None
+        live_client: Optional[DeepgramAsyncLiveClient] = None # Use the specific async client type
         state = "greeting"
         conversation_log = []
         discovered_needs = {} # Initialize needs dictionary
@@ -304,34 +322,36 @@ class VoiceSalesAgent(GeniusAgentBase):
             self.internal_state['active_calls'][call_sid] = {'state': state, 'log': conversation_log, 'client_id': client.id, 'discovered_needs': discovered_needs}
 
             # --- Connect to Deepgram STT ---
-            dg_config = {
+            dg_stt_options = {
                 "model": self.internal_state['deepgram_stt_model'], "language": "en-US",
                 "encoding": "mulaw", "sample_rate": 8000, "channels": 1,
                 "punctuate": True, "interim_results": False, "endpointing": 300, "vad_events": True
             }
-            live_client: DeepgramLiveClient = self.deepgram_client.listen.asynclive.v("1")
+            live_client: DeepgramAsyncLiveClient = self.deepgram_client.listen.asynclive.v("1") # Correct instantiation
 
             # Queue for receiving transcripts from the callback
             transcript_queue = asyncio.Queue()
 
-            async def on_message(inner_self, result, **kwargs): # Use inner_self to avoid conflict
+            async def on_message(inner_self_dg_client, result, **kwargs): # inner_self_dg_client is the live_client instance
                 sentence = result.channel.alternatives[0].transcript # Access transcript correctly
                 if result.is_final and sentence:
                     logger.debug(f"Deepgram Callback (Call: {call_sid}): Final transcript: {sentence}")
                     await transcript_queue.put({"transcript": sentence, "confidence": result.channel.alternatives[0].confidence, "is_final": True})
 
-            async def on_error(inner_self, error, **kwargs): # Use inner_self
+            async def on_error(inner_self_dg_client, error, **kwargs): # inner_self_dg_client is the live_client instance
                 logger.error(f"Deepgram Callback Error (Call: {call_sid}): {error}")
                 await transcript_queue.put({"error": str(error)}) # Signal error to main loop
 
-            live_client.on(DeepgramLiveClient.Events.Transcript, on_message)
-            live_client.on(DeepgramLiveClient.Events.Error, on_error)
+            live_client.on(LiveTranscriptionEvents.Transcript, on_message) # Use imported Enum
+            live_client.on(LiveTranscriptionEvents.Error, on_error)       # Use imported Enum
+            # Potentially add other handlers e.g. live_client.on(LiveTranscriptionEvents.Open, on_open_handler)
 
-            await live_client.start(dg_config)
-            self.logger.info(f"Deepgram WebSocket connection started for call {call_sid}.")
+            await live_client.start(dg_stt_options)
+            self.logger.info(f"Deepgram WebSocket connection listener started for call {call_sid}.")
 
             # --- Register Connection for Audio Forwarding ---
             if hasattr(self.orchestrator, 'register_deepgram_connection_sdk'):
+                # The orchestrator will now be responsible for calling live_client.send(audio_chunk)
                 await self.orchestrator.register_deepgram_connection_sdk(call_sid, live_client)
                 self.logger.debug(f"Registered Deepgram SDK client for {call_sid} with Orchestrator.")
             else: raise RuntimeError("Orchestrator cannot register Deepgram SDK client.")
@@ -357,6 +377,9 @@ class VoiceSalesAgent(GeniusAgentBase):
                         raise DeepgramError(f"Deepgram callback error: {transcription_data['error']}")
                 except asyncio.TimeoutError:
                     self.logger.warning(f"Timeout waiting for transcription from Deepgram queue for call {call_sid}.")
+                    # Decide if agent should say something like "Are you still there?" or just continue waiting.
+                    # For now, continue to allow for longer pauses or network recovery.
+                    # Consider adding a counter for consecutive timeouts to end the call if it persists.
                     continue
                 except DeepgramError as dg_err:
                     self.logger.error(f"Deepgram error signaled via callback for {call_sid}: {dg_err}")
@@ -384,7 +407,8 @@ class VoiceSalesAgent(GeniusAgentBase):
                 detection_keywords = ["robot", "ai ", "artificial", " bot ", "computer voice"]
                 if any(keyword in client_response.lower() for keyword in detection_keywords):
                     self.logger.info(f"Potential AI detection attempt in '{client_response}' for call {call_sid}.")
-                    agent_response = "I’m part of a cutting-edge team using advanced technology to deliver top-tier UGC services efficiently. We focus on results – how can I help you achieve yours?"
+                    # Using the Meta-Prompt defined AI Transparency response
+                    agent_response = "Yes, I am. Nolli utilizes specialized AI like me for efficient, data-driven communication, allowing our human strategists to focus entirely on maximizing your results. My purpose here is to understand your goals and see how Nolli can best help you achieve them. So, to pick up where we left off..."
                     await self.speak_response_with_retry(agent_response, call_sid)
                     conversation_log.append({"role": "agent", "text": agent_response, "timestamp": datetime.now(timezone.utc).isoformat()})
                     await self.store_conversation_state_with_retry(call_sid, state, conversation_log, discovered_needs)
@@ -425,14 +449,21 @@ class VoiceSalesAgent(GeniusAgentBase):
                 # 9. Check for End Call State & Trigger Invoice
                 if state == "end_call":
                     self.logger.info(f"Reached 'end_call' state for call {call_sid}. Ending conversation.")
-                    call_outcome = "success_sale" # Assume sale if ended via state machine
+                    # Determine final outcome based on conversation. For simplicity, assume "success_sale" if state machine leads here.
+                    # More sophisticated logic could check `discovered_needs.agreed_to_purchase` or similar.
+                    if "Thank you for your time. Goodbye." not in agent_response: # Avoid marking hangup as sale
+                        call_outcome = "success_sale" 
+                    else:
+                        call_outcome = "completed_by_agent"
+
 
                     # --- Trigger Invoice (Using fixed $7k price) ---
-                    try:
-                        await self._internal_think(f"Call {call_sid} ended successfully. Triggering invoice for ${self.internal_state['base_ugc_price']}.")
-                        await self.orchestrator.request_invoice_generation(client.id, self.internal_state['base_ugc_price'], call_sid)
-                    except Exception as invoice_err:
-                        self.logger.error(f"Error triggering invoice for call {call_sid}: {invoice_err}", exc_info=True)
+                    if call_outcome == "success_sale":
+                        try:
+                            await self._internal_think(f"Call {call_sid} ended successfully. Triggering invoice for ${self.internal_state['base_ugc_price']}.")
+                            await self.orchestrator.request_invoice_generation(client.id, self.internal_state['base_ugc_price'], call_sid)
+                        except Exception as invoice_err:
+                            self.logger.error(f"Error triggering invoice for call {call_sid}: {invoice_err}", exc_info=True)
                     break # Exit loop
 
         # --- Exception Handling for the entire call ---
@@ -444,6 +475,9 @@ class VoiceSalesAgent(GeniusAgentBase):
             self.logger.error(f"Twilio API error during call {call_sid}: {e}", exc_info=True)
             await self._report_error(f"Twilio API error call {call_sid}: {e}")
             call_outcome = "failed_twilio_error"
+        except websockets.exceptions.ConnectionClosedError as ws_closed_err:
+            self.logger.error(f"WebSocket connection closed unexpectedly for call {call_sid}: {ws_closed_err}", exc_info=True)
+            call_outcome = "failed_websocket_closed"
         except Exception as e:
             self.logger.critical(f"Unhandled critical error in handle_call for {call_sid}: {e}", exc_info=True)
             await self._report_error(f"Critical error in call {call_sid}: {e}")
@@ -455,9 +489,13 @@ class VoiceSalesAgent(GeniusAgentBase):
             self.internal_state['active_calls'].pop(call_sid, None) # Remove from active tracking
 
             # --- Stop Deepgram Connection ---
-            if 'live_client' in locals() and live_client:
-                try: await live_client.finish(); self.logger.debug(f"Deepgram SDK client finished for {call_sid}.")
-                except Exception as dg_close_err: self.logger.warning(f"Error finishing Deepgram SDK client for {call_sid}: {dg_close_err}")
+            if live_client: # Check if live_client was initialized
+                try:
+                    await live_client.finish()
+                    self.logger.debug(f"Deepgram SDK client listener finished for {call_sid}.")
+                except Exception as dg_close_err:
+                    self.logger.warning(f"Error finishing Deepgram SDK client listener for {call_sid}: {dg_close_err}")
+            
             if hasattr(self.orchestrator, 'unregister_deepgram_connection_sdk'):
                 await self.orchestrator.unregister_deepgram_connection_sdk(call_sid)
                 self.logger.debug(f"Unregistered Deepgram SDK client for {call_sid} with Orchestrator.")
@@ -486,11 +524,17 @@ class VoiceSalesAgent(GeniusAgentBase):
                     self.logger.info(f"Updating Twilio call {call_sid} status to 'completed'. Current: {call_instance.status}")
                     await asyncio.to_thread(self.twilio_client.calls(call_sid).update, status='completed')
                 else: self.logger.info(f"Twilio call {call_sid} already in final state: {call_instance.status}")
-            except TwilioException as te: self.logger.warning(f"Failed to fetch or update final Twilio status for call {call_sid}: {te}")
+            except TwilioRestException as te:
+                if te.status == 404: # Call SID no longer exists or already completed fully
+                     self.logger.info(f"Twilio call {call_sid} not found or already finalized, cannot update status: {te}")
+                else:
+                    self.logger.warning(f"Failed to fetch or update final Twilio status for call {call_sid}: {te}")
+            except Exception as te_other: # Catch other potential errors
+                self.logger.warning(f"Unexpected error during final Twilio status update for call {call_sid}: {te_other}")
 
 
     # --- Retry Wrappers for I/O Operations ---
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5), retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError, DeepgramError, TwilioException, RuntimeError)), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5), retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError, DeepgramError, TwilioException, RuntimeError, websockets.exceptions.WebSocketException)), reraise=True)
     async def speak_response_with_retry(self, text: str, call_sid: str):
         await self.speak_response(text, call_sid)
 
@@ -535,7 +579,7 @@ class VoiceSalesAgent(GeniusAgentBase):
                 intent_prompt, agent_name=self.AGENT_NAME,
                 model=llm_model_pref,
                 temperature=0.1, max_tokens=300, is_json_output=True, # Increased tokens slightly
-                timeout=self.internal_state.get('openrouter_intent_timeout')
+                timeout_seconds=self.internal_state.get('openrouter_intent_timeout') # Ensure orchestrator's method uses this
             )
             if not llm_response_str: raise Exception("LLM call returned empty.")
             try:
@@ -579,6 +623,11 @@ class VoiceSalesAgent(GeniusAgentBase):
         if intent == "objection_cost":
             self.logger.info(f"Intent is objection_cost, transitioning to objection_handling state.")
             return "objection_handling"
+        # Handle general objections if not objection_cost
+        if "objection" in intent and intent != "objection_cost": # e.g. objection_timing, objection_need
+             self.logger.info(f"Intent is {intent}, transitioning to objection_handling state.")
+             return "objection_handling"
+
 
         return state_transitions.get(current_state, {}).get(intent, current_state)
 
@@ -609,23 +658,23 @@ class VoiceSalesAgent(GeniusAgentBase):
 
             # Add specific instructions based on state
             if state == "needs_assessment":
-                task_context["instructions"] = "Ask open-ended questions to understand the client's primary goals, target audience, desired outcomes, and current challenges related to content/marketing."
+                task_context["instructions"] = "Ask open-ended questions to understand the client's primary goals, target audience, desired outcomes, and current challenges related to content/marketing. Use the 'discovered_needs' to see what's already known and avoid re-asking."
             elif state == "value_proposition":
-                task_context["instructions"] = f"Based on the discovered needs ({needs_dict}), present the $7000 UGC package as the specific solution. Stack the value by highlighting benefits relevant to their needs."
+                task_context["instructions"] = f"Based on the discovered needs ({needs_dict}), present the $7000 UGC package as the specific solution. Stack the value by highlighting benefits relevant to their needs. Reference 'enriched_data' if it provides useful context."
             elif state == "objection_handling":
                 last_client_msg = conversation_log[-1]['text'].lower() if conversation_log and conversation_log[-1]['role'] == 'client' else ""
-                if "price" in last_client_msg or "cost" in last_client_msg or "afford" in last_client_msg:
-                    task_context["instructions"] = f"Handle the price objection ($7000). Reiterate value based on needs ({needs_dict}). State the price is firm. If they insist on budget limitations after value is clear, offer to potentially adjust the *scope/terms* (e.g., remove a component) but NOT the price. Reference Hormozi principles (no discounts)."
+                if "price" in last_client_msg or "cost" in last_client_msg or "afford" in last_client_msg or needs_dict.get('last_objection_type') == 'cost': # Check needs too
+                    task_context["instructions"] = f"Handle the price objection ($7000). Reiterate value based on needs ({needs_dict}). State the price is firm. If they insist on budget limitations after value is clear, offer to potentially adjust the *scope/terms* (e.g., remove a component, or suggest the $5000 'Spark' package if appropriate) but NOT the price. Reference Hormozi principles (no discounts on the main package)."
                 else:
-                    task_context["instructions"] = f"Address the client's objection ('{last_client_msg}') by reframing around value, risk reversal (if applicable), or clarifying misunderstandings based on needs ({needs_dict})."
+                    task_context["instructions"] = f"Address the client's objection ('{last_client_msg}' or from `needs_dict.last_objection_type`) by reframing around value, risk reversal (if applicable), or clarifying misunderstandings based on needs ({needs_dict})."
             elif state == "closing":
                 task_context["instructions"] = f"Client seems interested. Summarize the tailored value based on needs ({needs_dict}). Use the preferred closing phrase or similar to ask for the sale ($7000)."
             elif state == "finalizing":
                 task_context["instructions"] = "Confirm the agreement ($7000 package tailored to their needs). Explain the next steps (invoice, onboarding)."
             elif state == "addressing_hesitancy":
-                task_context["instructions"] = "Acknowledge the client's hesitation. Ask clarifying questions to uncover the root cause. Reassure and build trust."
+                task_context["instructions"] = "Acknowledge the client's hesitation. Ask clarifying questions to uncover the root cause. Reassure and build trust. Leverage 'discovered_needs' to understand context."
             elif state == "greeting":
-                task_context["instructions"] = "Provide a warm, professional opening. State your name and company. Briefly state the reason for the call (tailored if possible using enriched data)."
+                task_context["instructions"] = "Provide a warm, professional opening. State your name (Lila) and company (Nolli AI Sales System). Briefly state the reason for the call (e.g., following up on interest in AI-assisted UGC services, or tailored if 'enriched_data' provides a specific hook)."
 
             response_prompt = await self.generate_dynamic_prompt(task_context)
             llm_model_pref = settings.OPENROUTER_MODELS.get('voice_response')
@@ -633,7 +682,7 @@ class VoiceSalesAgent(GeniusAgentBase):
                 response_prompt, agent_name=self.AGENT_NAME,
                 model=llm_model_pref,
                 temperature=0.65, max_tokens=300, # Increased tokens slightly
-                timeout=self.internal_state.get('openrouter_response_timeout')
+                timeout_seconds=self.internal_state.get('openrouter_response_timeout') # Ensure orchestrator uses this
             )
             if not llm_response_str: raise Exception("LLM call returned empty.")
             agent_response = llm_response_str.strip()
@@ -641,47 +690,81 @@ class VoiceSalesAgent(GeniusAgentBase):
             self.logger.debug(f"Generated response for state '{state}': '{agent_response[:100]}...'")
         except Exception as e:
             self.logger.error(f"Error during generate_agent_response: {e}", exc_info=True)
-            # Provide state-specific fallbacks (same as previous version)
-            sender_name = self.config.get('SENDER_NAME', 'Alex')
+            # Provide state-specific fallbacks
+            sender_name = "Lila" # Agent's persona name
             client_first_name = client.name.split()[0] if client.name else 'there' # Get first name
             fallback_responses = {
-                "greeting": f"Hi {client_first_name}, this is {sender_name} calling from the UGC team. How are you?",
-                "needs_assessment": "To make sure I respect your time, could you tell me a bit about your current content goals?",
-                "value_proposition": "Got it. Our UGC service helps businesses like yours boost trust and conversions with authentic content. How does that sound?",
-                "addressing_hesitancy": "I understand. What are your main concerns right now?",
-                "objection_handling": "That's a fair point. Let me clarify how we address that...",
-                "closing": "Based on what you've shared, it sounds like our $7000 package could be a great fit. Are you ready to move forward?",
-                "finalizing": "Excellent. I'll confirm the details for the $7000 package and outline the next steps.",
-                "end_call": "Okay, thank you for your time. Have a great day. Goodbye."
+                "greeting": f"Hi {client_first_name}, this is {sender_name} with Nolli's AI Sales System. How are you today?",
+                "needs_assessment": "To make sure I understand your needs, could you share a bit about your current goals for content and marketing?",
+                "value_proposition": "Based on that, our AI-assisted UGC service is designed to help businesses like yours create authentic content that really connects with audiences and drives results. Does that sound interesting?",
+                "addressing_hesitancy": "I understand. Could you tell me a bit more about what's giving you pause?",
+                "objection_handling": "That's a valid point. Let me offer some clarification on that...",
+                "closing": f"It sounds like our $${self.internal_state['base_ugc_price']} package could significantly help you achieve your goals. What would be the best way to move forward with this?",
+                "finalizing": f"Excellent! I'll confirm the details for our $${self.internal_state['base_ugc_price']} package and then we can discuss the next steps for getting you started.",
+                "end_call": "Alright, thank you for your time. Have a great day. Goodbye."
             }
-            agent_response = fallback_responses.get(state, "Apologies, I'm having a slight technical issue. Could you please repeat that?")
+            agent_response = fallback_responses.get(state, "I'm sorry, I seem to be having a momentary issue. Could you please repeat what you just said?")
         return agent_response
 
     # --- TTS & Database Methods ---
 
     async def speak_response(self, text: str, call_sid: str):
-        """Convert text to speech using Deepgram Aura TTS and deliver via Twilio."""
-        if not text: self.logger.warning(f"Attempted to speak empty text for call {call_sid}."); return
+        """Convert text to speech using Deepgram Aura TTS (RESTful stream) and deliver via Twilio."""
+        if not text:
+            self.logger.warning(f"Attempted to speak empty text for call {call_sid}.")
+            return
         self.logger.debug(f"Synthesizing speech for call {call_sid}: '{text[:100]}...'")
         try:
-            options = SpeakOptions(model=self.internal_state['aura_voice'], encoding="mulaw", container="wav", sample_rate=8000)
-            speak_client: DeepgramSpeakClient = self.deepgram_client.speak
-            async with speak_client.stream({"text": text}, options) as streamer:
-                audio_data = await streamer.read()
-                if not audio_data: raise DeepgramError("Failed to get audio data from Deepgram stream.")
+            tts_options = SpeakOptions(
+                model=self.internal_state['aura_voice'],
+                encoding="mulaw",       # Required by Twilio <Stream> for raw playback if not playing a file URL
+                sample_rate=8000,       # Required by Twilio <Stream>
+                container="wav"         # Deepgram will provide raw mulaw if encoding is mulaw and container not specified or wav
+                                        # If Twilio <Play> tag is used with a URL, it can handle various formats.
+                                        # If Twilio <Stream><Play> with direct bytes, it might need raw mulaw.
+                                        # The orchestrator's host_temporary_audio likely expects a standard format like WAV/MP3.
+                                        # Let's assume host_temporary_audio makes it a .wav and Twilio <Play> URL is used.
+                                        # If orchestrator directly streams bytes to Twilio, then raw mulaw without container is fine.
+            )
+            # Using Deepgram's RESTful streaming TTS
+            response = await self.deepgram_client.speak.rest.v("1").stream(
+                {"text": text},
+                tts_options
+            )
+
+            audio_data_chunks = []
+            async for chunk in response.stream:
+                audio_data_chunks.append(chunk)
+            audio_data = b"".join(audio_data_chunks)
+
+            if not audio_data:
+                raise DeepgramError("Failed to get audio data from Deepgram stream.")
 
             if hasattr(self.orchestrator, 'host_temporary_audio'):
-                audio_url = await self.orchestrator.host_temporary_audio(audio_data, f"{call_sid}_{int(time.time())}.wav")
-                if not audio_url: raise RuntimeError("Failed to host temporary audio via Orchestrator")
-            else: raise NotImplementedError("Audio hosting mechanism not available via Orchestrator.")
+                # Assuming host_temporary_audio saves the data as a .wav or .mp3 file and returns a URL
+                # The filename needs an extension for proper MIME type handling by web servers.
+                audio_filename = f"{call_sid}_{int(time.time())}.wav" # Use .wav if mulaw in wav container
+                audio_url = await self.orchestrator.host_temporary_audio(audio_data, audio_filename)
+                if not audio_url:
+                    raise RuntimeError("Failed to host temporary audio via Orchestrator")
+            else:
+                raise NotImplementedError("Audio hosting mechanism not available via Orchestrator.")
 
             self.logger.debug(f"Synthesized audio URL for {call_sid}: {audio_url}")
-            twiml = f"<Response><Play>{audio_url}</Play></Response>"
+            twiml = f"<Response><Play>{audio_url}</Play></Response>" # Using <Play> with the URL
             await asyncio.to_thread(self.twilio_client.calls(call_sid).update, twiml=twiml)
             self.logger.info(f"Instructed Twilio to speak response for call {call_sid}")
-        except DeepgramError as e: self.logger.error(f"Deepgram TTS failed for call {call_sid}: {e}", exc_info=True); raise
-        except TwilioException as e: self.logger.error(f"Twilio call update failed for call {call_sid}: {e}", exc_info=True); raise
-        except Exception as e: self.logger.error(f"Unexpected error in speak_response for call {call_sid}: {e}", exc_info=True); raise
+
+        except DeepgramError as e:
+            self.logger.error(f"Deepgram TTS failed for call {call_sid}: {e}", exc_info=True)
+            raise
+        except TwilioException as e:
+            self.logger.error(f"Twilio call update failed for call {call_sid}: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error in speak_response for call {call_sid}: {e}", exc_info=True)
+            raise
+
 
     async def store_call_log(self, client: Client, conversation_log: List[Dict], outcome: str, call_sid: str):
         """Persist final call logs with metadata from Twilio."""
@@ -697,14 +780,16 @@ class VoiceSalesAgent(GeniusAgentBase):
                 if recordings:
                     # Twilio recording URIs are relative, need base
                     media_url_path = getattr(recordings[0], 'uri', None) # Get URI of the first recording
-                    if media_url_path and media_url_path.endswith('.json'): media_url_path = media_url_path[:-5]
+                    if media_url_path and media_url_path.endswith('.json'): media_url_path = media_url_path[:-5] # Remove .json suffix
                     if media_url_path: recording_url = f"https://api.twilio.com{media_url_path}"; self.logger.info(f"Found recording: {recording_url}")
             except TwilioRestException as rec_err:
                 if rec_err.status == 404: logger.info(f"No recordings found for call {call_sid}.")
                 else: logger.warning(f"Could not fetch recordings for {call_sid}: {rec_err}")
             except Exception as rec_err_gen: logger.error(f"Unexpected error fetching recordings for {call_sid}: {rec_err_gen}")
 
-        except TwilioException as e: logger.warning(f"Could not fetch final Twilio call details for {call_sid}: {e}")
+        except TwilioRestException as e:
+            if e.status == 404: logger.warning(f"Could not fetch final Twilio call details for {call_sid} (404 - Not Found): {e}")
+            else: logger.warning(f"Could not fetch final Twilio call details for {call_sid}: {e}")
         except Exception as e: logger.error(f"Unexpected error fetching Twilio details for {call_sid}: {e}", exc_info=True)
 
         try:
@@ -785,7 +870,7 @@ class VoiceSalesAgent(GeniusAgentBase):
     async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
         """Constructs context-rich prompts for LLM calls, including needs and enriched data."""
         self.logger.debug(f"Generating dynamic prompt for VoiceAgent task: {task_context.get('task')}")
-        prompt_parts = [self.meta_prompt]
+        prompt_parts = [self.meta_prompt.format(self=self)] # Format self.internal_state parts
         prompt_parts.append("\n--- Current Task Context ---")
         # Prioritize certain keys for clarity
         priority_keys = ['task', 'current_call_state', 'client_info', 'discovered_needs', 'enriched_data', 'conversation_history', 'instructions']
@@ -793,7 +878,7 @@ class VoiceSalesAgent(GeniusAgentBase):
             if key in task_context:
                 value = task_context[key]
                 value_str = ""; max_len = 1500
-                if key in ['conversation_history', 'enriched_data', 'discovered_needs']: max_len = 2500 # Allow more context
+                if key in ['conversation_history', 'enriched_data', 'discovered_needs', 'meta_prompt']: max_len = 3500 # Allow more context for these
                 if isinstance(value, str): value_str = value[:max_len] + ("..." if len(value) > max_len else "")
                 elif isinstance(value, (int, float, bool)): value_str = str(value)
                 elif isinstance(value, (dict, list)):
@@ -810,7 +895,7 @@ class VoiceSalesAgent(GeniusAgentBase):
             except TypeError: prompt_parts.append(str(other_params)[:500] + "...")
 
         # Instructions are now part of the task_context if provided by the calling method
-        if "instructions" not in task_context:
+        if "instructions" not in task_context: # Fallback instructions if not explicitly set by caller
             prompt_parts.append("\n--- Instructions ---")
             task_type = task_context.get('task')
             if task_type == 'Interpret client intent AND extract needs':
@@ -826,10 +911,11 @@ class VoiceSalesAgent(GeniusAgentBase):
             prompt_parts.append(f"\n**Output Format:** {task_context['desired_output_format']}")
             if "JSON" in task_context.get('desired_output_format', ''):
                 prompt_parts.append("\nRespond ONLY with valid JSON matching the specified format. Do not include explanations or markdown formatting outside the JSON structure.")
-                prompt_parts.append("```json")
+                prompt_parts.append("```json") # Ensure this is closed if LLM is expected to complete the JSON block
 
         final_prompt = "\n".join(prompt_parts)
         self.logger.debug(f"Generated dynamic prompt for VoiceSalesAgent (length: {len(final_prompt)} chars)")
+        # self.logger.debug(f"FULL PROMPT:\n{final_prompt}") # Uncomment for full prompt debugging
         return final_prompt
 
     async def collect_insights(self) -> Dict[str, Any]:
