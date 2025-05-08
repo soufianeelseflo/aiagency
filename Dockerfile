@@ -1,6 +1,6 @@
 # Filename: Dockerfile
 # Description: Dockerfile for deploying the Nolli AI Sales System (Level 50+ ready)
-# Version: 1.2 (PYTHONPATH strategy for module resolution)
+# Version: 1.3 (Ultimate Debug CMD for Python Env/Module Check)
 
 # --- Base Image ---
 FROM python:3.11-slim
@@ -36,32 +36,28 @@ RUN apt-get update && \
 COPY requirements.txt .
 
 # Install dependencies into the dedicated /app/deps directory
-# Using --target ensures they are placed here, separate from system site-packages
 RUN pip install --no-cache-dir --upgrade pip && \
   pip install --no-cache-dir --target=/app/deps -r requirements.txt
 
 # --- Install Playwright Browsers ---
-# This should still work fine, installs browsers globally based on PLAYWRIGHT_BROWSERS_PATH
 RUN playwright install chromium --with-deps
 
 # --- Application Code ---
-# Copy application code AFTER dependencies are installed
 COPY . .
 
 # --- Create necessary directories ---
-# Ensure directories exist and are writable by the container process
 RUN mkdir -p /app/logs /app/temp_audio /app/temp_downloads /app/learning_for_AI && \
   chmod -R 777 /app/logs /app/temp_audio /app/temp_downloads
-# Note: 777 is permissive, consider a non-root user and specific ownership for production hardening later.
 
 # --- Expose Port ---
 EXPOSE 5000
 
 # --- Healthcheck ---
-# This should work once the application starts correctly
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl --fail --silent --show-error http://localhost:5000/ || exit 1
+# Still useful to see if the container stays up long enough for the debug CMD
+# Modify to just check if the container is running initially
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD exit 0
 
-# --- Start Command ---
-# Use the absolute path AND rely on PYTHONPATH set via ENV to find modules in /app/deps
-CMD ["/usr/local/bin/python", "-m", "quart", "run", "--host", "0.0.0.0", "--port", "5000", "--no-reload"]
+# --- Start Command (ULTIMATE DEBUG) ---
+# This command checks PYTHONPATH, sys.path, site-packages, and tries to find the 'quart' module spec directly.
+CMD ["/usr/local/bin/python", "-c", "import os, sys, site, importlib.util; print('---ENV PYTHONPATH---'); print(os.environ.get('PYTHONPATH')); print('---SYS EXECUTABLE---'); print(sys.executable); print('---SYS PATH---'); print(sys.path); print('---SITE PACKAGES---'); print(site.getsitepackages()); print('---FINDING QUART SPEC---'); spec = importlib.util.find_spec('quart'); print(f'Quart Spec Found: {spec is not None}'); print(f'Quart Spec Origin: {spec.origin if spec else None}'); exit(0 if spec else 1)"]
