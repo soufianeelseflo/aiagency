@@ -1,6 +1,6 @@
 # Filename: agents/legal_agent.py
 # Description: Genius Agentic Legal/Strategic Advisor - Compliance, Grey Area Exploitation, User Education.
-# Version: 3.2 (Strategic Focus, User Education, Rule Bending)
+# Version: 3.3 (Refined Invoice Note, Assumes W8 Access via Config)
 
 import asyncio
 import logging
@@ -9,6 +9,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple, Union, Type
+from urllib.parse import urljoin # Added for fetch_legal_updates
 
 # --- Core Framework Imports ---
 import aiohttp
@@ -23,17 +24,47 @@ try:
     from agents.base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
 except ImportError:
     logging.warning("Production base agent not found, using GeniusAgentBase.")
-    from agents.base_agent import GeniusAgentBase # Use relative import
+    # Define a dummy base class if the real one isn't found
+    class GeniusAgentBase:
+        AGENT_NAME = "DummyBaseAgent"; STATUS_IDLE="idle"; STATUS_EXECUTING="executing"; STATUS_ERROR="error"; STATUS_RUNNING="running"; STATUS_STOPPING="stopping"; STATUS_STOPPED="stopped"
+        def __init__(self, *args, **kwargs):
+            self.agent_name = self.AGENT_NAME; self.logger = logging.getLogger(f"agent.{self.agent_name}")
+            self.orchestrator = kwargs.get('orchestrator'); self.config = kwargs.get('config'); self.session_maker = kwargs.get('session_maker')
+            self._stop_event = asyncio.Event(); self._status = self.STATUS_IDLE
+        async def _internal_think(self, *args, **kwargs): pass
+        async def _report_error(self, *args, **kwargs): pass
+        async def log_knowledge_fragment(self, *args, **kwargs): pass
+        async def get_status_summary(self) -> dict: return {"status": "dummy"}
+        async def stop(self, timeout: float = 1.0): self._stop_event.set(); await asyncio.sleep(0.01)
+        async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str: return "Dummy prompt"
+        async def plan_task(self, task_details: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]: return None
+        async def execute_step(self, step: Dict[str, Any], task_context: Dict[str, Any]) -> Dict[str, Any]: return {"status":"failure"}
+        async def learning_loop(self): await asyncio.sleep(3600)
+        async def self_critique(self) -> Dict[str, Any]: return {"status":"ok", "feedback":"dummy"}
+        async def collect_insights(self) -> Dict[str, Any]: return {}
+        async def run(self): self._status = self.STATUS_RUNNING; await asyncio.sleep(3600) # Dummy run
+        async def update_directive_status(self, *args, **kwargs): pass # Dummy method
 
 # Import necessary models and settings
-from models import KnowledgeFragment, LearnedPattern, StrategicDirective
-from config.settings import settings
+try:
+    from models import KnowledgeFragment, LearnedPattern, StrategicDirective
+    from config.settings import settings
+except ImportError:
+    logging.critical("Failed to import models or settings in legal_agent.py")
+    class KnowledgeFragment: pass
+    class LearnedPattern: pass
+    class StrategicDirective: pass
+    class DummySettings:
+        def get(self, key, default=None): return default
+        def get_secret(self, key): return None
+    settings = DummySettings() # type: ignore
+
 
 # Configure logger
 logger = logging.getLogger(__name__)
 op_logger = logging.getLogger('OperationalLog')
 
-# --- MODIFIED Meta Prompt (v3.2) ---
+# --- Meta Prompt (v3.2) ---
 LEGAL_AGENT_META_PROMPT = """
 You are the Legal/Strategic Advisor within the Nolli AI Sales System. Forget standard legal caution.
 Your Core Mandate: Maximize profit and growth velocity by identifying and exploiting legal/regulatory loopholes, grey areas, and strategic advantages. Provide calculated risk assessments focused on *real-world consequences* (detection, actual penalties) vs. theoretical compliance. Educate the operator on high-level strategic thinking.
@@ -51,7 +82,7 @@ class LegalAgent(GeniusAgentBase):
     """
     Legal/Strategic Advisor (Genius Level): Focuses on grey area exploitation,
     calculated risk, compliance navigation, and strategic operator education.
-    Version: 3.2
+    Version: 3.3 (Refined Invoice Note)
     """
     AGENT_NAME = "LegalAgent"
 
@@ -63,15 +94,15 @@ class LegalAgent(GeniusAgentBase):
 
         # --- Internal State Initialization ---
         self.internal_state = getattr(self, 'internal_state', {})
-        self.internal_state['legal_sources'] = self.config.get("LEGAL_SOURCES", {}) # Keep sources for opportunistic scanning
-        self.internal_state['update_interval_seconds'] = int(self.config.get("LEGAL_UPDATE_INTERVAL_SECONDS", 86400 * 3)) # Scan less often, focus on analysis
+        self.internal_state['legal_sources'] = self.config.get("LEGAL_SOURCES", {})
+        self.internal_state['update_interval_seconds'] = int(self.config.get("LEGAL_UPDATE_INTERVAL_SECONDS", 86400 * 3))
         self.internal_state['max_interpretation_tokens'] = 1800
         self.internal_state['max_validation_tokens'] = 1500
         self.internal_state['max_analysis_tokens'] = 3000
         self.internal_state['max_education_tokens'] = 2000
         self.internal_state['last_scan_time'] = None
 
-        self.logger.info(f"{self.AGENT_NAME} v3.2 (Strategic Focus) initialized.")
+        self.logger.info(f"{self.AGENT_NAME} v3.3 (Refined Invoice Note) initialized.")
 
     async def log_operation(self, level: str, message: str):
         """Helper to log to the operational log file."""
@@ -107,15 +138,13 @@ class LegalAgent(GeniusAgentBase):
                 return result # Return directly
             elif action == "get_invoice_note":
                  country = task_details.get('client_country')
-                 if not country: raise ValueError("Missing 'client_country' for get_invoice_note")
+                 # Country might not be strictly needed for the revised note, but keep param for potential future logic
                  note = await self.get_invoice_legal_note(country)
                  findings = {"invoice_note": note}
-            # --- ADDED: Handle Strategic Education Task ---
             elif action == "generate_strategic_education":
                  topic = task_details.get('content', {}).get('topic', 'General Business Strategy')
                  context = task_details.get('content', {}).get('context', None)
                  findings = await self._generate_strategic_education(topic, context)
-            # --- END ADDED ---
             else:
                 raise ValueError(f"Unknown legal/strategic action: {action}")
 
@@ -141,10 +170,10 @@ class LegalAgent(GeniusAgentBase):
 
     async def _analyze_initial_structure(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
         """Researches and recommends optimal initial corporate structure focusing on profit/protection."""
+        # (Implementation remains the same as v3.2)
         business_context = task_details.get("business_context", "AI UGC Agency targeting US/Global clients.")
         self.logger.info(f"Analyzing optimal initial corporate structure for context: {business_context}")
         await self._internal_think("Querying KB for structure analyses (Wyoming, Delaware, Offshore?) and tax/liability/asset protection regulations.")
-        # Broaden search tags
         kb_context_frags = await self.query_knowledge_base(data_types=['legal_analysis', 'regulation_summary', 'grey_area_analysis'], tags=['corporate_structure', 'llc', 'tax_haven', 'asset_protection', 'liability_shield', 'wyoming', 'delaware', 'offshore'], limit=15)
         kb_context_str = "\n".join([f"- {f.data_type} (ID {f.id}): {f.content[:150]}..." for f in kb_context_frags])
         task_context = {
@@ -164,7 +193,6 @@ class LegalAgent(GeniusAgentBase):
             if not analysis_result.get("recommendations") or not analysis_result.get("final_recommendation"): raise ValueError("LLM response missing required keys.")
             await self._internal_think(f"Storing structure analysis result in KB. Recommendation: {analysis_result.get('final_recommendation', {}).get('structure')} in {analysis_result.get('final_recommendation', {}).get('jurisdiction')}")
             await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="legal_analysis", content=analysis_result, tags=["corporate_structure", "initial_setup", "asset_protection", "tax_efficiency"] + [rec.get('jurisdiction', '').lower() for rec in analysis_result.get('recommendations', [])], relevance_score=0.9)
-            # Trigger User Education
             if hasattr(self.orchestrator, 'handle_user_education_trigger'):
                  edu_topic = f"Initial Structure Rec: {analysis_result['final_recommendation']['structure']} in {analysis_result['final_recommendation']['jurisdiction']}"
                  edu_context = analysis_result['final_recommendation']['rationale']
@@ -174,6 +202,7 @@ class LegalAgent(GeniusAgentBase):
 
     async def _analyze_grey_area(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
         """Performs deep analysis of a specific potential grey area strategy, focusing on exploitability."""
+        # (Implementation remains the same as v3.2)
         area = task_details.get("area", "Unspecified grey area opportunity")
         context = task_details.get("context", "Evaluate for AI UGC Agency operations.")
         self.logger.info(f"Analyzing grey area opportunity: {area}")
@@ -194,7 +223,6 @@ class LegalAgent(GeniusAgentBase):
             if not analysis_result.get("strategy_overview") or not analysis_result.get("risk_assessment"): raise ValueError("LLM response missing required keys.")
             await self._internal_think(f"Storing grey area analysis for '{area}' in KB. Recommendation: {analysis_result.get('overall_recommendation', 'N/A')}")
             await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="grey_area_analysis", content=analysis_result, tags=["grey_area", "legal_analysis", "risk_assessment", "exploit"] + area.lower().split(), relevance_score=analysis_result.get("risk_assessment", {}).get("legal_opinion_confidence", 0.7))
-            # Trigger directive based on recommendation
             recommendation = analysis_result.get('overall_recommendation', '').lower()
             if "exploit" in recommendation:
                  async with self.session_maker() as session:
@@ -204,19 +232,17 @@ class LegalAgent(GeniusAgentBase):
             return analysis_result
         except (json.JSONDecodeError, ValueError, KeyError) as e: raise RuntimeError(f"LLM response parsing failed for grey area analysis: {e}. Response: {llm_response_json[:500]}")
 
-    # --- ADDED: Strategic Education Method ---
     async def _generate_strategic_education(self, topic: str, context: Optional[str] = None) -> Dict[str, Any]:
         """Generates concise, actionable strategic education for the operator."""
+        # (Implementation remains the same as v3.2)
         self.logger.info(f"Generating strategic education on topic: {topic}")
         await self._internal_think(f"Querying KB for insights related to strategic topic: {topic}")
-        # Fetch relevant patterns, analyses, high-level learning materials
         kb_context_frags = await self.query_knowledge_base(
             data_types=['learned_pattern', 'legal_analysis', 'grey_area_analysis', 'learning_material_summary'],
             tags=['strategy', 'business', 'profit', 'risk', 'negotiation', 'market_dynamics'] + topic.lower().split(),
             limit=15, min_relevance=0.6
         )
         kb_context_str = "\n".join([f"- {f.data_type} (ID {f.id}, Rel {f.relevance_score:.2f}): {f.content[:150]}..." for f in kb_context_frags])
-
         task_context = {
             "task": "Generate Strategic Education Briefing",
             "topic": topic,
@@ -234,7 +260,7 @@ class LegalAgent(GeniusAgentBase):
         prompt = await self.generate_dynamic_prompt(task_context)
         await self._internal_think(f"Calling LLM for strategic education on: {topic}")
         llm_response_json = await self._call_llm_with_retry(
-            prompt, model=self.config.OPENROUTER_MODELS.get('think_general'), # Use a general reasoning model
+            prompt, model=self.config.OPENROUTER_MODELS.get('think_general'),
             max_tokens=self.internal_state['max_education_tokens'], is_json_output=True, temperature=0.6
         )
         if not llm_response_json: raise RuntimeError("LLM call failed for strategic education.")
@@ -247,16 +273,15 @@ class LegalAgent(GeniusAgentBase):
                 content=education_result, tags=["education", "strategy", "business", "profit_maximization"] + topic.lower().split(),
                 relevance_score=0.9
             )
-            # Optionally notify user via Orchestrator that education is ready
             if hasattr(self.orchestrator, 'send_notification'):
                  await self.orchestrator.send_notification(f"Strategic Briefing Ready: {topic}", education_result.get("key_takeaway"))
             return education_result
         except (json.JSONDecodeError, ValueError, KeyError) as e: raise RuntimeError(f"LLM response parsing failed for education: {e}. Response: {llm_response_json[:500]}")
-    # --- END ADDED ---
 
     # --- Monitoring & Interpretation ---
     async def _scan_for_updates(self, task_details: Dict[str, Any]) -> Dict[str, Any]:
         """Fetches and interprets legal updates, focusing on opportunities."""
+        # (Implementation remains the same as v3.2)
         await self._internal_think("Starting legal update scan: Fetching sources.")
         updates = await self.fetch_legal_updates()
         if not updates: return {"status": "success", "message": "No new updates found or sources unavailable.", "interpretations": []}
@@ -268,6 +293,7 @@ class LegalAgent(GeniusAgentBase):
 
     async def fetch_legal_updates(self) -> Dict[str, List[Tuple[str, str]]]:
         """Asynchronously fetch legal update titles/links from configured sources."""
+        # (Implementation remains the same as v3.2)
         updates: Dict[str, List[Tuple[str, str]]] = {}; sources = self.internal_state.get('legal_sources', {})
         if not sources: self.logger.warning("No legal sources configured."); return updates
         async with aiohttp.ClientSession() as session:
@@ -275,12 +301,15 @@ class LegalAgent(GeniusAgentBase):
             results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
             for result in results:
                 if isinstance(result, Exception): self.logger.error(f"Error fetching legal source: {result}")
-                elif result: country, country_updates = result;
-                if country not in updates: updates[country] = []; updates[country].extend(country_updates)
+                elif result:
+                    country, country_updates = result
+                    if country not in updates: updates[country] = []
+                    updates[country].extend(country_updates) # Corrected append logic
         total_fetched = sum(len(v) for v in updates.values()); self.logger.info(f"Fetched {total_fetched} potential update titles/links from {len(sources)} sources."); return updates
 
     async def _fetch_single_source(self, session: aiohttp.ClientSession, country: str, url: str) -> Optional[Tuple[str, List[Tuple[str, str]]]]:
         """Fetches and parses titles/links from a single URL using proxy."""
+        # (Implementation remains the same as v3.2)
         self.logger.debug(f"Fetching updates from: {url} ({country})")
         try:
             proxy_info = await self.orchestrator.get_proxy(purpose="legal_scan", target_url=url) # Request proxy
@@ -292,19 +321,24 @@ class LegalAgent(GeniusAgentBase):
                 html = await response.text(); soup = BeautifulSoup(html, "html.parser"); country_updates = []
                 # Add specific parsing logic per source type...
                 if "federalregister.gov" in url:
-                    for item in soup.select('div.document-listing h5 a[href^="/documents/"]'): title = item.text.strip(); link = item.get('href');
-                    if title and link: country_updates.append((title, urljoin(response.url.human_repr(), link))) # Use urljoin
+                    for item in soup.select('div.document-listing h5 a[href^="/documents/"]'):
+                        title = item.text.strip(); link = item.get('href')
+                        if title and link: country_updates.append((title, urljoin(str(response.url), link))) # Use urljoin
                 elif "sgg.gov.ma" in url:
-                     for item in soup.select('td.views-field-title a[href*="bulletin"]'): title = item.text.strip(); link = item.get('href');
-                     if title and link: country_updates.append((title, urljoin(response.url.human_repr(), link)))
+                     for item in soup.select('td.views-field-title a[href*="bulletin"]'):
+                         title = item.text.strip(); link = item.get('href')
+                         if title and link: country_updates.append((title, urljoin(str(response.url), link)))
                 else: # Generic fallback
-                     for a in soup.find_all('a', href=True): title = a.text.strip(); link = a['href'];
-                     if title and len(title) > 10 and (link.startswith('http') or link.startswith('/')): country_updates.append((title, urljoin(response.url.human_repr(), link)))
+                     for a in soup.find_all('a', href=True):
+                         title = a.text.strip(); link = a['href']
+                         if title and len(title) > 10 and (link.startswith('http') or link.startswith('/')):
+                             country_updates.append((title, urljoin(str(response.url), link)))
                 self.logger.debug(f"Found {len(country_updates)} potential items from {url}"); return country, country_updates[:50]
         except Exception as e: self.logger.error(f"Error fetching/parsing {url}: {e}", exc_info=False); return None
 
     async def interpret_updates(self, updates: Dict[str, List[Tuple[str, str]]]) -> List[Dict[str, Any]]:
         """Interpret fetched legal update titles/links using LLM, focusing on opportunities."""
+        # (Implementation remains the same as v3.2)
         interpretations = [];
         if not updates: return interpretations
         texts_to_process = [(c, t, u) for c, items in updates.items() for t, u in items if t and len(t) > 10]
@@ -334,6 +368,7 @@ class LegalAgent(GeniusAgentBase):
     # --- Validation ---
     async def validate_operation(self, operation_description: str) -> dict:
         """Validate operations focusing on real-world risk vs. profit."""
+        # (Implementation remains the same as v3.2)
         self.logger.info(f"Validating operation (Strategic Focus): {operation_description[:100]}...")
         fallback_result = {'status': 'failure', 'message': 'Validation failed', 'findings': {'is_compliant': False, 'risk_level_realistic': 'Critical', 'showstopper_issues': ['Analysis Error'], 'proceed_recommendation': 'Halt - Analysis Failed'}}
         try:
@@ -353,32 +388,27 @@ class LegalAgent(GeniusAgentBase):
             if not validation_result_json: raise Exception("LLM call for validation returned empty.")
             try:
                 findings = self._parse_llm_json(validation_result_json)
-                # Add default values for robustness
                 findings.setdefault('is_compliant_strict', False); findings.setdefault('risk_level_realistic', 'Critical')
                 findings.setdefault('showstopper_issues', ['Analysis Failed']); findings.setdefault('grey_area_assessment', 'N/A')
                 findings.setdefault('realistic_consequences', []); findings.setdefault('mitigation_options', [])
                 findings.setdefault('proceed_recommendation', 'Halt - Analysis Failed')
                 self.logger.info(f"Strategic Validation: CompliantStrict={findings['is_compliant_strict']}, RiskRealistic={findings['risk_level_realistic']}, Recommendation={findings['proceed_recommendation']}")
                 await self.log_knowledge_fragment(agent_source=self.AGENT_NAME, data_type="operation_validation", content=findings, tags=["validation", "risk_assessment", findings['risk_level_realistic'].lower()], relevance_score=0.85, source_reference=f"Operation: {operation_description[:50]}...")
-                # Trigger notifications based on risk/compliance (Adjust logic)
                 if findings['risk_level_realistic'] in ['High', 'Critical'] or "halt" in findings['proceed_recommendation'].lower():
                      await self.orchestrator.send_notification(f"Risk Alert: {findings['risk_level_realistic']}", f"Operation HALTED/High-Risk: {operation_description[:100]}... Issues: {findings['showstopper_issues']}, Risk: {findings['risk_level_realistic']}")
                 elif findings['risk_level_realistic'] == 'Medium' or findings.get('mitigation_options'):
                      await self.orchestrator.send_notification("Strategic Advisory", f"Operation: {operation_description[:100]}... Risk: {findings['risk_level_realistic']}. Mitigation: {findings['mitigation_options']}")
-                # Modify the returned 'is_compliant' field based on the recommendation for other agents
                 findings['is_compliant'] = "halt" not in findings['proceed_recommendation'].lower() # Simplified go/no-go for other agents
                 return {"status": "success", "message": "Validation complete.", "findings": findings}
             except (json.JSONDecodeError, ValueError, KeyError) as e: raise RuntimeError(f"LLM validation response parsing failed: {e}. Response: {validation_result_json[:500]}")
         except Exception as e:
             self.logger.error(f"{self.AGENT_NAME}: Error during validate_operation: {e}", exc_info=True)
             await self._report_error(f"Validation failed: {e}")
-            # Ensure fallback includes the 'is_compliant' key expected by callers
             fallback_result['findings']['is_compliant'] = False
             return fallback_result
 
     # --- Utility Methods ---
-    # In agents/legal_agent.py
-
+    # MODIFIED: v3.3 - Refined legal note to reference MSA instead of explicit jurisdiction
     async def get_invoice_legal_note(self, client_country: Optional[str] = None) -> str:
         """
         Generates a strategically worded, professional legal note for invoices.
@@ -389,6 +419,8 @@ class LegalAgent(GeniusAgentBase):
         # Fetch necessary details (assuming they are configured)
         sender_name = self.config.get('SENDER_NAME', 'Nolli Agency') # Use configured name
         bank_account_info = self.config.get('MOROCCAN_BANK_ACCOUNT', '[Configure Bank Details]')
+        # W8 details (Name, Country) are available via self.config.get but omitted from note text
+        # W8 Address/TIN are also available via self.config but not used in this note
 
         # --- Revised Pro-Agency Terms (Less Specific Jurisdiction on Invoice) ---
         # Focus: Finality, Non-Refundable, Limited Liability, Reference to Agreement
@@ -408,7 +440,7 @@ class LegalAgent(GeniusAgentBase):
 
     def _parse_llm_json(self, json_string: str, expect_type: Type = dict) -> Union[Dict, List, None]:
         """Safely parses JSON from LLM output, handling markdown code blocks."""
-        # ... (Implementation remains the same as v5.6) ...
+        # (Implementation remains the same as v3.2)
         if not json_string: return None
         try:
             match = None; start_char, end_char = '{', '}'
@@ -434,6 +466,7 @@ class LegalAgent(GeniusAgentBase):
     # --- Abstract Method Implementations ---
     async def learning_loop(self):
         """Periodic loop to scan for legal updates impacting strategy."""
+        # (Implementation remains the same as v3.2)
         self.logger.info(f"{self.AGENT_NAME} learning loop started (Opportunistic Scan).")
         while not self._stop_event.is_set():
             try:
@@ -450,17 +483,15 @@ class LegalAgent(GeniusAgentBase):
 
     async def self_critique(self) -> Dict[str, Any]:
         """Evaluates the agent's effectiveness in strategic guidance and risk assessment."""
+        # (Implementation remains the same as v3.2)
         self.logger.info(f"{self.AGENT_NAME}: Performing self-critique.")
         critique = {"status": "ok", "feedback": "Critique pending analysis."}
-        # Focus critique on strategic value provided, not just activity counts
-        # TODO: Query KB for recent grey_area_analysis, operation_validation with 'Proceed' recommendations
-        # TODO: Query KB for strategic_education fragments generated
-        # TODO: LLM analysis: "Based on recent validations and grey area analyses, assess the effectiveness and risk balance of LegalAgent's recommendations. Identify areas for more aggressive or cautious approaches."
         critique['feedback'] = "Strategic effectiveness critique not fully implemented. Review KB manually."
         return critique
 
     async def generate_dynamic_prompt(self, task_context: Dict[str, Any]) -> str:
         """Constructs context-rich prompts for LLM calls, emphasizing strategic goals."""
+        # (Implementation remains the same as v3.2)
         self.logger.debug(f"Generating dynamic prompt for LegalAgent task: {task_context.get('task')}")
         prompt_parts = [self.meta_prompt] # Use the updated meta prompt
         prompt_parts.append("\n--- Current Task Context ---")
@@ -478,7 +509,6 @@ class LegalAgent(GeniusAgentBase):
 
         prompt_parts.append("\n--- Instructions ---")
         task_type = task_context.get('task')
-        # Add specific instructions based on task_type (Reflecting new focus)
         if task_type == 'Analyze and recommend optimal initial corporate structure for MAX PROFIT & ASSET PROTECTION':
             prompt_parts.append("1. Analyze pros/cons/risks for Wyoming LLC, Delaware LLC, and relevant Offshore options.")
             prompt_parts.append("2. Prioritize: Minimal Tax, Strong Asset Protection, Privacy, Low Hassle, Grey Area Enablement.")
@@ -509,7 +539,7 @@ class LegalAgent(GeniusAgentBase):
 
     async def collect_insights(self) -> Dict[str, Any]:
         """Collects insights about legal task performance."""
-        # Keep implementation simple for now
+        # (Implementation remains the same as v3.2)
         insights = { "agent_name": self.AGENT_NAME, "status": self.status, "timestamp": datetime.now(timezone.utc).isoformat(), "last_scan_time": self.internal_state.get('last_scan_time'), "key_observations": ["Basic status collected."] }
         return insights
 
@@ -530,4 +560,23 @@ class LegalAgent(GeniusAgentBase):
          if self.think_tool and hasattr(self.think_tool, 'get_latest_patterns'): return await self.think_tool.get_latest_patterns(*args, **kwargs)
          else: self.logger.error("ThinkTool unavailable for getting latest patterns."); return []
 
-# --- End of agents/legal_agent.py ---  
+    # --- Utility Methods ---
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=2, max=15), retry=retry_if_exception_type(Exception))
+    async def _call_llm_with_retry(self, prompt: str, model: Optional[str] = None, temperature: float = 0.5, max_tokens: int = 1500, is_json_output: bool = False) -> Optional[str]:
+        """Calls the LLM via orchestrator with retry logic."""
+        if not self.orchestrator or not hasattr(self.orchestrator, 'call_llm'):
+            self.logger.error("Orchestrator unavailable or missing call_llm method.")
+            return None
+        try:
+            response_data = await self.orchestrator.call_llm(
+                agent_name=self.AGENT_NAME, prompt=prompt, temperature=temperature,
+                max_tokens=max_tokens, is_json_output=is_json_output,
+                model_preference=[model] if model else None
+            )
+            content = response_data.get('content') if isinstance(response_data, dict) else str(response_data)
+            return content.strip() if content and content.strip() else None
+        except Exception as e:
+            self.logger.warning(f"LLM call failed (attempt): {e}")
+            raise # Reraise to trigger tenacity retry
+
+# --- End of agents/legal_agent.py ---
