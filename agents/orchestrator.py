@@ -1,6 +1,6 @@
 # Filename: agents/orchestrator.py
 # Description: Central coordinator for the AI Agency, managing agents, workflows, resources, and UI backend integration.
-# Version: 4.0 (Level 40+ Transmutation - Enhanced Proxy Mgmt, Webhooks, UI Integration)
+# Version: 4.1 (Level 40+ Transmutation - Removed unused Metric import)
 
 import os
 import asyncio
@@ -64,7 +64,7 @@ except ImportError:
 
 # Import database models
 from models import (
-    Base, Client, Metric, ExpenseLog, MigrationStatus, KnowledgeFragment,
+    Base, Client, ExpenseLog, MigrationStatus, KnowledgeFragment, # <<< REMOVED Metric >>>
     AccountCredentials, CallLog, Invoice, StrategicDirective, PromptTemplate
 )
 
@@ -136,7 +136,7 @@ class Orchestrator:
         self._proxy_lock = asyncio.Lock()
         self._load_initial_proxies() # Load proxies from config on init
 
-        logger.info("Orchestrator v4.0 (L40+ Transmutation) initialized.")
+        logger.info("Orchestrator v4.1 (L40+ - Removed Metric Import) initialized.")
 
     # --- Initialization Methods ---
     async def initialize_database(self):
@@ -266,12 +266,12 @@ class Orchestrator:
         llm_client = await self.get_available_llm_client()
         if not llm_client: logger.error(f"Agent '{agent_name}' failed: Primary LLM client unavailable."); return None
 
-        # Model Selection Logic (remains the same as v3.2)
+        # Model Selection Logic (remains the same as v4.0)
         model_key = "default_llm" # Fallback
         if agent_name == "ThinkTool": model_key = "think_general"
         elif agent_name == "EmailAgent": model_key = "email_draft"
         elif agent_name == "VoiceSalesAgent": model_key = "voice_response"
-        elif agent_name == "LegalAgent": model_key = "legal_analysis" # Changed default for Legal
+        elif agent_name == "LegalAgent": model_key = "legal_analysis"
         elif agent_name == "BrowsingAgent": model_key = "browsing_visual_analysis" if image_data else "browsing_summarize"
         # Task-specific overrides
         task_specific_model_key = None
@@ -474,8 +474,6 @@ class Orchestrator:
                     return jsonify({"status": "error", "message": "Empty payload"}), 400
 
                 # Extract relevant data - structure might vary, adjust based on Clay's actual webhook format
-                # Assume payload contains the enriched data directly or nested under a key like 'results'
-                # Also look for identifying info passed back (e.g., original input, metadata)
                 clay_run_id = payload.get("run_id") # Example field
                 source_reference = payload.get("metadata", {}).get("source_reference") # If you pass metadata
                 original_input = payload.get("input_parameters", {}) # If Clay returns original input
@@ -694,14 +692,12 @@ class Orchestrator:
 
         if user and password and host and port:
             # Assuming a rotating residential setup for this example
-            # Specific endpoint might vary based on location/session type chosen in Decodo dashboard
             proxy_server_url = f"http://{user}:{password}@{host}:{port}"
-            # Add multiple entries if using different session types or locations
             self._proxy_list.append({
-                "server": proxy_server_url, "username": user, "password": password, # Store components if needed later
+                "server": proxy_server_url, "username": user, "password": password,
                 "status": "unknown", "last_used": None, "success_count": 0, "fail_count": 0,
-                "purpose_affinity": ["general", "browsing", "social_media", "account_creation"], # Example affinities
-                "quality_level": "high" # Assume high quality for paid residential
+                "purpose_affinity": ["general", "browsing", "social_media", "account_creation"],
+                "quality_level": "high"
             })
             logger.info(f"Loaded initial Decodo proxy endpoint: {host}:{port}")
         else:
@@ -712,38 +708,17 @@ class Orchestrator:
     async def get_proxy(self, purpose: str = "general", quality_level: str = "standard", target_url: Optional[str] = None, specific_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Gets the best available proxy based on purpose, quality, health, and least recent use."""
         async with self._proxy_lock:
-            if not self._proxy_list:
-                logger.warning(f"No proxies available in the list for purpose '{purpose}'.")
-                return None
-
-            now = time.time()
-            eligible_proxies = []
+            if not self._proxy_list: logger.warning(f"No proxies available for purpose '{purpose}'."); return None
+            now = time.time(); eligible_proxies = []
             for proxy in self._proxy_list:
-                # Filter by status (allow unknown initially)
                 if proxy.get("status") in ["banned", "error"]: continue
-                # Filter by purpose affinity (optional)
                 if purpose != "general" and purpose not in proxy.get("purpose_affinity", ["general"]): continue
-                # Filter by quality (optional)
                 if quality_level == "high" and proxy.get("quality_level") != "high": continue
-                # Add more filters (e.g., region based on specific_hint or target_url)
-
                 eligible_proxies.append(proxy)
-
-            if not eligible_proxies:
-                logger.warning(f"No eligible proxies found for purpose '{purpose}' and quality '{quality_level}'.")
-                return None
-
-            # Sort eligible proxies: Prioritize healthy, then least recently used
-            eligible_proxies.sort(key=lambda p: (
-                0 if p.get("status") == "active" else 1 if p.get("status") == "unknown" else 2, # Healthy first
-                p.get("last_used") or 0 # Least recently used first
-            ))
-
-            selected_proxy = eligible_proxies[0]
-            selected_proxy["last_used"] = now # Optimistically mark as used
+            if not eligible_proxies: logger.warning(f"No eligible proxies found for purpose '{purpose}' and quality '{quality_level}'."); return None
+            eligible_proxies.sort(key=lambda p: ( 0 if p.get("status") == "active" else 1 if p.get("status") == "unknown" else 2, p.get("last_used") or 0 ))
+            selected_proxy = eligible_proxies[0]; selected_proxy["last_used"] = now
             logger.info(f"Selected proxy for purpose '{purpose}': {selected_proxy['server'].split('@')[-1] if '@' in selected_proxy['server'] else 'Direct?'} (Status: {selected_proxy['status']})")
-
-            # Return a copy to avoid modifying the internal state directly outside the lock
             return selected_proxy.copy()
 
     async def report_proxy_status(self, proxy_server_url: str, success: bool):
@@ -758,12 +733,10 @@ class Orchestrator:
                         proxy["status"] = "active"
                     else:
                         proxy["fail_count"] = proxy.get("fail_count", 0) + 1
-                        # Implement logic to mark as 'error' or 'banned' after consecutive failures
                         if proxy["fail_count"] >= 5: # Example threshold
                             proxy["status"] = "error"
                             logger.warning(f"Marking proxy {proxy_server_url.split('@')[-1]} as 'error' after {proxy['fail_count']} consecutive failures.")
-                        else:
-                            proxy["status"] = "unknown" # Revert to unknown after a failure
+                        else: proxy["status"] = "unknown" # Revert to unknown after a failure
                     logger.debug(f"Updated proxy stats for {proxy_server_url.split('@')[-1]}: Success={success}, Status={proxy['status']}")
                     break
 
@@ -774,11 +747,8 @@ class Orchestrator:
             if self.approved and not shutdown_event.is_set():
                 logger.info("Orchestrator triggering periodic proxy health check...")
                 proxies_to_check = []
-                async with self._proxy_lock:
-                    proxies_to_check = [p for p in self._proxy_list if p.get("status") in ["unknown", "error"]]
-
+                async with self._proxy_lock: proxies_to_check = [p for p in self._proxy_list if p.get("status") in ["unknown", "error"]]
                 if not proxies_to_check: logger.info("No proxies require health check."); continue
-
                 logger.info(f"Checking health of {len(proxies_to_check)} proxies...")
                 check_url = "https://ip.decodo.com/json" # Use Decodo's IP check [6]
                 tasks = [self._check_single_proxy(proxy, check_url) for proxy in proxies_to_check]
@@ -790,23 +760,14 @@ class Orchestrator:
         proxy_url = proxy.get("server")
         if not proxy_url: return
         proxy_display = proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url
-
         success = False
         try:
             timeout = aiohttp.ClientTimeout(total=15) # Shorter timeout for health check
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(check_url, proxy=proxy_url, ssl=False) as response: # Use proxy directly
-                    if response.status == 200:
-                        # Optionally check response content for validity
-                        # content = await response.json()
-                        success = True
-                        logger.debug(f"Proxy health check SUCCESS for {proxy_display}")
-                    else:
-                        logger.warning(f"Proxy health check FAILED for {proxy_display}. Status: {response.status}")
-        except Exception as e:
-            logger.warning(f"Proxy health check FAILED for {proxy_display}. Error: {e}")
-
-        # Update status based on check result
+                    if response.status == 200: success = True; logger.debug(f"Proxy health check SUCCESS for {proxy_display}")
+                    else: logger.warning(f"Proxy health check FAILED for {proxy_display}. Status: {response.status}")
+        except Exception as e: logger.warning(f"Proxy health check FAILED for {proxy_display}. Error: {e}")
         await self.report_proxy_status(proxy_url, success)
 
 
