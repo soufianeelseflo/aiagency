@@ -1,6 +1,6 @@
 # Filename: nixpacks.toml
 # Description: Configuration for the Nixpacks build process.
-# Version: 1.0 (Adds required system dependencies for Playwright & Reportlab)
+# Version: 1.1 (Corrected duplicate 'cmds' key under [phases.install])
 
 [phases.setup]
 # Add required system packages using apt for the Ubuntu-based builder
@@ -29,11 +29,8 @@ aptPkgs = [
 ]
 
 [phases.install]
-# Install python packages using pip from requirements.txt
-cmds = ["python -m venv --copies /opt/venv && . /opt/venv/bin/activate && pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt"]
-# Install playwright browsers AFTER pip install
-# Note: Nixpacks runs commands sequentially within a phase.
-# We add the playwright install here.
+# Install python packages using pip from requirements.txt AND install playwright browsers
+# CORRECTED: Use a single 'cmds' array with multiple command strings
 cmds = [
     "python -m venv --copies /opt/venv && . /opt/venv/bin/activate && pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt",
     ". /opt/venv/bin/activate && python -m playwright install --with-deps chromium" # Run playwright install within the venv
