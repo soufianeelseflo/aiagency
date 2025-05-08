@@ -1,6 +1,6 @@
 # Filename: Dockerfile
 # Description: Dockerfile for deploying the Nolli AI Sales System (Level 50+ ready)
-# Version: 1.0
+# Version: 1.1 (Corrected CMD path, added HEALTHCHECK)
 
 # --- Base Image ---
 # Use an official Python slim image for smaller size
@@ -21,7 +21,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # --- System Dependencies ---
-# Update apt cache, install necessary system libs (including those for psycopg2, playwright browsers), clean up cache
+# Update apt cache, install necessary system libs (including curl for HEALTHCHECK)
 RUN apt-get update && \
   apt-get install -y --no-install-recommends \
   # For psycopg2 (binary needs libpq)
@@ -31,28 +31,11 @@ RUN apt-get update && \
   curl \
   wget \
   gnupg \
-  # Playwright browser dependencies (check latest Playwright docs if needed)
-  libnss3 \
-  libnspr4 \
-  libdbus-1-3 \
-  libatk1.0-0 \
-  libatk-bridge2.0-0 \
-  libcups2 \
-  libdrm2 \
-  libxcomposite1 \
-  libxdamage1 \
-  libxfixes3 \
-  libxrandr2 \
-  libgbm1 \
-  libpango-1.0-0 \
-  libcairo2 \
-  libasound2 \
-  libexpat1 \
-  libxcb1 \
-  libxkbcommon0 \
-  libx11-6 \
-  libxext6 \
-  libfontconfig1 \
+  # Playwright browser dependencies
+  libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 \
+  libcups2 libdrm2 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+  libgbm1 libpango-1.0-0 libcairo2 libasound2 libexpat1 libxcb1 \
+  libxkbcommon0 libx11-6 libxext6 libfontconfig1 \
   # Clean up apt cache
   && rm -rf /var/lib/apt/lists/*
 
@@ -66,7 +49,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # --- Install Playwright Browsers ---
 # Installs browsers into the path specified by PLAYWRIGHT_BROWSERS_PATH
-# Installing only chromium as it's commonly used and reduces image size. Add others if needed.
 RUN playwright install chromium --with-deps
 
 # --- Application Code ---
@@ -74,17 +56,12 @@ RUN playwright install chromium --with-deps
 COPY . .
 
 # --- Create necessary directories and set permissions (if needed) ---
-# Assuming logs and temp files go into subdirs within /app
-# Adjust if your application needs different paths or permissions
+# Ensure directories exist and are writable by the container process
 RUN mkdir -p /app/logs /app/temp_audio /app/temp_downloads /app/learning_for_AI && \
-  # Set permissions if running as non-root (good practice, but requires USER instruction)
-  # For simplicity now, assuming root execution (default in many base images)
-  # If running as non-root, add user creation and chown commands here.
   chmod -R 777 /app/logs /app/temp_audio /app/temp_downloads
-# Note: 777 is permissive, adjust as needed for security.
+# Note: 777 is permissive, consider a non-root user and specific ownership for production hardening later.
 
 # --- Expose Port ---
-# Expose the port the application listens on (matches ENV PORT default)
 EXPOSE 5000
 
 # --- Healthcheck ---
@@ -93,7 +70,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl --fail --silent --show-error http://localhost:5000/ || exit 1
 
 # --- Start Command ---
-# Use Quart's run command, binding to the configured HOST and PORT
-# --- Start Command ---
-# Use python -m to ensure the correct Python environment runs Quart
-CMD ["python", "-m", "quart", "run", "--host", "0.0.0.0", "--port", "5000", "--no-reload"]
+# Use the absolute path to python to ensure the correct environment and installed modules are found
+CMD ["/usr/local/bin/python", "-m", "quart", "run", "--host", "0.0.0.0", "--port", "5000", "--no-reload"]
