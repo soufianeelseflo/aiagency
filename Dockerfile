@@ -87,6 +87,11 @@ RUN mkdir -p /app/logs /app/temp_audio /app/temp_downloads /app/learning_for_AI 
 # Expose the port the application listens on (matches ENV PORT default)
 EXPOSE 5000
 
+# --- Healthcheck ---
+# Check if the Quart server is responding on port 5000 inside the container
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl --fail --silent --show-error http://localhost:5000/ || exit 1
+
 # --- Start Command ---
 # Use Quart's run command, binding to the configured HOST and PORT
 # --- Start Command ---
