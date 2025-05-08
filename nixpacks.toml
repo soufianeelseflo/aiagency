@@ -34,4 +34,3 @@ paths = ["/opt/venv/bin"] # Ensure venv bin is in PATH
 [start]
 # Default start command (Using Quart's built-in server)
 cmd = "quart run --host 0.0.0.0 --port $PORT" # Use $PORT env var
-*   **Change:** The `[start].cmd` now uses `quart run` instead of `python main.py` (which invoked Hypercorn). `$PORT` will be automatically substituted by Coolify.
