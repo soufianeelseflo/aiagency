@@ -89,4 +89,6 @@ EXPOSE 5000
 
 # --- Start Command ---
 # Use Quart's run command, binding to the configured HOST and PORT
-CMD ["quart", "run", "--host", "0.0.0.0", "--port", "5000", "--no-reload"]
+# --- Start Command ---
+# Use python -m to ensure the correct Python environment runs Quart
+CMD ["python", "-m", "quart", "run", "--host", "0.0.0.0", "--port", "5000", "--no-reload"]
