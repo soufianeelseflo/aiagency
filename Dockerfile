@@ -1,65 +1,92 @@
 # Filename: Dockerfile
-# Description: Docker build instructions for the Nolli AI Sales System.
-# Version: 4.4 (Aligned CMD with main.py v3.2 using quart run)
+# Description: Dockerfile for deploying the Nolli AI Sales System (Level 50+ ready)
+# Version: 1.0
 
-# Use a specific Python 3.10 slim image for reproducibility (Debian Bookworm - GLIBC 2.36)
-FROM python:3.10.13-slim-bookworm
+# --- Base Image ---
+# Use an official Python slim image for smaller size
+FROM python:3.11-slim
 
+# --- Environment Variables ---
+ENV PYTHONUNBUFFERED=1 \
+  # Set non-interactive frontend for package installs
+  DEBIAN_FRONTEND=noninteractive \
+  # Playwright specific environment variables to skip browser downloads during pip install
+  PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
+  # Default port, can be overridden by Coolify
+  PORT=5000 \
+  # Default host, ensures listening on all interfaces within the container
+  HOST=0.0.0.0
+
+# --- Working Directory ---
 WORKDIR /app
 
-# Install system dependencies
-# Added: libpq-dev, git, curl, reportlab dependencies (libjpeg, zlib, freetype, libxml2, libxslt1)
-# Kept: Playwright dependencies
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  curl \
-  git \
+# --- System Dependencies ---
+# Update apt cache, install necessary system libs (including those for psycopg2, playwright browsers), clean up cache
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends \
+  # For psycopg2 (binary needs libpq)
   libpq-dev \
+  # For Playwright Browsers & dependencies
   build-essential \
-  # Reportlab dependencies
-  libjpeg-dev \
-  zlib1g-dev \
-  libfreetype6-dev \
-  libxml2-dev \
-  libxslt1-dev \
-  # Playwright dependencies
-  libnss3 libatk-bridge2.0-0 libxkbcommon0 libgbm1 libasound2 libatk1.0-0 \
-  libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgcc1 \
-  libgconf-2-4 libgdk-pixbuf2.0-0 libglib2.0-0 libgtk-3-0 libnspr4 \
-  libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 \
-  libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 \
-  libxi6 libxrandr2 libxrender1 libxss1 libxtst6 ca-certificates \
-  fonts-liberation libappindicator1 lsb-release wget xdg-utils \
-  # Clean up APT cache and lists
-  && apt-get clean \
+  curl \
+  wget \
+  gnupg \
+  # Playwright browser dependencies (check latest Playwright docs if needed)
+  libnss3 \
+  libnspr4 \
+  libdbus-1-3 \
+  libatk1.0-0 \
+  libatk-bridge2.0-0 \
+  libcups2 \
+  libdrm2 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxfixes3 \
+  libxrandr2 \
+  libgbm1 \
+  libpango-1.0-0 \
+  libcairo2 \
+  libasound2 \
+  libexpat1 \
+  libxcb1 \
+  libxkbcommon0 \
+  libx11-6 \
+  libxext6 \
+  libfontconfig1 \
+  # Clean up apt cache
   && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies from the requirements.txt
-# Copy requirements first to leverage Docker layer caching
+# --- Application Dependencies ---
+# Copy only requirements.txt first to leverage Docker cache
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
   pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (needed by BrowseAgent)
-# This ensures playwright downloads browsers correctly after pip packages are installed
-RUN python -m playwright install --with-deps chromium
+# --- Install Playwright Browsers ---
+# Installs browsers into the path specified by PLAYWRIGHT_BROWSERS_PATH
+# Installing only chromium as it's commonly used and reduces image size. Add others if needed.
+RUN playwright install chromium --with-deps
 
-# Copy application code into the container
+# --- Application Code ---
+# Copy the rest of the application code
 COPY . .
 
-# Create directory for invoices
-RUN mkdir -p /app/invoices && chown -R nobody:nogroup /app/invoices
+# --- Create necessary directories and set permissions (if needed) ---
+# Assuming logs and temp files go into subdirs within /app
+# Adjust if your application needs different paths or permissions
+RUN mkdir -p /app/logs /app/temp_audio /app/temp_downloads /app/learning_for_AI && \
+  # Set permissions if running as non-root (good practice, but requires USER instruction)
+  # For simplicity now, assuming root execution (default in many base images)
+  # If running as non-root, add user creation and chown commands here.
+  chmod -R 777 /app/logs /app/temp_audio /app/temp_downloads
+# Note: 777 is permissive, adjust as needed for security.
 
-# Expose the port the UI/API server runs on.
-# Coolify usually provides a PORT env var, overriding the default 5000.
-ENV PORT 5000
-EXPOSE ${PORT}
+# --- Expose Port ---
+# Expose the port the application listens on (matches ENV PORT default)
+EXPOSE 5000
 
-# Healthcheck (Checks if the web server is responding)
-# Ensure your app has a /api/status_kpi endpoint for this to work
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD curl -f http://localhost:${PORT}/api/status_kpi || exit 1
-
-# Set the default command to run the application using Quart's built-in server
-# Aligned with main.py v3.2
-CMD ["quart", "run", "--host", "0.0.0.0", "--port", "5000"]
+# --- Start Command ---
+# Use Quart's run command, binding to the configured HOST and PORT
+CMD ["quart", "run", "--host", "0.0.0.0", "--port", "5000", "--no-reload"]
