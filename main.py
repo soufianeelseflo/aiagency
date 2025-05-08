@@ -65,6 +65,15 @@ try:
     logger.info("Logging configured based on settings.")
     logger.info("Configuration settings loaded and validated.")
 
+    logger.info("Configuration settings loaded and validated.")
+    # --- TEMPORARY DIAGNOSTIC PRINT ---
+    try:
+        db_url_to_check = str(settings.DATABASE_URL) if settings.DATABASE_URL else "DATABASE_URL NOT SET IN SETTINGS"
+        print(f"DEBUG: DATABASE_URL as seen by main.py = {db_url_to_check}", file=sys.stderr) # Print to stderr to ensure visibility in logs
+    except Exception as e:
+        print(f"DEBUG: Error accessing settings.DATABASE_URL: {e}", file=sys.stderr)
+    # --- END TEMPORARY DIAGNOSTIC PRINT ---
+
 except (ImportError, ValueError, SystemExit) as e:
     # Catch errors during settings import/validation
     # Use print because logging might not be fully configured if settings failed
