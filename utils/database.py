@@ -161,7 +161,7 @@ def get_session_maker() -> async_sessionmaker[AsyncSession]:
         try:
             # Use pool_recycle to handle potential connection drops, pre-ping to check connections
             engine = create_async_engine(
-                db_url,
+                str(db_url),
                 echo=False, # Disable SQL echo in production
                 pool_pre_ping=True,
                 pool_recycle=3600 # Recycle connections hourly, adjust as needed

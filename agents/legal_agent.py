@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy import select, update, desc, or_, func
 from sqlalchemy.exc import SQLAlchemyError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # --- Project Imports ---
 try:
@@ -59,8 +60,6 @@ except ImportError:
         def get_secret(self, key): return None
     settings = DummySettings() # type: ignore
 
-# --- Utility Imports ---
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type # <<< FIXED: Added missing import
 
 # Configure logger
 logger = logging.getLogger(__name__)
