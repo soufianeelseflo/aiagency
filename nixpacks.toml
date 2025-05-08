@@ -6,18 +6,11 @@
 # Add required system packages using apt for the Ubuntu-based builder
 aptPkgs = [
     # Base build tools (already likely included by Nixpacks, but explicit doesn't hurt)
-    "build-essential",
-    "curl",
-    "wget",
-    "git",
+    "build-essential", "curl", "wget", "git",
     # Postgres client dev files (needed for psycopg2/asyncpg build)
     "libpq-dev",
     # Reportlab dependencies (for Pillow/XML/Font support)
-    "libjpeg-dev",
-    "zlib1g-dev",
-    "libfreetype6-dev",
-    "libxml2-dev",
-    "libxslt1-dev",
+    "libjpeg-dev", "zlib1g-dev", "libfreetype6-dev", "libxml2-dev", "libxslt1-dev",
     # Playwright required system dependencies (copy from Dockerfile RUN command)
     "libnss3", "libatk-bridge2.0-0", "libxkbcommon0", "libgbm1", "libasound2", "libatk1.0-0",
     "libcairo2", "libcups2", "libdbus-1-3", "libexpat1", "libfontconfig1", "libgcc1",
@@ -39,5 +32,6 @@ cacheDirectories = ["/root/.cache/pip", "/root/.cache/ms-playwright"] # Cache pl
 paths = ["/opt/venv/bin"] # Ensure venv bin is in PATH
 
 [start]
-# Default start command
-cmd = "python main.py"
+# Default start command (Using Quart's built-in server)
+cmd = "quart run --host 0.0.0.0 --port $PORT" # Use $PORT env var
+```    *   **Change:** The `[start].cmd` now uses `quart run` instead of `python main.py` (which invoked Hypercorn). `$PORT` will be automatically substituted by Coolify.
