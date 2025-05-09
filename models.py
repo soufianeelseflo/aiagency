@@ -1,11 +1,12 @@
 # Filename: models.py
 # Description: SQLAlchemy Models for the AI Agency Database.
-# Version: 3.1 (IGNIS Final Transmutation - Added LearnedPattern, fixed Optional import)
+# Version: 3.2 (Ensured LearnedPattern and all typing imports are present)
 
 import uuid
 import enum
+import logging # Added for fallback logger
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any, Union # Ensure Optional and others are here
+from typing import Optional, List, Dict, Any, Union # ENSURE ALL ARE PRESENT
 
 from sqlalchemy import (
     create_engine, Column, String, DateTime, ForeignKey, Text, Boolean,
@@ -21,27 +22,35 @@ try:
     from config.settings import settings as app_settings
     UTILS_AND_SETTINGS_AVAILABLE = True
 except ImportError as e_import_utils:
-    import logging
-    logging.basicConfig(level=logging.ERROR)
-    logger_models = logging.getLogger(__name__)
-    logger_models.critical(
+    # Fallback logger setup
+    _models_logger = logging.getLogger(__name__)
+    if not _models_logger.hasHandlers(): # Avoid adding handlers multiple times
+        _models_logger.setLevel(logging.CRITICAL)
+        _ch = logging.StreamHandler()
+        _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        _ch.setFormatter(_formatter)
+        _models_logger.addHandler(_ch)
+
+    _models_logger.critical(
         f"CRITICAL FAILURE in models.py: Could not import 'utils.database' or 'config.settings'. "
         f"Cause: {e_import_utils}. Database encryption and potentially other model functionalities will be broken. "
         "This indicates a severe problem in project structure or dependencies that needs immediate attention."
     )
     CustomBaseFromUtil = declarative_base() # type: ignore
     def encrypt_data(data: Optional[str]) -> Optional[str]:
-        logger_models.error("Dummy encrypt_data called: Encryption unavailable due to import failure.")
+        _models_logger.error("Dummy encrypt_data called: Encryption unavailable due to import failure.")
         return data
     def decrypt_data(data: Optional[str]) -> Optional[str]:
-        logger_models.error("Dummy decrypt_data called: Decryption unavailable due to import failure.")
+        _models_logger.error("Dummy decrypt_data called: Decryption unavailable due to import failure.")
         return data
     class DummyAppSettings:
         DATABASE_ENCRYPTION_KEY: Optional[str] = None
+        DATABASE_URL: Optional[str] = None # Added for __main__ block
     app_settings = DummyAppSettings() # type: ignore
     UTILS_AND_SETTINGS_AVAILABLE = False
 
 Base = CustomBaseFromUtil
+logger = logging.getLogger(__name__) # General logger for this module
 
 # --- Enum Definitions (Standard Python Enums) ---
 class TaskStatus(enum.Enum):
@@ -58,6 +67,7 @@ class TaskStatus(enum.Enum):
     REFLECTION_PHASE = "reflection_phase"
     HALTED_BY_REFLECTION = "halted_by_reflection"
     SKIPPED = "skipped"
+    COMPLETED_NO_DATA = "completed_no_data" # Added for ThinkTool Clay processing
 
 class AgentName(enum.Enum):
     ORCHESTRATOR = "Orchestrator"
@@ -67,13 +77,14 @@ class AgentName(enum.Enum):
     SOCIAL_MEDIA_MANAGER = "SocialMediaManager"
     LEGAL_AGENT = "LegalAgent"
     GMAIL_CREATOR_AGENT = "GmailCreatorAgent"
-    Browse_AGENT = "BrowseAgent" # Note: Your Orchestrator imports BrowseAgent as Browse_agent
+    Browse_AGENT = "BrowseAgent"
     VIDEO_CREATION_AGENT = "VideoCreationAgent"
     CLIENT_RESEARCH_AGENT = "ClientResearchAgent"
     PAYMENT_PROCESSOR_AGENT = "PaymentProcessorAgent"
     UNKNOWN = "Unknown"
+    PROGRAMMER_AGENT = "ProgrammerAgent" # Added from Orchestrator
 
-class ClientStatus(enum.Enum):
+class ClientStatus(enum.Enum): # As defined in your models.py v3.0
     LEAD = "lead"
     CONTACTED = "contacted"
     ENGAGED = "engaged"
@@ -87,7 +98,7 @@ class ClientStatus(enum.Enum):
     DORMANT = "dormant"
     DO_NOT_CONTACT = "do_not_contact"
 
-class InteractionType(enum.Enum):
+class InteractionType(enum.Enum): # As defined in your models.py v3.0
     EMAIL_SENT = "email_sent"
     EMAIL_OPENED = "email_opened"
     EMAIL_CLICKED = "email_clicked"
@@ -111,7 +122,7 @@ class InteractionType(enum.Enum):
     NOTE_ADDED = "note_added"
     TASK_COMPLETED_FOR_CLIENT = "task_completed_for_client"
 
-class PaymentStatus(enum.Enum):
+class PaymentStatus(enum.Enum): # As defined in your models.py v3.0
     PENDING = "pending"
     PAID = "paid"
     COMPLETED = "completed"
@@ -122,7 +133,7 @@ class PaymentStatus(enum.Enum):
     VOIDED = "voided"
     OVERDUE = "overdue"
 
-class AccountStatus(enum.Enum):
+class AccountStatus(enum.Enum): # As defined in your models.py v3.0
     ACTIVE = "active"
     NEEDS_REVIEW = "needs_review"
     BANNED = "banned"
@@ -138,28 +149,43 @@ class Client(Base): # type: ignore
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    company_name = Column(String(255), nullable=False, index=True) # Changed from name to company_name for clarity
+    company_name = Column(String(255), nullable=False, index=True)
     website = Column(String(512), nullable=True)
-    primary_contact_name = Column(String(255), nullable=True) # Added for primary contact
-    primary_contact_email = Column(String(255), nullable=True, index=True) # Added for primary contact
-    primary_contact_phone = Column(String(50), nullable=True) # Added for primary contact
+    primary_contact_name = Column(String(255), nullable=True)
+    primary_contact_email = Column(String(255), nullable=True, index=True)
+    primary_contact_phone = Column(String(50), nullable=True)
     industry = Column(String(100), nullable=True)
-    company_size = Column(String(50), nullable=True) # e.g., "1-10", "11-50"
+    company_size = Column(String(50), nullable=True)
     country = Column(String(100), nullable=True)
     city = Column(String(100), nullable=True)
     
-    client_status = Column(SAEnum(ClientStatus), default=ClientStatus.LEAD, nullable=False) # Using new enum
-    opt_in_status = Column(String(50), default="pending", index=True) # e.g., pending, opted_in_email, opted_in_call, opted_out_all
-    client_score = Column(Float, default=0.0, nullable=False) # Renamed from engagement_score for clarity
-    source = Column(String(100), nullable=True) # e.g., clay_import, manual_entry, web_form
+    client_status = Column(SAEnum(ClientStatus), default=ClientStatus.LEAD, nullable=False)
+    opt_in_status = Column(String(50), default="pending", index=True)
+    client_score = Column(Float, default=0.0, nullable=False)
+    source = Column(String(100), nullable=True)
     
-    service_tier = Column(String(100), nullable=True) # e.g., "Standard UGC", "Premium Voice"
+    service_tier = Column(String(100), nullable=True)
     contract_start_date = Column(DateTime(timezone=True), nullable=True)
     contract_end_date = Column(DateTime(timezone=True), nullable=True)
+    last_interaction = Column(DateTime(timezone=True), nullable=True) # Added from VoiceSalesAgent
+    last_enriched_at = Column(DateTime(timezone=True), nullable=True) # Added from ThinkTool
+    last_contacted_at = Column(DateTime(timezone=True), nullable=True) # Added from EmailAgent
+    opt_in = Column(Boolean, default=True) # Added from EmailAgent/VoiceSalesAgent
+    is_deliverable = Column(Boolean, default=True) # Added from EmailAgent/VoiceSalesAgent
+    email = Column(String(255), nullable=True, index=True) # Added from EmailAgent/VoiceSalesAgent (ensure consistent with primary_contact_email)
+    name = Column(String(255), nullable=True) # Added from EmailAgent/VoiceSalesAgent (ensure consistent with primary_contact_name)
+    phone = Column(String(50), nullable=True) # Added from VoiceSalesAgent (ensure consistent with primary_contact_phone)
+    timezone = Column(String(100), nullable=True) # Added from VoiceSalesAgent
+    interests = Column(Text, nullable=True) # Added from EmailAgent/VoiceSalesAgent (JSON string)
+    job_title = Column(String(255), nullable=True) # Added from EmailAgent/ThinkTool
+    company = Column(String(255), nullable=True) # Added from EmailAgent/ThinkTool (ensure consistent with company_name)
+    location = Column(String(255), nullable=True) # Added from ThinkTool
+    source_reference = Column(Text, nullable=True) # Added from ThinkTool (e.g. LinkedIn URL)
+    engagement_score = Column(Float, default=0.0) # Added from EmailAgent (ensure consistent with client_score)
 
-    json_data = Column(JSONB, nullable=True, comment="Flexible JSON field for additional structured client data like enriched_data from Clay, custom fields, etc.")
 
-    # Relationships
+    json_data = Column(JSONB, nullable=True, comment="Flexible JSON field for additional structured client data.")
+
     tasks = relationship("Task", back_populates="client", cascade="all, delete-orphan", lazy="selectin")
     interactions = relationship("InteractionLog", back_populates="client", cascade="all, delete-orphan", lazy="selectin")
     invoices = relationship("Invoice", back_populates="client", cascade="all, delete-orphan", lazy="selectin")
@@ -171,7 +197,6 @@ class Client(Base): # type: ignore
     )
     def __repr__(self) -> str:
         return f"<Client(id={self.id}, company_name='{self.company_name}', email='{self.primary_contact_email}')>"
-
 
 class Task(Base): # type: ignore
     __tablename__ = "tasks"
@@ -185,7 +210,7 @@ class Task(Base): # type: ignore
     client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), nullable=True, index=True)
     client = relationship("Client", back_populates="tasks", lazy="joined")
 
-    priority = Column(Integer, default=5, nullable=False) # Default priority
+    priority = Column(Integer, default=5, nullable=False)
     payload = Column(JSONB, comment="Task-specific input data.")
     result = Column(JSONB, nullable=True, comment="Task-specific output data.")
     error_message = Column(Text, nullable=True)
@@ -200,15 +225,13 @@ class Task(Base): # type: ignore
     sub_tasks = relationship("Task", backref="parent_task", remote_side=[id], lazy="selectin")
     
     action_history = Column(JSONB, nullable=True, default=list, comment="For ThinkTool: sequence of actions taken within the task.")
-    current_objective = Column(Text, nullable=True) # For ThinkTool's multi-step reasoning
+    current_objective = Column(Text, nullable=True)
     
-    # For linking KFs to tasks
     knowledge_ids_used = Column(JSONB, nullable=True, default=list)
     knowledge_ids_generated = Column(JSONB, nullable=True, default=list)
 
     def __repr__(self) -> str:
         return f"<Task(id={self.id}, agent='{self.agent_name.value}', status='{self.status.value}')>"
-
 
 class InteractionLog(Base): # type: ignore
     __tablename__ = "interaction_logs"
@@ -218,19 +241,18 @@ class InteractionLog(Base): # type: ignore
     client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, index=True)
     client = relationship("Client", back_populates="interactions", lazy="joined")
     
-    agent_name = Column(SAEnum(AgentName), nullable=True) # Which agent performed/logged
+    agent_name = Column(SAEnum(AgentName), nullable=True)
     task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
     
     type = Column(SAEnum(InteractionType), nullable=False, index=True)
-    channel = Column(String(50), nullable=True) # e.g., email, call, linkedin, x.com
-    content_summary = Column(Text, nullable=True) # e.g., email subject, call outcome summary
-    external_id = Column(String(255), nullable=True, index=True) # e.g., email Message-ID, Call SID
+    channel = Column(String(50), nullable=True)
+    content_summary = Column(Text, nullable=True)
+    external_id = Column(String(255), nullable=True, index=True)
     
     json_data = Column(JSONB, nullable=True, comment="Flexible JSON field for extra details like email open location, call duration, etc.")
 
     def __repr__(self) -> str:
         return f"<InteractionLog(id={self.id}, client_id={self.client_id}, type='{self.type.value}', ts='{self.timestamp}')>"
-
 
 class AccountCredentials(Base): # type: ignore
     __tablename__ = "account_credentials"
@@ -238,24 +260,23 @@ class AccountCredentials(Base): # type: ignore
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    service = Column(String(100), nullable=False, index=True) # Renamed from service_name for consistency
-    account_identifier = Column(String(255), nullable=False, index=True) # Renamed from username
+    service = Column(String(100), nullable=False, index=True)
+    account_identifier = Column(String(255), nullable=False, index=True)
     
-    _encrypted_password = Column("password", String(1024), nullable=True) # Keep column name 'password' for simplicity if preferred
+    _encrypted_password = Column("password", String(1024), nullable=True)
     
     email_associated = Column(String(255), nullable=True, index=True)
     status = Column(SAEnum(AccountStatus), default=AccountStatus.ACTIVE, nullable=False)
-    last_used = Column(DateTime(timezone=True), nullable=True) # Renamed from last_used_at
-    proxy_used = Column(String(255), nullable=True) # Simplified proxy storage
-    creation_agent = Column(SAEnum(AgentName), nullable=True) # Renamed
+    last_used = Column(DateTime(timezone=True), nullable=True)
+    proxy_used = Column(String(255), nullable=True)
+    creation_agent = Column(SAEnum(AgentName), nullable=True)
     
-    notes = Column(Text, nullable=True) # Changed from JSONB to Text for general notes
-    last_status_update_ts = Column(DateTime(timezone=True), nullable=True) # Added for tracking status changes
+    notes = Column(Text, nullable=True)
+    last_status_update_ts = Column(DateTime(timezone=True), nullable=True)
 
     @hybrid_property
     def password(self) -> Optional[str]:
         if not UTILS_AND_SETTINGS_AVAILABLE or not app_settings.DATABASE_ENCRYPTION_KEY:
-            logger = logging.getLogger(__name__)
             logger.error(
                 f"Attempted to decrypt password for account '{self.account_identifier}' but encryption utils/key are unavailable. "
                 "This is a CRITICAL configuration issue."
@@ -266,7 +287,6 @@ class AccountCredentials(Base): # type: ignore
     @password.setter
     def password(self, value: Optional[str]) -> None:
         if not UTILS_AND_SETTINGS_AVAILABLE or not app_settings.DATABASE_ENCRYPTION_KEY:
-            logger = logging.getLogger(__name__)
             logger.critical(
                 f"Attempted to encrypt password for account '{self.account_identifier}' but encryption utils/key are unavailable. "
                 "Password NOT set. This is a CRITICAL configuration issue."
@@ -283,59 +303,59 @@ class AccountCredentials(Base): # type: ignore
     def __repr__(self) -> str:
         return f"<AccountCredentials(id={self.id}, service='{self.service}', identifier='{self.account_identifier}', status='{self.status.value}')>"
 
-
 class StrategicDirective(Base): # type: ignore
     __tablename__ = "strategic_directives"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)) # Renamed from created_at
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
-    source = Column(String(100), nullable=False) # e.g., ThinkTool, OperatorUI, SystemEvent
+    source = Column(String(100), nullable=False)
     target_agent = Column(SAEnum(AgentName), nullable=False, index=True)
-    directive_type = Column(String(100), nullable=False, index=True) # e.g., initiate_outreach_campaign, analyze_market_trend, test_new_exploit
+    directive_type = Column(String(100), nullable=False, index=True)
     
     content = Column(JSONB, nullable=False, comment="Detailed parameters and context for the directive.")
-    priority = Column(Integer, default=5, nullable=False, index=True) # 1 (highest) to 10 (lowest)
-    status = Column(SAEnum(TaskStatus), default=TaskStatus.PENDING, nullable=False, index=True) # Use TaskStatus enum
+    priority = Column(Integer, default=5, nullable=False, index=True)
+    status = Column(SAEnum(TaskStatus), default=TaskStatus.PENDING, nullable=False, index=True)
     
     result_summary = Column(Text, nullable=True)
-    related_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True) # Link to a primary task if applicable
-    notes = Column(Text, nullable=True) # For human-readable notes about the directive
+    related_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    notes = Column(Text, nullable=True)
 
     def __repr__(self) -> str:
         return f"<StrategicDirective(id={self.id}, type='{self.directive_type}', target='{self.target_agent.value}', status='{self.status.value}')>"
 
-
 class KnowledgeFragment(Base): # type: ignore
     __tablename__ = "knowledge_fragments"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)) # Renamed from created_at
-    last_accessed_ts = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True) # Added for LRU cache/purge
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_accessed_ts = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     
-    agent_source = Column(SAEnum(AgentName), nullable=False) # Which agent logged this
-    data_type = Column(String(100), index=True, nullable=False) # e.g., client_osint_summary, email_template_performance, competitor_pricing_info
-    content = Column(Text, nullable=False) # Can be JSON string, plain text, etc.
-    item_hash = Column(String(64), nullable=False, unique=True, index=True) # SHA256 hash of content for deduplication
+    agent_source = Column(SAEnum(AgentName), nullable=False)
+    data_type = Column(String(100), index=True, nullable=False)
+    content = Column(Text, nullable=False)
+    item_hash = Column(String(64), nullable=False, unique=True, index=True)
     
     relevance_score = Column(Float, default=0.5, nullable=False)
-    confidence_score = Column(Float, default=0.5, nullable=False) # Added for ThinkTool's assessment
+    confidence_score = Column(Float, default=0.5, nullable=False)
     
-    tags = Column(JSONB, nullable=True, default=list) # List of strings
+    tags = Column(JSONB, nullable=True, default=list)
     related_client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True, index=True)
-    source_reference = Column(Text, nullable=True) # URL, document name, task ID that generated this
-    related_directive_id = Column(UUID(as_uuid=True), ForeignKey("strategic_directives.id", ondelete="SET NULL"), nullable=True) # Link to directive
+    source_reference = Column(Text, nullable=True)
+    related_directive_id = Column(UUID(as_uuid=True), ForeignKey("strategic_directives.id", ondelete="SET NULL"), nullable=True)
 
     def __repr__(self) -> str:
         return f"<KnowledgeFragment(id={self.id}, type='{self.data_type}', source='{self.agent_source.value}')>"
 
-# ADDED LearnedPattern CLASS DEFINITION
+# >>> THIS IS THE CLASS THAT WAS MISSING <<<
 class LearnedPattern(Base): # type: ignore
     __tablename__ = "learned_patterns"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Renamed timestamp to created_at for consistency with other new models
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     pattern_description = Column(Text, nullable=False)
+    # Added pattern_type from ThinkTool v5.9
     pattern_type = Column(String(100), nullable=True, index=True, comment="e.g., observational, causal, exploit_hypothesis, successful_tactic")
     
     supporting_fragment_ids = Column(JSONB, nullable=True, comment="List of KnowledgeFragment IDs supporting this pattern")
@@ -345,46 +365,45 @@ class LearnedPattern(Base): # type: ignore
     tags = Column(JSONB, nullable=True, default=list) # List of strings for searchable tags
     status = Column(String(50), default="active", nullable=False, index=True) # e.g., active, deprecated, under_review
     
+    # Added fields from ThinkTool v5.9 usage
     usage_count = Column(Integer, default=0, nullable=False)
     last_applied_at = Column(DateTime(timezone=True), nullable=True)
-    
     potential_exploit_details = Column(Text, nullable=True, comment="Specifics if this pattern relates to an exploit")
     related_service_or_platform = Column(String(100), nullable=True, index=True)
 
+
     def __repr__(self) -> str:
         return f"<LearnedPattern(id={self.id}, type='{self.pattern_type}', confidence={self.confidence_score:.2f})>"
-
+# >>> END OF LearnedPattern CLASS DEFINITION <<<
 
 class Invoice(Base): # type: ignore
     __tablename__ = "invoices"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)) # Renamed from issue_date
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True)
     client = relationship("Client", back_populates="invoices", lazy="joined")
     
     invoice_number = Column(String(50), unique=True, nullable=False, index=True)
     due_date = Column(DateTime(timezone=True), nullable=False)
     
-    amount = Column(Float, nullable=False) # Renamed from total_amount
+    amount = Column(Float, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
     status = Column(SAEnum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False, index=True)
     
     line_items = Column(JSONB, nullable=False)
-    notes = Column(Text, nullable=True) # Renamed from notes_to_client
+    notes = Column(Text, nullable=True)
     
     paid_at = Column(DateTime(timezone=True), nullable=True)
-    payment_method = Column(String(50), nullable=True) # Renamed from payment_method_details (simpler)
+    payment_method = Column(String(50), nullable=True)
     
-    # Relationship to FinancialTransaction
     financial_transactions = relationship("FinancialTransaction", back_populates="invoice", cascade="all, delete-orphan", lazy="selectin")
 
     __table_args__ = (
-        CheckConstraint('amount >= 0', name='chk_invoice_amount_positive'), # Updated constraint name
+        CheckConstraint('amount >= 0', name='chk_invoice_amount_positive'),
         Index('idx_invoice_status_due_date', 'status', 'due_date'),
     )
     def __repr__(self) -> str:
         return f"<Invoice(id={self.id}, number='{self.invoice_number}', status='{self.status.value}', total={self.amount})>"
-
 
 class FinancialTransaction(Base): # type: ignore
     __tablename__ = "financial_transactions"
@@ -403,10 +422,9 @@ class FinancialTransaction(Base): # type: ignore
     invoice = relationship("Invoice", back_populates="financial_transactions", lazy="joined")
     
     client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True, index=True)
-    # client = relationship("Client") # Can be added if direct link needed often
     
     external_transaction_id = Column(String(255), nullable=True, index=True)
-    payment_gateway = Column(String(50), nullable=True) # Renamed from payment_gateway_name
+    payment_gateway = Column(String(50), nullable=True)
     
     json_data = Column(JSONB, nullable=True, comment="Gateway response, fee details, etc.")
     def __repr__(self) -> str:
@@ -422,18 +440,15 @@ class Note(Base): # type: ignore
     client = relationship("Client", back_populates="notes", lazy="joined")
 
     task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
-    # task = relationship("Task") # Can add if needed
 
     author_agent_name = Column(SAEnum(AgentName), nullable=True)
     author_user_identifier = Column(String(255), nullable=True, comment="Identifier for a human user if UI allows manual notes")
     
     content = Column(Text, nullable=False)
-    note_type = Column(String(50), default="general", nullable=False) # e.g., general, meeting_summary, important_info
+    note_type = Column(String(50), default="general", nullable=False)
     is_pinned = Column(Boolean, default=False, nullable=False)
     def __repr__(self) -> str:
         return f"<Note(id={self.id}, type='{self.note_type}', client_id={self.client_id}, content='{self.content[:30]}...')>"
-
-# --- Additional Models from other agent files (EmailLog, CallLog, ConversationState, PromptTemplate, ExpenseLog) ---
 
 class EmailLog(Base): # type: ignore
     __tablename__ = "email_logs"
@@ -442,49 +457,48 @@ class EmailLog(Base): # type: ignore
     recipient = Column(String(255), nullable=False, index=True)
     subject = Column(String(512), nullable=False)
     content_preview = Column(Text, nullable=True)
-    status = Column(String(50), nullable=False, index=True) # e.g., sent, opened, clicked, responded, bounced, failed_verification
+    status = Column(String(50), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
     agent_version = Column(String(50), nullable=True)
-    sender_account = Column(String(255), nullable=True) # e.g., MailerSend, SMTP1
-    message_id = Column(String(255), nullable=True, unique=True, index=True) # Provider's message ID
+    sender_account = Column(String(255), nullable=True)
+    message_id = Column(String(255), nullable=True, unique=True, index=True)
     opened_at = Column(DateTime(timezone=True), nullable=True)
     responded_at = Column(DateTime(timezone=True), nullable=True)
-    # Removed composition_ids, as this can be complex. Store in json_data if needed.
     json_data = Column(JSONB, nullable=True, comment="Extra data like composition IDs, campaign ID, etc.")
 
 class CallLog(Base): # type: ignore
     __tablename__ = "call_logs"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     client_id = Column(UUID(as_uuid=True), ForeignKey('clients.id', ondelete="SET NULL"), nullable=True, index=True)
-    call_sid = Column(String(255), unique=True, nullable=False, index=True) # Twilio Call SID
+    call_sid = Column(String(255), unique=True, nullable=False, index=True)
     phone_number = Column(String(50), nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
-    transcript = Column(Text, nullable=True) # Full transcript as JSON string or text
-    outcome = Column(String(100), nullable=True, index=True) # e.g., success_sale, success_meeting_booked, no_answer, voicemail, failed_compliance
+    transcript = Column(Text, nullable=True)
+    outcome = Column(String(100), nullable=True, index=True)
     duration_seconds = Column(Integer, nullable=True)
     recording_url = Column(String(1024), nullable=True)
-    final_twilio_status = Column(String(50), nullable=True) # e.g., completed, failed, no-answer
+    final_twilio_status = Column(String(50), nullable=True)
     json_data = Column(JSONB, nullable=True, comment="Additional call metadata")
 
 class ConversationState(Base): # type: ignore
     __tablename__ = "conversation_states"
-    call_sid = Column(String(255), primary_key=True) # Using Twilio Call SID as PK
+    call_sid = Column(String(255), primary_key=True)
     state = Column(String(100), nullable=False)
-    conversation_log = Column(Text, nullable=False) # JSON string of conversation turns
-    discovered_needs_log = Column(Text, nullable=True) # JSON string of discovered needs
+    conversation_log = Column(Text, nullable=False)
+    discovered_needs_log = Column(Text, nullable=True)
     last_updated = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
 class PromptTemplate(Base): # type: ignore
     __tablename__ = "prompt_templates"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     agent_name = Column(SAEnum(AgentName), nullable=False, index=True)
-    prompt_key = Column(String(100), nullable=False, index=True) # e.g., 'email_subject_generation', 'voice_call_greeting'
+    prompt_key = Column(String(100), nullable=False, index=True)
     version = Column(Integer, default=1, nullable=False)
     content = Column(Text, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False, index=True)
-    author_agent = Column(SAEnum(AgentName), nullable=True) # Which agent authored/updated this
+    author_agent = Column(SAEnum(AgentName), nullable=True)
     last_updated = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    notes = Column(Text, nullable=True) # For critique summaries or version notes
+    notes = Column(Text, nullable=True)
     __table_args__ = (UniqueConstraint('agent_name', 'prompt_key', 'version', name='uq_prompt_agent_key_version'),)
 
 class ExpenseLog(Base): # type: ignore
@@ -494,19 +508,13 @@ class ExpenseLog(Base): # type: ignore
     agent_name = Column(SAEnum(AgentName), nullable=False, index=True)
     amount = Column(Float, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
-    category = Column(String(100), nullable=False, index=True) # e.g., LLM, API_Call_Twilio, API_Call_Deepgram, Proxy
+    category = Column(String(100), nullable=False, index=True)
     description = Column(Text, nullable=True)
-    task_id_reference = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True) # Link to task if applicable
+    task_id_reference = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
     json_data = Column(JSONB, nullable=True, comment="Additional details like token counts, API call specifics")
-
 
 # --- Optional: Function to create tables (for dev/testing, Alembic for prod) ---
 def create_all_tables_dev(db_url_sync: str) -> None:
-    """
-    Development utility to create all tables.
-    WARNING: For production, use a migration tool like Alembic.
-    Expects a synchronous database URL.
-    """
     logger_models_dev = logging.getLogger(__name__ + "_dev_create")
     if not db_url_sync:
         logger_models_dev.error("Synchronous Database URL not provided. Cannot create tables.")
@@ -526,10 +534,8 @@ if __name__ == "__main__":
         main_logger.critical(
             "Cannot proceed with __main__ block in models.py because critical utilities "
             "(utils.database or config.settings) failed to import earlier. "
-            "Please check the logs for import errors related to these modules and their dependencies "
-            "(e.g., missing environment variables like DATABASE_ENCRYPTION_KEY)."
         )
-    elif app_settings.DATABASE_URL:
+    elif app_settings.DATABASE_URL: # Check if DATABASE_URL is not None
         sync_db_url = str(app_settings.DATABASE_URL).replace("postgresql+asyncpg", "postgresql")
         sync_db_url = sync_db_url.replace("postgresql+psycopg", "postgresql")
         
@@ -541,9 +547,7 @@ if __name__ == "__main__":
         )
     else:
         main_logger.error(
-            "DATABASE_URL not set in environment (via .env or system variables). "
-            "Cannot create tables. Please configure DATABASE_URL."
-            "Example: DATABASE_URL='postgresql+asyncpg://user:pass@host:port/dbname'"
+            "DATABASE_URL not set in environment or settings. Cannot create tables."
         )
 
 # --- End of models.py ---
