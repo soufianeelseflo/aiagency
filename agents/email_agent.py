@@ -1,7 +1,7 @@
 # Filename: agents/email_agent.py
 # Description: Genius Agentic Email Agent - Handles hyper-personalized outreach,
 #              IMAP opt-out processing, humanization, compliance, and learning.
-# Version: 3.3 (Level 30+ Transmutation - Strategic Content, Adaptive Timing, Proactive Deliverability, Full Code)
+# Version: 3.3 (Strategic Content, Adaptive Timing, Proactive Deliverability, Full Code)
 
 import asyncio
 import logging
