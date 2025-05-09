@@ -2,6 +2,7 @@
 # Description: SQLAlchemy Models for the AI Agency Database.
 # Version: 3.0 (IGNIS Final Transmutation - SQLAlchemy 'metadata' fix, relationships, enums)
 
+from typing import Optional,Any, List, Dict
 import uuid
 import enum
 from datetime import datetime, timezone, timedelta
