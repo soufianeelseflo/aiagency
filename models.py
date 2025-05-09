@@ -1,6 +1,6 @@
 # Filename: models.py
 # Description: SQLAlchemy ORM Models for the AI Agency Database (Postgres Focused).
-# Version: 5.0 (Level 50+ Transmutation)
+# Version: 4.2 (Level 30+ Transmutation - Added last_enriched_at, refined relationships, task_id to KF)
 
 import json
 import uuid as uuid_pkg
@@ -9,48 +9,43 @@ from sqlalchemy import (
     Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, Index,
     UniqueConstraint, func, event, DDL
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID, JSONB # Use JSONB for tags
+from sqlalchemy.dialects.postgresql import ARRAY, UUID, JSONB
 from sqlalchemy.orm import declarative_base, relationship
 
-# Define Base using modern approach
 Base = declarative_base()
 
-# Helper function for default timestamps with UTC timezone
 def utcnow():
     return datetime.now(timezone.utc)
-
 
 class Client(Base):
     __tablename__ = 'clients'
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
-    email = Column(String, index=True, nullable=True, unique=True) # Unique email
-    phone = Column(String, index=True, nullable=True, unique=True) # Unique phone
+    email = Column(String, index=True, nullable=True, unique=True)
+    phone = Column(String, index=True, nullable=True, unique=True)
     company = Column(String, nullable=True, index=True)
-    job_title = Column(String, nullable=True, index=True) # Index job title
-    country = Column(String(2), index=True, nullable=True) # Use 2-char code if standard
-    timezone = Column(String, default="America/New_York")
-    interests = Column(JSONB, nullable=True, index=True, postgresql_using='gin') # Use JSONB for interests/tags
+    job_title = Column(String, nullable=True)
+    country = Column(String, index=True, nullable=True) # Made nullable
+    timezone = Column(String, default="America/New_York", nullable=True) # Made nullable
+    industry = Column(String, nullable=True, index=True) # Added industry
+    interests = Column(Text, nullable=True) # JSON string or comma-separated
     last_interaction = Column(DateTime(timezone=True), default=utcnow, index=True)
     last_contacted_at = Column(DateTime(timezone=True), nullable=True, index=True)
     last_opened_at = Column(DateTime(timezone=True), nullable=True, index=True)
     last_replied_at = Column(DateTime(timezone=True), nullable=True, index=True)
-    last_enriched_at = Column(DateTime(timezone=True), nullable=True, index=True) # Track enrichment time
-    engagement_score = Column(Float, default=0.1, nullable=False, index=True)
+    last_enriched_at = Column(DateTime(timezone=True), nullable=True, index=True) # Added for Clay webhook processing (MRE)
+    engagement_score = Column(Float, default=0.1, index=True, nullable=False)
     opt_in = Column(Boolean, default=True, nullable=False, index=True)
     is_deliverable = Column(Boolean, default=True, nullable=False, index=True)
     source = Column(String, nullable=True, index=True)
-    source_reference = Column(Text, nullable=True, index=True) # Changed to Text for longer URLs
-    assigned_agent = Column(String, nullable=True, index=True)
-    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
-    industry = Column(String, nullable=True, index=True) # Added industry
-    location = Column(String, nullable=True) # Added location
+    source_reference = Column(String, nullable=True, index=True) # e.g., LinkedIn URL, Clay correlation_id
+    assigned_agent = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False) # Added for PLEA
 
-    # Relationships
     email_logs = relationship("EmailLog", back_populates="client", cascade="all, delete-orphan")
     call_logs = relationship("CallLog", back_populates="client", cascade="all, delete-orphan")
     invoices = relationship("Invoice", back_populates="client", cascade="all, delete-orphan")
-    knowledge_fragments = relationship("KnowledgeFragment", back_populates="client") # Don't delete KFs if client deleted
+    knowledge_fragments = relationship("KnowledgeFragment", back_populates="client") # No cascade delete here, KF might be general
     conversation_states = relationship("ConversationState", back_populates="client", cascade="all, delete-orphan")
 
     def __repr__(self):
@@ -59,21 +54,21 @@ class Client(Base):
 class EmailLog(Base):
     __tablename__ = 'email_logs'
     id = Column(Integer, primary_key=True)
-    client_id = Column(Integer, ForeignKey('clients.id', ondelete='SET NULL'), index=True, nullable=True) # Set null on client delete
+    client_id = Column(Integer, ForeignKey('clients.id', ondelete='SET NULL'), index=True, nullable=True) # ondelete SET NULL
     recipient = Column(String, index=True, nullable=False)
     subject = Column(Text, nullable=True)
     content_preview = Column(Text, nullable=True)
-    status = Column(String, index=True, nullable=False) # 'sent', 'delivered', 'opened', 'responded', 'bounced', 'failed_send', 'blocked_compliance', 'flagged_spam_risk', 'failed_verification', 'error_internal'
+    status = Column(String, index=True, nullable=False)
     timestamp = Column(DateTime(timezone=True), default=utcnow, index=True)
     opened_at = Column(DateTime(timezone=True), nullable=True, index=True)
     responded_at = Column(DateTime(timezone=True), nullable=True, index=True)
     agent_version = Column(String, nullable=True)
     error_message = Column(Text, nullable=True)
     sender_account = Column(String, nullable=True, index=True)
-    message_id = Column(Text, unique=True, index=True, nullable=True) # Provider Message-ID
+    message_id = Column(Text, unique=True, index=True, nullable=True)
     tracking_pixel_id = Column(UUID(as_uuid=True), unique=True, index=True, nullable=True, default=uuid_pkg.uuid4)
+    task_id_source = Column(String, nullable=True, index=True) # PLEA: Link to task ID that generated this
 
-    # Relationship
     client = relationship("Client", back_populates="email_logs")
     composition = relationship("EmailComposition", back_populates="email_log", uselist=False, cascade="all, delete-orphan")
 
@@ -83,18 +78,17 @@ class EmailLog(Base):
 class CallLog(Base):
     __tablename__ = 'call_logs'
     id = Column(Integer, primary_key=True)
-    client_id = Column(Integer, ForeignKey('clients.id', ondelete='SET NULL'), index=True, nullable=True) # Set null on client delete
+    client_id = Column(Integer, ForeignKey('clients.id', ondelete='SET NULL'), index=True, nullable=True) # ondelete SET NULL
     call_sid = Column(String, unique=True, index=True, nullable=False)
     phone_number = Column(String, index=True)
     timestamp = Column(DateTime(timezone=True), default=utcnow, index=True)
     duration_seconds = Column(Integer, nullable=True)
-    transcript = Column(Text, nullable=True) # JSON string of conversation turns
+    transcript = Column(Text, nullable=True) # JSON string
     outcome = Column(String, index=True, nullable=True)
-    recording_url = Column(Text, nullable=True) # Changed to Text
-    final_twilio_status = Column(String, nullable=True, index=True)
-    agent_version = Column(String, nullable=True) # Added agent version
+    recording_url = Column(String, nullable=True)
+    final_twilio_status = Column(String, nullable=True)
+    task_id_source = Column(String, nullable=True, index=True) # PLEA
 
-    # Relationship
     client = relationship("Client", back_populates="call_logs")
 
     def __repr__(self):
@@ -103,13 +97,12 @@ class CallLog(Base):
 class ConversationState(Base):
     __tablename__ = 'conversation_states'
     call_sid = Column(String, primary_key=True)
-    client_id = Column(Integer, ForeignKey('clients.id', ondelete='SET NULL'), index=True, nullable=True) # Set null on client delete
+    client_id = Column(Integer, ForeignKey('clients.id', ondelete='SET NULL'), index=True, nullable=True) # ondelete SET NULL
     state = Column(String, nullable=False)
-    conversation_log = Column(Text) # JSON string
-    discovered_needs_log = Column(Text, nullable=True) # JSON string of discovered needs
+    conversation_log = Column(Text) # JSON
+    discovered_needs_log = Column(Text, nullable=True) # JSON
     last_updated = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    # Relationship
     client = relationship("Client", back_populates="conversation_states")
 
     def __repr__(self):
@@ -118,59 +111,57 @@ class ConversationState(Base):
 class Invoice(Base):
     __tablename__ = 'invoices'
     id = Column(Integer, primary_key=True)
-    client_id = Column(Integer, ForeignKey('clients.id'), index=True, nullable=False) # Required client
+    client_id = Column(Integer, ForeignKey('clients.id', ondelete='RESTRICT'), index=True, nullable=False) # RESTRICT delete if invoices exist
     amount = Column(Float, nullable=False)
     status = Column(String, default='pending', nullable=False, index=True)
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     due_date = Column(DateTime(timezone=True), nullable=True)
-    invoice_path = Column(Text, nullable=True) # Path to stored PDF on VPS
-    payment_link = Column(Text, nullable=True) # Link to payment processor
-    source_reference = Column(String, nullable=True, index=True) # e.g., CallLog.call_sid
-    invoice_number = Column(String, unique=True, index=True, nullable=True) # Optional invoice number
-    notes = Column(Text, nullable=True) # Additional notes
+    invoice_path = Column(String, nullable=True)
+    payment_link = Column(String, nullable=True)
+    source_reference = Column(String, nullable=True) # e.g., CallLog.call_sid, task_id
+    task_id_source = Column(String, nullable=True, index=True) # PLEA
 
-    # Relationship
     client = relationship("Client", back_populates="invoices")
 
     def __repr__(self):
         return f"<Invoice(id={self.id}, client_id={self.client_id}, amount={self.amount}, status='{self.status}')>"
 
-class AccountCredentials(Base):
-    """Stores credentials for various service accounts."""
+class AccountCredentials(Base): # For MRE
     __tablename__ = 'account_credentials'
     id = Column(Integer, primary_key=True)
-    service = Column(String, nullable=False, index=True)
-    account_identifier = Column(String, nullable=False, index=True) # Email, username, etc.
+    service = Column(String, nullable=False, index=True) # e.g., 'clay.com', 'google.com', 'temp_mail_service_x'
+    account_identifier = Column(String, nullable=False, index=True) # username/email
     api_key = Column(Text, nullable=True) # Encrypted
     password = Column(Text, nullable=True) # Encrypted
-    proxy_used = Column(Text, nullable=True) # Proxy associated with this account
-    status = Column(String, default='active', nullable=False, index=True) # 'active', 'limited', 'banned', 'expired', 'needs_review', 'unknown'
+    proxy_used_on_creation = Column(String, nullable=True) # MRE
+    status = Column(String, default='unknown', nullable=False, index=True) # 'active', 'limited', 'banned', 'expired', 'needs_review', 'unknown'
     created_at = Column(DateTime(timezone=True), default=utcnow)
-    last_used = Column(DateTime(timezone=True), nullable=True, index=True)
-    last_status_update_ts = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow) # Track when status changed
-    notes = Column(Text, nullable=True) # e.g., {"trial_expiry": "...", "usage_limits": "...", "2fa_backup_codes": [...]}
-    metadata = Column(JSONB, nullable=True) # Store structured metadata if needed
+    last_used_ts = Column(DateTime(timezone=True), nullable=True, index=True) # PLEA
+    last_successful_use_ts = Column(DateTime(timezone=True), nullable=True, index=True) # PLEA
+    last_status_update_ts = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow) # PLEA
+    notes = Column(Text, nullable=True) # Trial expiry, usage limits, UI interaction hints
+    task_id_source = Column(String, nullable=True, index=True) # PLEA: Task that created this account
 
     __table_args__ = (UniqueConstraint('service', 'account_identifier', name='uq_account_cred_service_identifier'),)
 
     def __repr__(self):
         return f"<AccountCredentials(id={self.id}, service='{self.service}', identifier='{self.account_identifier}', status='{self.status}')>"
 
-class ExpenseLog(Base):
-    """Tracks operational expenses."""
+class ExpenseLog(Base): # For MRE
     __tablename__ = 'expense_logs'
     id = Column(Integer, primary_key=True)
     amount = Column(Float, nullable=False)
-    category = Column(String, nullable=False, index=True) # 'LLM', 'API_Clay', 'API_Twilio', 'API_Deepgram', 'Proxy', 'Resource', 'ConcurrencyAdjustment'
-    description = Column(Text, nullable=False) # Details about the expense
+    currency = Column(String, default='USD', nullable=False) # Added currency
+    category = Column(String, nullable=False, index=True) # 'LLM', 'API_Clay', 'API_Twilio', 'Proxy', 'Resource_Acquisition', 'Manual_Expense'
+    description = Column(Text, nullable=False) # Can be encrypted if sensitive
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
-    agent_source = Column(String, nullable=True, index=True) # Which agent reported the expense
+    agent_source = Column(String, nullable=True, index=True)
+    task_id_reference = Column(String, nullable=True, index=True) # PLEA
 
     def __repr__(self):
-        return f"<ExpenseLog(id={self.id}, category='{self.category}', amount={self.amount})>"
+        return f"<ExpenseLog(id={self.id}, category='{self.category}', amount={self.amount} {self.currency})>"
 
 class MigrationStatus(Base):
-    """Tracks the completion status of data migrations."""
     __tablename__ = 'migration_status'
     migration_name = Column(String, primary_key=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
@@ -179,81 +170,86 @@ class MigrationStatus(Base):
         status = "Completed" if self.completed_at else "Pending"
         return f"<MigrationStatus(name='{self.migration_name}', status='{status}')>"
 
-# --- Knowledge Base & Strategy Models ---
-
-class KnowledgeFragment(Base):
-    """Stores atomic pieces of information gathered or generated by agents."""
+class KnowledgeFragment(Base): # Central to PLEA
     __tablename__ = 'knowledge_fragments'
     id = Column(Integer, primary_key=True)
-    agent_source = Column(String, nullable=False, index=True)
+    agent_source = Column(String, nullable=False, index=True) # Agent that logged this
+    task_id_source = Column(String, nullable=True, index=True) # Task that generated/discovered this
+    directive_id_source = Column(Integer, ForeignKey('strategic_directives.id', ondelete='SET NULL'), nullable=True, index=True) # Directive that led to this
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
     last_accessed_ts = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
-    data_type = Column(String, nullable=False, index=True)
-    content = Column(Text, nullable=False) # JSON string for structured data
-    item_hash = Column(String(64), unique=True, index=True, nullable=False) # SHA-256 hash REQUIRED
-    relevance_score = Column(Float, default=0.5, nullable=False, index=True)
-    tags = Column(JSONB, nullable=True, index=True, postgresql_using='gin') # Store as actual JSONB array for better querying
+    data_type = Column(String, nullable=False, index=True) # e.g., 'email_subject_idea', 'competitor_pricing_model', 'ui_interaction_log', 'successful_temp_mail_script'
+    content = Column(Text, nullable=False) # String or JSON string
+    content_vector = Column(JSONB, nullable=True) # Placeholder for future embedding storage for semantic search
+    item_hash = Column(String(64), unique=True, index=True, nullable=False) # SHA-256 of content
+    relevance_score = Column(Float, default=0.5, nullable=False, index=True) # Contextual relevance
+    confidence_score = Column(Float, default=1.0, nullable=False, index=True) # Confidence in the data itself
+    tags = Column(Text, nullable=True) # JSON string: '["tag1", "tag2"]'
     related_client_id = Column(Integer, ForeignKey('clients.id', ondelete='SET NULL'), nullable=True, index=True)
-    source_reference = Column(Text, nullable=True, index=True)
-    related_directive_id = Column(Integer, ForeignKey('strategic_directives.id', ondelete='SET NULL'), nullable=True, index=True) # Link to directive
+    source_reference = Column(String, nullable=True, index=True) # URL, Log ID, external system ID
+    # For UI automation logs (MRE, PLEA)
+    ui_interaction_screenshot_ref = Column(String, nullable=True) # Path/URL to screenshot if applicable
+    ui_interaction_success = Column(Boolean, nullable=True) # If this KF logs a UI step outcome
 
-    # Relationships
     client = relationship("Client", back_populates="knowledge_fragments")
-    directive = relationship("StrategicDirective", back_populates="knowledge_fragments") # Added relationship
+    directive_source = relationship("StrategicDirective", back_populates="related_knowledge_fragments")
+
+    __table_args__ = (Index('ix_kf_tags_gin', 'tags', postgresql_using='gin', postgresql_ops={'tags': 'jsonb_path_ops'}),) # For JSONB operators
 
     def __repr__(self):
-        return f"<KnowledgeFragment(id={self.id}, type='{self.data_type}', source='{self.agent_source}', hash='{self.item_hash[:8]}...')>"
+        return f"<KnowledgeFragment(id={self.id}, type='{self.data_type}', hash='{self.item_hash[:8]}...')>"
 
-class LearnedPattern(Base):
-    """Stores correlations, insights, and potential causal links discovered by ThinkTool."""
+class LearnedPattern(Base): # For ARAA, PLEA
     __tablename__ = 'learned_patterns'
     id = Column(Integer, primary_key=True)
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
     pattern_description = Column(Text, nullable=False)
-    supporting_fragment_ids = Column(JSONB, nullable=False) # Store as JSON array of int IDs
+    supporting_fragment_ids = Column(Text, nullable=False) # JSON array of KF IDs
     confidence_score = Column(Float, default=0.5, nullable=False, index=True)
-    implications = Column(Text, nullable=True)
-    tags = Column(JSONB, nullable=True, index=True, postgresql_using='gin') # Use JSONB
-    status = Column(String, default='active', index=True)
-    pattern_type = Column(String, default='observational', index=True, nullable=False) # 'observational', 'causal', 'exploit_hypothesis'
-    potential_exploit_details = Column(Text, nullable=True) # Specifics if it's an exploit hypothesis
+    implications = Column(Text, nullable=True) # Strategic value or actionable consequence
+    pattern_type = Column(String, default="observational", index=True) # e.g., 'observational', 'causal_hypothesis', 'exploit_hypothesis' (MRE, AMAC)
+    potential_exploit_details = Column(Text, nullable=True) # Specifics if 'exploit_hypothesis'
+    tags = Column(Text, nullable=True) # JSON string
+    status = Column(String, default='active', index=True) # 'active', 'obsolete', 'under_review', 'validated_exploit'
+
+    __table_args__ = (Index('ix_lp_tags_gin', 'tags', postgresql_using='gin', postgresql_ops={'tags': 'jsonb_path_ops'}),)
 
     def __repr__(self):
-        return f"<LearnedPattern(id={self.id}, type='{self.pattern_type}', confidence={self.confidence_score:.2f}, status='{self.status}')>"
+        return f"<LearnedPattern(id={self.id}, type='{self.pattern_type}', conf={self.confidence_score:.2f})>"
 
-class StrategicDirective(Base):
-    """Stores high-level instructions generated by ThinkTool to guide agents."""
+class StrategicDirective(Base): # For ARAA, PCOF
     __tablename__ = 'strategic_directives'
     id = Column(Integer, primary_key=True)
-    source = Column(String, nullable=False, index=True) # Added index
+    source = Column(String, nullable=False) # 'ThinkToolSynthesis', 'HumanOperator', 'SelfCritique'
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
-    target_agent = Column(String, nullable=False, index=True)
-    directive_type = Column(String, nullable=False, index=True)
-    content = Column(Text, nullable=False) # JSON string
-    priority = Column(Integer, default=5, nullable=False, index=True)
-    status = Column(String, default='pending', nullable=False, index=True)
+    target_agent = Column(String, nullable=False, index=True) # Specific agent or 'All' or 'Orchestrator'
+    directive_type = Column(String, nullable=False, index=True) # e.g., 'test_strategy', 'update_prompt_template', 'acquire_resource_gmail', 'execute_clay_enrichment_workflow'
+    content = Column(Text, nullable=False) # Detailed instructions, potentially JSON
+    priority = Column(Integer, default=5, nullable=False, index=True) # 1=highest
+    status = Column(String, default='pending', nullable=False, index=True) # 'pending', 'active', 'completed', 'failed', 'expired', 'cancelled', 'halted_by_reflection'
     expiry_timestamp = Column(DateTime(timezone=True), nullable=True)
-    result_summary = Column(Text, nullable=True) # Result message from agent
-    notes = Column(Text, nullable=True) # Additional notes, e.g., ROI/Risk from ThinkTool
+    result_summary = Column(Text, nullable=True) # Outcome of execution
+    estimated_roi_or_impact = Column(String, nullable=True) # PCOF
+    risk_assessment_summary = Column(Text, nullable=True) # ARAA
 
-    # Relationship
-    knowledge_fragments = relationship("KnowledgeFragment", back_populates="directive")
+    related_knowledge_fragments = relationship("KnowledgeFragment", back_populates="directive_source")
 
     def __repr__(self):
         return f"<StrategicDirective(id={self.id}, type='{self.directive_type}', target='{self.target_agent}', status='{self.status}')>"
 
-class PromptTemplate(Base):
-    """Stores and manages prompts used by agents, enabling dynamic updates."""
+class PromptTemplate(Base): # For ARAA, PLEA
     __tablename__ = 'prompt_templates'
     id = Column(Integer, primary_key=True)
     agent_name = Column(String, nullable=False, index=True)
     prompt_key = Column(String, nullable=False, index=True)
     version = Column(Integer, default=1, nullable=False)
-    content = Column(Text, nullable=False) # The actual prompt template text
-    is_active = Column(Boolean, default=True, nullable=False)
-    author_agent = Column(String, default="Human", nullable=False) # Added nullable=False
+    content = Column(Text, nullable=False) # The prompt template itself
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
+    author_agent = Column(String, default="Human") # 'Human', 'ThinkToolCritique', 'SelfAdapted'
     last_updated = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
-    notes = Column(Text, nullable=True) # e.g., Critique summary leading to this version
+    performance_score = Column(Float, nullable=True, index=True) # PLEA
+    usage_count = Column(Integer, default=0, nullable=False) # PLEA
+    notes = Column(Text, nullable=True) # e.g., critique summary leading to this version
 
     __table_args__ = (
         UniqueConstraint('agent_name', 'prompt_key', 'version', name='uq_prompt_template_version'),
@@ -263,25 +259,22 @@ class PromptTemplate(Base):
     def __repr__(self):
         return f"<PromptTemplate(id={self.id}, agent='{self.agent_name}', key='{self.prompt_key}', v={self.version}, active={self.is_active})>"
 
-class EmailStyles(Base):
-    """Stores successful email styles for learning."""
+class EmailStyles(Base): # For AMAC, PLEA
     __tablename__ = 'email_styles'
     id = Column(Integer, primary_key=True)
-    style_name = Column(String, unique=True, index=True) # e.g., 'Hormozi_Value_Stack', 'Concise_Challenger'
-    content_hash = Column(String(64), index=True, nullable=False) # SHA256 hash of combined subject+body template
+    content_hash = Column(String(64), unique=True, index=True, nullable=False)
     body_template = Column(Text, nullable=True)
     subject_template = Column(Text, nullable=True)
     performance_score = Column(Float, default=0.5, index=True)
     usage_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     last_used_at = Column(DateTime(timezone=True), nullable=True, index=True)
-    tags = Column(JSONB, nullable=True, index=True, postgresql_using='gin')
+    tags = Column(Text, nullable=True) # JSON string: for style attributes e.g., 'aggressive_cta', 'short_form'
 
     def __repr__(self):
-        return f"<EmailStyle(id={self.id}, name='{self.style_name}', score={self.performance_score:.2f})>"
+        return f"<EmailStyle(id={self.id}, score={self.performance_score:.2f}, hash='{self.content_hash[:8]}...')>"
 
-class EmailComposition(Base):
-    """Links a sent email (EmailLog) to the specific knowledge fragments and style used."""
+class EmailComposition(Base): # For PLEA
     __tablename__ = 'email_composition'
     id = Column(Integer, primary_key=True)
     email_log_id = Column(Integer, ForeignKey('email_logs.id', ondelete='CASCADE'), unique=True, nullable=False, index=True) # Cascade delete
@@ -289,23 +282,18 @@ class EmailComposition(Base):
     hook_kf_id = Column(Integer, ForeignKey('knowledge_fragments.id', ondelete='SET NULL'), nullable=True)
     body_snippets_kf_ids = Column(ARRAY(Integer), nullable=True)
     cta_kf_id = Column(Integer, ForeignKey('knowledge_fragments.id', ondelete='SET NULL'), nullable=True)
-    style_id = Column(Integer, ForeignKey('email_styles.id', ondelete='SET NULL'), nullable=True, index=True)
-    llm_generation_metadata = Column(JSONB, nullable=True) # Store model used, temp, tokens, etc.
+    style_id = Column(Integer, ForeignKey('email_styles.id', ondelete='SET NULL'), nullable=True)
     timestamp = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
-    # Relationships
     email_log = relationship("EmailLog", back_populates="composition")
-    style = relationship("EmailStyles")
-    # Define relationships to KnowledgeFragment if needed, using primaryjoin for disambiguation if necessary
 
     def __repr__(self):
         return f"<EmailComposition(id={self.id}, email_log_id={self.email_log_id})>"
 
-class KVStore(Base):
-    """Generic Key-Value store for caching or temporary data."""
+class KVStore(Base): # For general purpose storage
     __tablename__ = 'kv_store'
-    key = Column(Text, primary_key=True)
-    value = Column(Text, nullable=False)
+    key = Column(String, primary_key=True) # String for better compatibility
+    value = Column(Text, nullable=False) # JSON string if complex value needed
     expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
     def __repr__(self):
