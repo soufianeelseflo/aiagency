@@ -1,6 +1,6 @@
 # Filename: utils/database.py
 # Description: Lean Database Utilities for Postgres with Secure Encryption.
-# Version: 3.1 (Level 50+ Transmutation - Added type hints, minor logging improvements)
+# Version: 3.1 (IGNIS Transmutation - Enhanced Logging & Error Specificity)
 
 import os
 import base64
@@ -10,28 +10,34 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidTag
-from typing import Optional, AsyncGenerator, Union
+from typing import Optional, AsyncGenerator, Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.engine import URL
+from sqlalchemy.exc import SQLAlchemyError
 
 # Import settings AFTER it's defined and validated
-from config.settings import settings, SecretStr # Import SecretStr
+from config.settings import settings
 
 # Configure logging
 logger = logging.getLogger(__name__)
+op_logger = logging.getLogger('OperationalLog')
+
 
 # --- Encryption Configuration ---
-NONCE_BYTES = 12 # Standard for AES-GCM
+NONCE_BYTES = 12
 KEY_BYTES = 32 # AES-256
-SALT_BYTES = 16 # Per-value salt size
-PBKDF2_ITERATIONS = 600000 # NIST recommended minimum
+SALT_BYTES = 16
+PBKDF2_ITERATIONS = 600000 # NIST recommended minimum for new applications
 
 class EncryptionError(Exception):
     """Custom exception for encryption/decryption errors."""
     pass
 
+class DatabaseConfigurationError(Exception):
+    """Custom exception for database configuration issues."""
+    pass
+
 # --- Core Key Derivation ---
-_MASTER_KEY_CACHE: bytes | None = None
+_MASTER_KEY_CACHE: Optional[bytes] = None
 
 def _get_master_key() -> bytes:
     """Retrieves and caches the database master key from settings."""
@@ -39,22 +45,31 @@ def _get_master_key() -> bytes:
     if _MASTER_KEY_CACHE is not None:
         return _MASTER_KEY_CACHE
 
-    master_key_secret: Optional[SecretStr] = settings.DATABASE_ENCRYPTION_KEY
-    if not master_key_secret:
-        error_msg = "CRITICAL: DATABASE_ENCRYPTION_KEY not found in settings."
+    master_key_str = settings.DATABASE_ENCRYPTION_KEY
+    if not master_key_str:
+        error_msg = "CRITICAL: DATABASE_ENCRYPTION_KEY not found in settings. Data encryption/decryption will fail."
         logger.critical(error_msg)
-        raise EncryptionError(error_msg)
+        op_logger.critical(error_msg)
+        raise DatabaseConfigurationError(error_msg)
 
-    _MASTER_KEY_CACHE = master_key_secret.get_secret_value().encode('utf-8')
-    logger.info("Database master encryption key loaded.")
+    if len(master_key_str) < 32:
+        error_msg = "CRITICAL: DATABASE_ENCRYPTION_KEY is too short (must be >= 32 chars). Current length: " + str(len(master_key_str))
+        logger.critical(error_msg)
+        op_logger.critical(error_msg)
+        raise DatabaseConfigurationError(error_msg)
+
+
+    _MASTER_KEY_CACHE = master_key_str.encode('utf-8') # Ensure it's bytes
+    logger.info("Database master encryption key loaded and cached.")
     return _MASTER_KEY_CACHE
 
 def _derive_key(salt: bytes) -> bytes:
     """Derives the encryption key using PBKDF2HMAC based on the provided salt."""
     if not isinstance(salt, bytes) or len(salt) != SALT_BYTES:
+        logger.error(f"Invalid salt provided for key derivation. Expected {SALT_BYTES} bytes, got {len(salt)} bytes of type {type(salt)}.")
         raise ValueError(f"Salt must be {SALT_BYTES} bytes.")
 
-    master_key = _get_master_key()
+    master_key = _get_master_key() # This will raise DatabaseConfigurationError if key is bad
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=KEY_BYTES,
@@ -70,14 +85,14 @@ def _derive_key(salt: bytes) -> bytes:
 def encrypt_data(data: Optional[str]) -> Optional[str]:
     """
     Encrypts string data using AES-GCM with a unique salt and nonce per operation.
-    Returns Base64 encoded string: salt(16) + nonce(12) + ciphertext+tag.
+    Returns Base64 encoded string: salt + nonce + ciphertext_and_tag.
     Returns None if input data is None.
     Raises EncryptionError on failure.
     """
     if data is None:
         return None
     if not isinstance(data, str):
-        logger.error(f"Invalid data type for encryption: {type(data)}")
+        logger.error(f"Invalid data type for encryption: {type(data)}. Expected str.")
         raise TypeError("Data to encrypt must be a string.")
 
     try:
@@ -89,32 +104,31 @@ def encrypt_data(data: Optional[str]) -> Optional[str]:
         encrypted_bytes_with_tag = aesgcm.encrypt(nonce, data_bytes, None)
         encrypted_payload = salt + nonce + encrypted_bytes_with_tag
         encoded_payload = base64.urlsafe_b64encode(encrypted_payload).decode('utf-8')
-        # logger.debug(f"Encryption successful. Payload length: {len(encoded_payload)}") # Reduce verbosity
+        logger.debug(f"Encryption successful. Original length: {len(data)}, Encoded length: {len(encoded_payload)}")
         return encoded_payload
-    except EncryptionError as ee:
-        logger.exception(f"Encryption failed due to key derivation error: {ee}")
+    except DatabaseConfigurationError: # Propagate config errors
         raise
     except Exception as e:
         logger.exception(f"Encryption failed unexpectedly: {e}")
-        raise EncryptionError(f"Encryption failed: {e}") from e
+        raise EncryptionError(f"Encryption process failed: {e}") from e
 
 def decrypt_data(encrypted_data_b64: Optional[str]) -> Optional[str]:
     """
-    Decrypts data encrypted by the encrypt_data function (with per-value salt).
-    Expects Base64 encoded input: salt(16) + nonce(12) + ciphertext+tag.
+    Decrypts data encrypted by the encrypt_data function.
+    Expects Base64 encoded input: salt + nonce + ciphertext_and_tag.
     Returns the decrypted string, or None if input is None or decryption fails.
     """
     if encrypted_data_b64 is None:
         return None
     if not isinstance(encrypted_data_b64, str):
-        logger.error(f"Invalid data type for decryption: {type(encrypted_data_b64)}")
+        logger.error(f"Invalid data type for decryption: {type(encrypted_data_b64)}. Expected str.")
         return None
 
     try:
-        encrypted_payload = base64.urlsafe_b64decode(encrypted_data_b64)
-        min_len = SALT_BYTES + NONCE_BYTES + 16
+        encrypted_payload = base64.urlsafe_b64decode(encrypted_data_b64.encode('utf-8')) # Ensure bytes for decode
+        min_len = SALT_BYTES + NONCE_BYTES + 16 # AES-GCM tag is 16 bytes
         if len(encrypted_payload) < min_len:
-            logger.error(f"Decryption failed: Payload too short ({len(encrypted_payload)} bytes). Format error or truncation suspected.")
+            logger.error(f"Decryption failed: Payload too short ({len(encrypted_payload)} bytes). Expected format: salt+nonce+ciphertext+tag.")
             return None
 
         salt = encrypted_payload[:SALT_BYTES]
@@ -126,73 +140,79 @@ def decrypt_data(encrypted_data_b64: Optional[str]) -> Optional[str]:
 
         decrypted_bytes = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
         decrypted_string = decrypted_bytes.decode('utf-8')
-        # logger.debug("Decryption successful.") # Reduce verbosity
+        logger.debug("Decryption successful.")
         return decrypted_string
-
     except InvalidTag:
-        logger.error("Decryption failed: Invalid authentication tag (data tampered or wrong key/salt/nonce).")
+        logger.error("Decryption failed: Invalid authentication tag (data tampered, wrong key, or corrupted).")
         return None
-    except EncryptionError as ee:
-        logger.error(f"Decryption failed due to key derivation error: {ee}")
+    except DatabaseConfigurationError: # Propagate config errors
+        # Log this specifically as it's critical
+        logger.critical("Decryption impossible due to database encryption key configuration error.")
         return None
-    except (ValueError, TypeError, IndexError) as e:
-        logger.error(f"Decryption failed due to data format or decoding error: {e}. Input snippet: {encrypted_data_b64[:20]}...")
+    except (ValueError, TypeError, IndexError) as e: # Catch Base64, slicing, or decode errors
+        logger.error(f"Decryption failed due to data format or decoding error: {e}")
         return None
     except Exception as e:
         logger.exception(f"Decryption failed unexpectedly: {e}")
         return None
 
 # --- Database Session Utility ---
-_SESSION_MAKER: Optional[async_sessionmaker[AsyncSession]] = None
-_DB_ENGINE = None
-
-def get_db_engine(db_url: Union[str, URL]):
-    """Creates and returns a database engine instance."""
-    global _DB_ENGINE
-    if _DB_ENGINE is None:
-        try:
-            _DB_ENGINE = create_async_engine(
-                db_url,
-                echo=settings.DEBUG, # Echo SQL in debug mode only
-                pool_pre_ping=True,
-                pool_recycle=3600,
-                pool_size=10, # Adjust pool size as needed
-                max_overflow=5
-            )
-            logger.info("Database engine created.")
-        except Exception as e:
-            logger.critical(f"Failed to create database engine: {e}", exc_info=True)
-            raise
-    return _DB_ENGINE
+_SESSION_MAKER_SINGLETON: Optional[async_sessionmaker[AsyncSession]] = None # Renamed for clarity
 
 def get_session_maker() -> async_sessionmaker[AsyncSession]:
     """Creates and returns a singleton async session maker."""
-    global _SESSION_MAKER
-    if _SESSION_MAKER is None:
+    global _SESSION_MAKER_SINGLETON
+    if _SESSION_MAKER_SINGLETON is None:
         db_url = settings.DATABASE_URL
         if not db_url:
-            logger.critical("DATABASE_URL not configured in settings. Cannot create session maker.")
-            raise ValueError("Database URL is not configured.")
+            err_msg = "CRITICAL: DATABASE_URL not configured in settings. Cannot create session maker."
+            logger.critical(err_msg)
+            op_logger.critical(err_msg)
+            raise DatabaseConfigurationError(err_msg)
         try:
-            engine = get_db_engine(db_url) # Get or create engine
-            _SESSION_MAKER = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            engine = create_async_engine(
+                str(db_url), # Ensure it's a string
+                echo=settings.DEBUG, # Echo SQL if in debug mode
+                pool_pre_ping=True,
+                pool_recycle=3600, # Recycle connections hourly
+                pool_timeout=30, # Timeout for getting a connection from pool
+                connect_args={"server_settings": {"application_name": "NolliAIAgency"}} # Set application name
+            )
+            _SESSION_MAKER_SINGLETON = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
             logger.info("Async session maker created successfully.")
         except Exception as e:
-            logger.critical(f"Failed to create session maker: {e}", exc_info=True)
-            raise
-    return _SESSION_MAKER
+            logger.critical(f"Failed to create database engine or session maker: {e}", exc_info=True)
+            op_logger.critical(f"Database session maker creation FAILED: {e}")
+            raise DatabaseConfigurationError(f"Failed to create DB engine/session maker: {e}") from e
+    return _SESSION_MAKER_SINGLETON
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """Provides an async database session via context manager using the singleton session_maker."""
-    session_maker = get_session_maker()
+    """Provides an async database session via context manager."""
+    session_maker = get_session_maker() # This will raise DatabaseConfigurationError if setup fails
     async with session_maker() as session:
         try:
             yield session
-            # Caller handles commit within the 'async with session.begin():' block
+            # Commit is typically handled by the caller.
+            # If an implicit commit is desired after successful 'yield', it would be here.
+            # However, explicit commit in calling code is generally safer.
+        except SQLAlchemyError as e: # Catch specific SQLAlchemy errors
+            logger.error(f"SQLAlchemy error occurred within database session: {e}", exc_info=True)
+            op_logger.error(f"DB Transaction ERROR: {e}")
+            try:
+                await session.rollback()
+                logger.info("Session rolled back due to SQLAlchemyError.")
+            except Exception as rb_err:
+                logger.error(f"Failed to rollback session after SQLAlchemyError: {rb_err}", exc_info=True)
+            raise # Re-raise the original SQLAlchemyError
         except Exception as e:
-            logger.error(f"Exception occurred within database session, rolling back: {e}", exc_info=True)
-            await session.rollback()
-            raise # Re-raise the exception after rollback
-        # Session is automatically closed by the context manager
+            logger.error(f"Generic exception occurred within database session: {e}", exc_info=True)
+            op_logger.error(f"DB Session ERROR (Non-SQLAlchemy): {e}")
+            try:
+                await session.rollback()
+                logger.info("Session rolled back due to generic exception.")
+            except Exception as rb_err:
+                logger.error(f"Failed to rollback session after generic exception: {rb_err}", exc_info=True)
+            raise # Re-raise the original exception
+        # Session is automatically closed by the async context manager
 
 # --- End of utils/database.py ---
