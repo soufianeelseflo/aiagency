@@ -1,10 +1,10 @@
 # Filename: config/settings.py
 # Description: Configuration settings for the Nolli AI Sales System,
 #              validated using Pydantic. Secrets loaded from environment variables.
-# Version: 2.6 (Clarified env loading, minor Pydantic V2 syntax consistency)
+# Version: 2.8 (Restored user's EXACT original OPENROUTER_MODELS list, maintained other v2.6 improvements)
 
 import os
-import json # Not directly used for loading here, but often for defaults
+import json
 import logging
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import (
@@ -12,8 +12,7 @@ from pydantic import (
 )
 from typing import Dict, List, Optional, Any, Union
 
-# Configure logger for settings loading issues (will be configured by main.py first)
-logger = logging.getLogger(__name__) # Standard logger
+logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     """
@@ -23,7 +22,7 @@ class Settings(BaseSettings):
     """
     # --- Core Application Settings ---
     APP_NAME: str = Field(default="Nolli AI Sales System", description="Name of the application.")
-    APP_VERSION: str = Field(default="3.5-Genius-Hardened", description="Version of the application.") # Update version
+    APP_VERSION: str = Field(default="3.5-Genius-Hardened", description="Version of the application.")
     DEBUG: bool = Field(default=False, description="Enable debug logging and potentially other debug features.")
     AGENCY_BASE_URL: AnyUrl = Field(..., description="Base URL where the agency is hosted (e.g., for webhooks, asset hosting). Must include scheme. Example: 'https://agency.nichenova.store'")
 
@@ -33,23 +32,30 @@ class Settings(BaseSettings):
 
     # --- LLM / OpenRouter Configuration ---
     OPENROUTER_API_KEY: Optional[str] = Field(default=None, description="Primary OpenRouter API Key. Load from env var 'OPENROUTER_API_KEY'.")
+    # --- RESTORED USER'S ORIGINAL OPENROUTER_MODELS LIST ---
     OPENROUTER_MODELS: Dict[str, str] = {
-        "think_synthesize": "google/gemini-pro-1.5", # Updated to a generally available strong model
-        "think_strategize": "google/gemini-pro-1.5",
-        "think_critique": "google/gemini-pro-1.5",
-        "legal_analysis": "google/gemini-pro-1.5",
-        "Browse_visual_analysis": "openai/gpt-4-vision-preview", # Explicitly visual
-        "email_draft": "mistralai/mistral-large-latest", # Good for creative text
-        "think_radar": "anthropic/claude-3-opus-20240229", # Strong reasoning for radar
-        "Browse_extract": "mistralai/mistral-small-latest", # Efficient for extraction
-        "default_llm": "mistralai/mistral-small-latest",
-        "think_validate": "mistralai/mistral-small-latest",
-        "think_user_education": "mistralai/mistral-small-latest",
-        "email_humanize": "mistralai/mistral-small-latest",
-        "voice_intent": "google/gemini-flash-1.5", # Fast for intent
-        "voice_response": "google/gemini-flash-1.5", # Fast for response
-        "Browse_summarize": "mistralai/mistral-small-latest",
+        # --- High Power ---
+        "think_synthesize": "google/gemini-2.5-pro-preview-03-25",
+        "think_strategize": "google/gemini-2.5-pro-preview-03-25",
+        "think_critique": "google/gemini-2.5-pro-preview-03-25",
+        "legal_analysis": "google/gemini-2.5-pro-preview-03-25",
+        "Browse_visual_analysis": "google/gemini-2.5-flash-preview:thinking",
+        "email_draft": "google/gemini-2.5-flash-preview:thinking",
+
+        # --- Medium Power ---
+        "think_radar": "google/gemini-2.5-flash-preview:thinking",
+        "Browse_extract": "google/gemini-2.5-flash-preview:thinking",
+
+        # --- Fast & Cheap ---
+        "default_llm": "google/gemini-2.5-flash-preview",
+        "think_validate": "google/gemini-2.5-flash-preview",
+        "think_user_education": "google/gemini-2.5-flash-preview",
+        "email_humanize": "google/gemini-2.5-flash-preview",
+        "voice_intent": "google/gemini-2.5-flash-preview",
+        "voice_response": "google/gemini-2.5-flash-preview",
+        "Browse_summarize": "google/gemini-2.5-flash-preview",
     }
+    # --- END RESTORED USER MODELS ---
     OPENROUTER_API_TIMEOUT_S: float = Field(default=120.0, gt=0, description="Timeout in seconds for OpenRouter API calls.")
 
     # --- Email Agent Configuration ---
@@ -85,13 +91,13 @@ class Settings(BaseSettings):
     SMARTPROXY_PASSWORD: Optional[str] = Field(default=None, description="Smartproxy password. Load from env var 'SMARTPROXY_PASSWORD'.")
     SMARTPROXY_HOST: Optional[str] = Field(default=None, description="Smartproxy hostname (e.g., gate.smartproxy.com). Load from env var 'SMARTPROXY_HOST'.")
     SMARTPROXY_PORT: Optional[int] = Field(default=None, description="Smartproxy port (e.g., 7000). Load from env var 'SMARTPROXY_PORT'.")
-    BROWSER_USER_AGENT: str = Field(default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", description="User agent string for the browser.") # Updated Chrome
+    BROWSER_USER_AGENT: str = Field(default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", description="User agent string for the browser.")
     BROWSER_MAX_CONCURRENT_PAGES: int = Field(default=5, gt=0, description="Maximum concurrent browser pages allowed.")
     BROWSER_DEFAULT_TIMEOUT_MS: int = Field(default=60000, gt=0, description="Default navigation/action timeout for Playwright in milliseconds.")
     BROWSER_LEARNING_INTERVAL_S: int = Field(default=14400, ge=60, description="Interval (seconds) for BrowseAgent learning cycle.")
     SERVICE_GMAIL_SIGNUP_URL: Optional[str] = Field(default="https://accounts.google.com/signup", description="URL for Gmail signup page.")
     SERVICE_DESCRIPT_LOGIN_URL: Optional[str] = Field(default="https://web.descript.com/login", description="URL for Descript login.")
-    TEMP_DOWNLOAD_DIR: str = Field(default="/app/temp_downloads", description="Directory for temporary file downloads by BrowseAgent.") # Added
+    TEMP_DOWNLOAD_DIR: str = Field(default="/app/temp_downloads", description="Directory for temporary file downloads by BrowseAgent.")
 
     # --- ThinkTool Configuration ---
     THINKTOOL_SYNTHESIS_INTERVAL_SECONDS: int = Field(default=3600, ge=60, description="Interval for ThinkTool's main synthesis cycle.")
@@ -113,7 +119,7 @@ class Settings(BaseSettings):
     MAILERCHECK_API_KEY: Optional[str] = Field(default=None, description="API Key for MailerCheck. Load from env var 'MAILERCHECK_API_KEY'.")
 
     # --- Operational ---
-    META_PROMPT: str = Field(default="You are a component of the Nolli AI Sales System. Your goal is profit maximization within ethical and legal boundaries defined by LegalAgent.", description="Default meta prompt fallback.") # Refined
+    META_PROMPT: str = Field(default="You are a component of the Nolli AI Sales System. Your goal is profit maximization within ethical and legal boundaries defined by LegalAgent.", description="Default meta prompt fallback.")
     LOG_LEVEL: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).")
     LOG_FILE_PATH: Optional[str] = Field(default=None, description="Path to the main log file. Set to empty string or None to disable file logging.")
     OPERATIONAL_LOG_FILE_PATH: Optional[str] = Field(default=None, description="Path to the operational/human-readable log file. Set to empty or None to disable.")
@@ -129,37 +135,24 @@ class Settings(BaseSettings):
     W8_ADDRESS: Optional[str] = Field(default=None, description="Address for W8 form. Load from env var 'W8_ADDRESS'.")
     W8_TIN: Optional[str] = Field(default=None, description="Tax ID Number for W8 form. Load from env var 'W8_TIN'.")
 
-    # --- Pydantic Settings Configuration ---
-    # Pydantic V2 uses model_config instead of class Config
     model_config = SettingsConfigDict(
-        env_file=('.env.local' if os.path.exists(os.path.join(os.path.dirname(__file__), '..', '.env.local')) else None), # Load .env.local if it exists at project root
+        env_file=('.env.local' if os.path.exists(os.path.join(os.path.dirname(__file__), '..', '.env.local')) else None),
         env_file_encoding='utf-8',
-        extra='ignore',       # Ignore extra fields from env vars not defined in the model
-        case_sensitive=False  # Environment variables are typically case-insensitive
+        extra='ignore',
+        case_sensitive=False
     )
 
-    # --- Custom Validators (Pydantic V2 Syntax) ---
     @field_validator(
         'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY', 'HOSTINGER_IMAP_PASS',
         'TWILIO_AUTH_TOKEN', 'DEEPGRAM_API_KEY', 'SENDER_COMPANY_ADDRESS',
-        mode='before', check_fields=False # check_fields=False for Pydantic V2 group validators
+        mode='before', check_fields=False
     )
     @classmethod
     def check_essential_secrets(cls, v: Any, info: ValidationInfo) -> Any:
-        """Ensures critical secrets are loaded."""
         field_name = info.field_name
-        # Value 'v' here is the value attempting to be set (could be from env or default)
-        # If it's from env, it's already loaded. If it's a default being applied because env var is missing,
-        # Pydantic handles 'Field(..., description="...")' as required.
-        # This validator primarily checks length for specific fields if they ARE provided.
         if field_name == 'DATABASE_ENCRYPTION_KEY' and v and len(str(v)) < 32:
-            # This error will be caught by Pydantic if the field is required and not provided.
-            # If it *is* provided but too short, this validator catches it.
             raise ValueError(f"CRITICAL: '{field_name}' must be at least 32 characters long.")
-        # For other essential secrets, Pydantic's `Field(...)` without a default makes them required.
-        # Pydantic will raise a `ValidationError` if they are missing from the environment and have no default.
-        # We can add a warning here if an *optional* secret is missing.
-        return v # Always return the value
+        return v
 
     @field_validator(
         'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY', 'CLAY_API_KEY', 'SMARTPROXY_PASSWORD', 'SMARTPROXY_USER',
@@ -167,9 +160,8 @@ class Settings(BaseSettings):
     )
     @classmethod
     def check_optional_secrets(cls, v: Any, info: ValidationInfo) -> Any:
-        """Logs warnings for optional secrets if not set."""
         field_name = info.field_name
-        if not v: # If the value is None or empty (meaning not set in env and no default that's non-empty)
+        if not v:
             logger.warning(f"Optional secret '{field_name}' (env var '{field_name.upper()}') is not set. Related features might be disabled or limited.")
         return v
 
@@ -180,66 +172,44 @@ class Settings(BaseSettings):
     )
     @classmethod
     def check_required_config(cls, v: Any, info: ValidationInfo) -> Any:
-        """Ensures non-secret but critical config is loaded (Pydantic handles this with `Field(...)`)."""
-        # Pydantic's default behavior for fields defined with `Field(...)` (no default)
-        # already makes them required. This validator is more for explicit logging or custom checks if needed.
-        # If `v` is None here, it means it wasn't found in env and has no default, Pydantic will raise error.
         if not v:
-             # This situation should ideally be caught by Pydantic itself if no default is provided for '...' fields.
-             # However, an explicit check can be useful for immediate logging.
              logger.critical(f"CRITICAL SETTING MISSING: '{info.field_name}' (env var '{info.field_name.upper()}') is not set and is required.")
-             # Pydantic will raise the ValidationError, so we don't need to raise here.
         return v
 
     @model_validator(mode='after')
     def set_default_imap_user(self) -> 'Settings':
-        """Set default IMAP user to HOSTINGER_EMAIL if not provided."""
         if self.HOSTINGER_IMAP_USER is None and self.HOSTINGER_EMAIL:
             self.HOSTINGER_IMAP_USER = self.HOSTINGER_EMAIL
             logger.debug(f"Defaulting HOSTINGER_IMAP_USER to HOSTINGER_EMAIL: {self.HOSTINGER_EMAIL}")
         return self
 
-    # --- Secret Management Helper ---
     def get_secret(self, secret_name: str) -> Optional[str]:
-        """
-        Safely retrieve a validated secret attribute by its field name.
-        Returns the value if the secret exists and is validated, otherwise None.
-        """
         secret_fields_defined_in_model = {
             'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY',
             'HOSTINGER_IMAP_PASS', 'TWILIO_AUTH_TOKEN', 'DEEPGRAM_API_KEY',
-            'SENDER_COMPANY_ADDRESS', # Not a secret, but handled by check_essential_secrets logic before
+            'SENDER_COMPANY_ADDRESS',
             'CLAY_API_KEY', 'SMARTPROXY_PASSWORD', 'SMARTPROXY_USER',
             'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY'
         }
         if hasattr(self, secret_name):
             value = getattr(self, secret_name)
-            if value: # Ensure value is not None or empty
-                return str(value) # Pydantic types like SecretStr will cast to str
+            if value:
+                return str(value)
             elif secret_name in secret_fields_defined_in_model:
-                 # If it's a known secret field but has no value (None), it means it wasn't set
-                 # and Pydantic should have caught it if it was truly required (no default).
-                 # If it had a default=None and wasn't set, this is expected.
                  logger.debug(f"Secret attribute '{secret_name}' is present but has no value (None/empty).")
                  return None
         logger.warning(f"Attempted to get non-existent or non-set attribute '{secret_name}' via get_secret, or it's an optional secret that's not set.")
         return None
 
-# --- Instantiate Settings ---
-# This is where the Pydantic validation error (DATABASE_URL missing) originates if env vars aren't set.
 try:
     settings = Settings()
-    logger.info(f"Settings loaded successfully for App: {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"Settings loaded successfully for App: {settings.APP_NAME} v{settings.APP_VERSION} (config/settings.py v2.8)")
     logger.info(f"Log Level set to: {settings.LOG_LEVEL}, Debug Mode: {settings.DEBUG}")
     db_host = getattr(settings.DATABASE_URL, 'host', 'N/A') if settings.DATABASE_URL else 'N/A'
     logger.info(f"Database URL Host (from settings object): {db_host}")
     logger.info(f"Base Agency URL (from settings object): {settings.AGENCY_BASE_URL}")
-except Exception as e: # Catches Pydantic's ValidationError among others
-    # This logger message might not appear if basicConfig in main.py hasn't run due to this error.
-    # The print statements in main.py's except block are crucial for seeing this error during startup.
-    logger.critical(f"CRITICAL ERROR in settings.py: Failed to initialize Settings object: {e}", exc_info=True)
-    # Re-raise to ensure main.py catches it and exits, preventing the app from trying to run with invalid settings.
-    # This also ensures the deployment system (Coolify) sees a failure.
+except Exception as e:
+    logger.critical(f"CRITICAL ERROR in settings.py (v2.8): Failed to initialize Settings object: {e}", exc_info=True)
     raise SystemExit(f"Settings initialization failed: {e}")
 
 # --- End of config/settings.py ---
