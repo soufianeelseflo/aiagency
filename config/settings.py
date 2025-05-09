@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     # If using Pydantic v2, field_validator is preferred.
     # The original code used Pydantic v1 style @validator.
     # For compatibility, I'll keep it, but for Pydantic v2, it would be:
-    # from pydantic import field_validator, model_validator
+    # from pydantic import field_validator, model_validator, ValidationInfo
 
     @validator('HOSTINGER_IMAP_USER', 'HOSTINGER_SMTP_USER', pre=True, always=True)
     def default_hostinger_user(cls, v, values):
@@ -149,7 +149,6 @@ class Settings(BaseSettings):
         # or if it's None, return as is.
         return value if isinstance(value, (str, type(None))) else None
 
-
 try:
     settings = Settings()
 except Exception as e_settings_init:
@@ -159,6 +158,3 @@ except Exception as e_settings_init:
     # if isinstance(e_settings_init, ValidationError):
     # print(e_settings_init.errors(), file=sys.stderr)
     sys.exit("Settings initialization failed. Application cannot start.")
-
-# No need to re-export SecretStr here if it's imported from pydantic at the top.
-# Modules needing it should import it directly from pydantic or use it via type hints on Settings fields.
