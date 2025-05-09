@@ -115,17 +115,8 @@ class Settings(BaseSettings):
         case_sensitive=False
     )
 
-    # Using model_validator for Pydantic v2 style if needed, or individual validators
-    # For simplicity, direct Pydantic v1 style validators are kept if they were there.
-    # If using Pydantic v2, field_validator is preferred.
-    # The original code used Pydantic v1 style @validator.
-    # For compatibility, I'll keep it, but for Pydantic v2, it would be:
-    # from pydantic import field_validator, model_validator, ValidationInfo
-
     @validator('HOSTINGER_IMAP_USER', 'HOSTINGER_SMTP_USER', pre=True, always=True)
     def default_hostinger_user(cls, v, values):
-        # This is Pydantic v1 style. For v2, use `values: ValidationInfo` and `values.data`
-        # For this example, assuming it works as intended or Pydantic handles compatibility.
         hostinger_email = values.get('HOSTINGER_EMAIL')
         if v is None and hostinger_email:
             return hostinger_email
@@ -145,8 +136,6 @@ class Settings(BaseSettings):
         value = getattr(self, key, None)
         if isinstance(value, SecretStr):
             return value.get_secret_value()
-        # If it's already a string (e.g. loaded from env for a non-SecretStr field, or default)
-        # or if it's None, return as is.
         return value if isinstance(value, (str, type(None))) else None
 
 try:
@@ -154,7 +143,4 @@ try:
 except Exception as e_settings_init:
     import sys
     print(f"CRITICAL ERROR: Failed to initialize Pydantic Settings: {e_settings_init}", file=sys.stderr)
-    # from pydantic import ValidationError # Uncomment if you need to check for ValidationError specifically
-    # if isinstance(e_settings_init, ValidationError):
-    # print(e_settings_init.errors(), file=sys.stderr)
     sys.exit("Settings initialization failed. Application cannot start.")
