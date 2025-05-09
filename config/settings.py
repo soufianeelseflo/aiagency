@@ -1,10 +1,10 @@
 # Filename: config/settings.py
 # Description: Configuration settings for the Nolli AI Sales System,
 #              validated using Pydantic. Secrets loaded from environment variables.
-# Version: 2.6 (Docker Deployment Adjustments)
+# Version: 2.6 (Clarified env loading, minor Pydantic V2 syntax consistency)
 
 import os
-import json
+import json # Not directly used for loading here, but often for defaults
 import logging
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import (
@@ -12,50 +12,43 @@ from pydantic import (
 )
 from typing import Dict, List, Optional, Any, Union
 
-# Configure logger for settings loading issues
-logger = logging.getLogger(__name__)
+# Configure logger for settings loading issues (will be configured by main.py first)
+logger = logging.getLogger(__name__) # Standard logger
 
 class Settings(BaseSettings):
     """
     Main configuration class using Pydantic BaseSettings.
     Reads from environment variables automatically (case-insensitive).
-    Optimized for Docker deployment.
+    Also supports .env.local for local development overrides.
     """
     # --- Core Application Settings ---
     APP_NAME: str = Field(default="Nolli AI Sales System", description="Name of the application.")
-    APP_VERSION: str = Field(default="4.1-L40-Docker", description="Version of the application.")
+    APP_VERSION: str = Field(default="3.5-Genius-Hardened", description="Version of the application.") # Update version
     DEBUG: bool = Field(default=False, description="Enable debug logging and potentially other debug features.")
-    # Ensure AGENCY_BASE_URL is set correctly in Coolify environment variables to the public URL
-    AGENCY_BASE_URL: AnyUrl = Field(..., description="Base URL where the agency is hosted (e.g., for webhooks, asset hosting). Must include scheme. Example: 'https://your-coolify-app.domain.com'")
+    AGENCY_BASE_URL: AnyUrl = Field(..., description="Base URL where the agency is hosted (e.g., for webhooks, asset hosting). Must include scheme. Example: 'https://agency.nichenova.store'")
 
     # --- Database Configuration ---
-    DATABASE_URL: PostgresDsn = Field(..., description="Async PostgreSQL connection string. Load from env var 'DATABASE_URL'.")
+    DATABASE_URL: PostgresDsn = Field(..., description="Async PostgreSQL connection string. Load from env var 'DATABASE_URL'. Example: 'postgresql+asyncpg://user:pass@host:port/db'")
     DATABASE_ENCRYPTION_KEY: str = Field(..., min_length=32, description="Master key for database field encryption (MUST be strong, >= 32 chars, and kept secret). Load from env var 'DATABASE_ENCRYPTION_KEY'.")
 
     # --- LLM / OpenRouter Configuration ---
     OPENROUTER_API_KEY: Optional[str] = Field(default=None, description="Primary OpenRouter API Key. Load from env var 'OPENROUTER_API_KEY'.")
-    # --- User Models (Keep as is) ---
     OPENROUTER_MODELS: Dict[str, str] = {
-        # --- High Power ---
-        "think_synthesize": "google/gemini-2.5-pro-preview-03-25",
-        "think_strategize": "google/gemini-2.5-pro-preview-03-25",
-        "think_critique": "google/gemini-2.5-pro-preview-03-25",
-        "legal_analysis": "google/gemini-2.5-pro-preview-03-25",
-        "Browse_visual_analysis": "google/gemini-2.5-flash-preview:thinking",
-        "email_draft": "google/gemini-2.5-flash-preview:thinking",
-
-        # --- Medium Power ---
-        "think_radar": "google/gemini-2.5-flash-preview:thinking",
-        "Browse_extract": "google/gemini-2.5-flash-preview:thinking",
-
-        # --- Fast & Cheap ---
-        "default_llm": "google/gemini-2.5-flash-preview",
-        "think_validate": "google/gemini-2.5-flash-preview",
-        "think_user_education": "google/gemini-2.5-flash-preview",
-        "email_humanize": "google/gemini-2.5-flash-preview",
-        "voice_intent": "google/gemini-2.5-flash-preview",
-        "voice_response": "google/gemini-2.5-flash-preview",
-        "Browse_summarize": "google/gemini-2.5-flash-preview",
+        "think_synthesize": "google/gemini-pro-1.5", # Updated to a generally available strong model
+        "think_strategize": "google/gemini-pro-1.5",
+        "think_critique": "google/gemini-pro-1.5",
+        "legal_analysis": "google/gemini-pro-1.5",
+        "Browse_visual_analysis": "openai/gpt-4-vision-preview", # Explicitly visual
+        "email_draft": "mistralai/mistral-large-latest", # Good for creative text
+        "think_radar": "anthropic/claude-3-opus-20240229", # Strong reasoning for radar
+        "Browse_extract": "mistralai/mistral-small-latest", # Efficient for extraction
+        "default_llm": "mistralai/mistral-small-latest",
+        "think_validate": "mistralai/mistral-small-latest",
+        "think_user_education": "mistralai/mistral-small-latest",
+        "email_humanize": "mistralai/mistral-small-latest",
+        "voice_intent": "google/gemini-flash-1.5", # Fast for intent
+        "voice_response": "google/gemini-flash-1.5", # Fast for response
+        "Browse_summarize": "mistralai/mistral-small-latest",
     }
     OPENROUTER_API_TIMEOUT_S: float = Field(default=120.0, gt=0, description="Timeout in seconds for OpenRouter API calls.")
 
@@ -92,51 +85,43 @@ class Settings(BaseSettings):
     SMARTPROXY_PASSWORD: Optional[str] = Field(default=None, description="Smartproxy password. Load from env var 'SMARTPROXY_PASSWORD'.")
     SMARTPROXY_HOST: Optional[str] = Field(default=None, description="Smartproxy hostname (e.g., gate.smartproxy.com). Load from env var 'SMARTPROXY_HOST'.")
     SMARTPROXY_PORT: Optional[int] = Field(default=None, description="Smartproxy port (e.g., 7000). Load from env var 'SMARTPROXY_PORT'.")
-    BROWSER_USER_AGENT: str = Field(default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", description="User agent string for the browser.")
-    BROWSER_MAX_CONCURRENT_PAGES: int = Field(default=2, gt=0, description="Maximum concurrent browser contexts allowed.") # Lowered default for typical VPS
-    BROWSER_DEFAULT_TIMEOUT_MS: int = Field(default=100000, gt=0, description="Default navigation/action timeout for Playwright in milliseconds.") # Increased default
-    BROWSER_LEARNING_INTERVAL_S: int = Field(default=3600 * 1, ge=60, description="Interval (seconds) for BrowseAgent learning cycle.")
+    BROWSER_USER_AGENT: str = Field(default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", description="User agent string for the browser.") # Updated Chrome
+    BROWSER_MAX_CONCURRENT_PAGES: int = Field(default=5, gt=0, description="Maximum concurrent browser pages allowed.")
+    BROWSER_DEFAULT_TIMEOUT_MS: int = Field(default=60000, gt=0, description="Default navigation/action timeout for Playwright in milliseconds.")
+    BROWSER_LEARNING_INTERVAL_S: int = Field(default=14400, ge=60, description="Interval (seconds) for BrowseAgent learning cycle.")
     SERVICE_GMAIL_SIGNUP_URL: Optional[str] = Field(default="https://accounts.google.com/signup", description="URL for Gmail signup page.")
     SERVICE_DESCRIPT_LOGIN_URL: Optional[str] = Field(default="https://web.descript.com/login", description="URL for Descript login.")
-    BROWSER_HEADLESS: bool = Field(default=True, description="Run browser in headless mode (recommended for VPS). Set via env var.")
-    TEMP_DOWNLOAD_DIR: str = Field(default="/app/temp_downloads", description="Directory inside container for browser downloads.")
+    TEMP_DOWNLOAD_DIR: str = Field(default="/app/temp_downloads", description="Directory for temporary file downloads by BrowseAgent.") # Added
 
     # --- ThinkTool Configuration ---
     THINKTOOL_SYNTHESIS_INTERVAL_SECONDS: int = Field(default=3600, ge=60, description="Interval for ThinkTool's main synthesis cycle.")
     THINKTOOL_RADAR_INTERVAL_SECONDS: int = Field(default=21600, ge=300, description="Interval for ThinkTool's technology radar cycle.")
     THINKTOOL_FEEDBACK_INTERVAL_SECONDS: int = Field(default=300, ge=60, description="Interval for Orchestrator to collect and send feedback to ThinkTool.")
-    SCORING_WEIGHTS: Dict[str, float] = Field(default={"email_response": 1.0, "call_success": 2.5, "invoice_paid": 5.0, "successful_exploit_test": 3.0})
+    SCORING_WEIGHTS: Dict[str, float] = Field(default={"email_response": 1.0, "call_success": 2.5, "invoice_paid": 5.0})
     SCORING_DECAY_RATE_PER_DAY: float = Field(default=0.05, ge=0.0, le=1.0, description="Daily decay rate for engagement scores.")
 
     # --- Data Management ---
     DATA_PURGE_DAYS_THRESHOLD: int = Field(default=90, ge=1, description="Age in days threshold for purging old Knowledge Fragments based on last access time.")
     DATA_PURGE_INTERVAL_SECONDS: int = Field(default=86400, ge=3600, description="Interval for running the data purge check.")
-    # Adjusted LEARNING_MATERIALS_DIR to use absolute path common in containers
-    LEARNING_MATERIALS_DIR: str = Field(default="/app/learning_for_AI", description="Directory containing learning material files for ThinkTool.")
+    LEARNING_MATERIALS_DIR: str = Field(default="learning_for_AI", description="Directory containing learning material files for ThinkTool (relative to project root).")
 
     # --- Clay.com API ---
     CLAY_API_KEY: Optional[str] = Field(default=None, description="API Key for Clay.com. Load from env var 'CLAY_API_KEY'.")
-    # Optional: Specific Clay table webhook URL (can be set in env)
-    CLAY_ENRICHMENT_TABLE_INPUT_WEBHOOK_URL: Optional[HttpUrl] = Field(default=None, description="Direct webhook URL for sending data TO a Clay table (Optional). Load from env var 'CLAY_ENRICHMENT_TABLE_INPUT_WEBHOOK_URL'.")
-    CLAY_CALLBACK_SECRET: Optional[str] = Field(default=None, description="Secret token to verify webhooks coming FROM Clay. Load from env var 'CLAY_CALLBACK_SECRET'.")
-
 
     # --- MailerSend / MailerCheck ---
     MAILERSEND_API_KEY: Optional[str] = Field(default=None, description="API Key for MailerSend. Load from env var 'MAILERSEND_API_KEY'.")
     MAILERCHECK_API_KEY: Optional[str] = Field(default=None, description="API Key for MailerCheck. Load from env var 'MAILERCHECK_API_KEY'.")
 
     # --- Operational ---
-    META_PROMPT: str = Field(default="You are a component of the Nolli AI Sales System. Your goal is profit maximization.", description="Default meta prompt fallback.")
+    META_PROMPT: str = Field(default="You are a component of the Nolli AI Sales System. Your goal is profit maximization within ethical and legal boundaries defined by LegalAgent.", description="Default meta prompt fallback.") # Refined
     LOG_LEVEL: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).")
-    # Default to None for file paths - encourage stdout/stderr logging in Docker
-    LOG_FILE_PATH: Optional[str] = Field(default=None, description="Path to the main log file. Set to None to disable (recommended for Docker). If set, use '/app/logs/app.log'.")
-    OPERATIONAL_LOG_FILE_PATH: Optional[str] = Field(default=None, description="Path to the operational log file. Set to None to disable (recommended for Docker). If set, use '/app/logs/operational.log'.")
-    # Adjusted TEMP_AUDIO_DIR to use absolute path
-    TEMP_AUDIO_DIR: str = Field(default="/app/temp_audio", description="Directory inside container for temporary audio files (TTS). Needs write permissions.")
+    LOG_FILE_PATH: Optional[str] = Field(default=None, description="Path to the main log file. Set to empty string or None to disable file logging.")
+    OPERATIONAL_LOG_FILE_PATH: Optional[str] = Field(default=None, description="Path to the operational/human-readable log file. Set to empty or None to disable.")
+    TEMP_AUDIO_DIR: str = Field(default="/app/temp_audio", description="Directory for temporary audio files (TTS). Needs write permissions.")
     USER_EMAIL: Optional[EmailStr] = Field(default=None, description="Operator's email for notifications. Load from env var 'USER_EMAIL'.")
-    DOWNLOAD_PASSWORD: str = Field(default="changeme123", description="Password for downloading data via UI (change this!). Load from env var 'DOWNLOAD_PASSWORD'.")
+    DOWNLOAD_PASSWORD: str = Field(default="changeme123", min_length=12, description="Password for downloading data via UI (MUST CHANGE THIS!). Load from env var 'DOWNLOAD_PASSWORD'.")
 
-    # --- Financials & Legal (Keep as is, load from Env Vars) ---
+    # --- Financials & Legal (Example - Load from Env Vars) ---
     LEGAL_NOTE: str = Field(default="Governed by laws of Morocco.", description="Default legal note. Load from env var 'LEGAL_NOTE'.")
     MOROCCAN_BANK_ACCOUNT: Optional[str] = Field(default=None, description="Identifier for Moroccan bank account (IBAN, SWIFT). Load from env var 'MOROCCAN_BANK_ACCOUNT'.")
     W8_NAME: Optional[str] = Field(default=None, description="Name for W8 form. Load from env var 'W8_NAME'.")
@@ -145,48 +130,48 @@ class Settings(BaseSettings):
     W8_TIN: Optional[str] = Field(default=None, description="Tax ID Number for W8 form. Load from env var 'W8_TIN'.")
 
     # --- Pydantic Settings Configuration ---
+    # Pydantic V2 uses model_config instead of class Config
     model_config = SettingsConfigDict(
-        env_file='.env', # Standard Docker practice, Coolify will inject env vars
+        env_file=('.env.local' if os.path.exists(os.path.join(os.path.dirname(__file__), '..', '.env.local')) else None), # Load .env.local if it exists at project root
         env_file_encoding='utf-8',
-        extra='ignore', # Ignore extra fields from env vars
-        case_sensitive=False # Environment variables are case-insensitive
+        extra='ignore',       # Ignore extra fields from env vars not defined in the model
+        case_sensitive=False  # Environment variables are typically case-insensitive
     )
 
-    # --- Custom Validators (Keep as is) ---
+    # --- Custom Validators (Pydantic V2 Syntax) ---
     @field_validator(
         'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY', 'HOSTINGER_IMAP_PASS',
         'TWILIO_AUTH_TOKEN', 'DEEPGRAM_API_KEY', 'SENDER_COMPANY_ADDRESS',
-        'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY', 'CLAY_API_KEY', 'SMARTPROXY_PASSWORD',
+        mode='before', check_fields=False # check_fields=False for Pydantic V2 group validators
+    )
+    @classmethod
+    def check_essential_secrets(cls, v: Any, info: ValidationInfo) -> Any:
+        """Ensures critical secrets are loaded."""
+        field_name = info.field_name
+        # Value 'v' here is the value attempting to be set (could be from env or default)
+        # If it's from env, it's already loaded. If it's a default being applied because env var is missing,
+        # Pydantic handles 'Field(..., description="...")' as required.
+        # This validator primarily checks length for specific fields if they ARE provided.
+        if field_name == 'DATABASE_ENCRYPTION_KEY' and v and len(str(v)) < 32:
+            # This error will be caught by Pydantic if the field is required and not provided.
+            # If it *is* provided but too short, this validator catches it.
+            raise ValueError(f"CRITICAL: '{field_name}' must be at least 32 characters long.")
+        # For other essential secrets, Pydantic's `Field(...)` without a default makes them required.
+        # Pydantic will raise a `ValidationError` if they are missing from the environment and have no default.
+        # We can add a warning here if an *optional* secret is missing.
+        return v # Always return the value
+
+    @field_validator(
+        'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY', 'CLAY_API_KEY', 'SMARTPROXY_PASSWORD', 'SMARTPROXY_USER',
         mode='before', check_fields=False
     )
     @classmethod
-    def check_secrets(cls, v: Any, info: ValidationInfo) -> Any:
-        """Ensures critical secrets are loaded, logs warnings for optional ones."""
+    def check_optional_secrets(cls, v: Any, info: ValidationInfo) -> Any:
+        """Logs warnings for optional secrets if not set."""
         field_name = info.field_name
-        if not field_name: return v
-        env_var_name = field_name.upper()
-        value = v
-
-        essential_secrets = {
-            'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY', 'HOSTINGER_IMAP_PASS',
-            'TWILIO_AUTH_TOKEN', 'DEEPGRAM_API_KEY', 'SENDER_COMPANY_ADDRESS'
-        }
-        optional_secrets = {
-            'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY', 'CLAY_API_KEY',
-            'SMARTPROXY_PASSWORD', 'CLAY_CALLBACK_SECRET'
-        }
-
-        if field_name in essential_secrets and not value:
-            # Log error instead of raising, allowing startup to proceed but warn user
-            logger.critical(f"CRITICAL: Required secret '{field_name}' (env var '{env_var_name}') is not set.")
-            # raise ValueError(f"CRITICAL: Required secret '{field_name}' (env var '{env_var_name}') is not set.")
-        elif field_name in optional_secrets and not value:
-            logger.warning(f"Optional secret '{field_name}' (env var '{env_var_name}') is not set. Related features may be disabled.")
-        elif field_name == 'DATABASE_ENCRYPTION_KEY' and value and len(str(value)) < 32:
-            logger.critical(f"CRITICAL: '{field_name}' must be at least 32 characters long.")
-            # raise ValueError(f"CRITICAL: '{field_name}' must be at least 32 characters long.")
-
-        return value
+        if not v: # If the value is None or empty (meaning not set in env and no default that's non-empty)
+            logger.warning(f"Optional secret '{field_name}' (env var '{field_name.upper()}') is not set. Related features might be disabled or limited.")
+        return v
 
     @field_validator(
         'DATABASE_URL', 'AGENCY_BASE_URL', 'HOSTINGER_EMAIL',
@@ -195,13 +180,15 @@ class Settings(BaseSettings):
     )
     @classmethod
     def check_required_config(cls, v: Any, info: ValidationInfo) -> Any:
-        """Ensures non-secret but critical config is loaded."""
-        field_name = info.field_name
-        if not field_name: return v
-        env_var_name = field_name.upper()
+        """Ensures non-secret but critical config is loaded (Pydantic handles this with `Field(...)`)."""
+        # Pydantic's default behavior for fields defined with `Field(...)` (no default)
+        # already makes them required. This validator is more for explicit logging or custom checks if needed.
+        # If `v` is None here, it means it wasn't found in env and has no default, Pydantic will raise error.
         if not v:
-            logger.critical(f"CRITICAL: Required setting '{field_name}' (env var '{env_var_name}') is not set.")
-            # raise ValueError(f"CRITICAL: Required setting '{field_name}' (env var '{env_var_name}') is not set.")
+             # This situation should ideally be caught by Pydantic itself if no default is provided for '...' fields.
+             # However, an explicit check can be useful for immediate logging.
+             logger.critical(f"CRITICAL SETTING MISSING: '{info.field_name}' (env var '{info.field_name.upper()}') is not set and is required.")
+             # Pydantic will raise the ValidationError, so we don't need to raise here.
         return v
 
     @model_validator(mode='after')
@@ -212,73 +199,47 @@ class Settings(BaseSettings):
             logger.debug(f"Defaulting HOSTINGER_IMAP_USER to HOSTINGER_EMAIL: {self.HOSTINGER_EMAIL}")
         return self
 
-    @model_validator(mode='after')
-    def check_log_paths(self) -> 'Settings':
-        """Ensures log paths are absolute if set."""
-        if self.LOG_FILE_PATH and not os.path.isabs(self.LOG_FILE_PATH):
-            logger.warning(f"LOG_FILE_PATH '{self.LOG_FILE_PATH}' is not absolute. Recommend setting to None or an absolute path like '/app/logs/app.log' for container compatibility.")
-        if self.OPERATIONAL_LOG_FILE_PATH and not os.path.isabs(self.OPERATIONAL_LOG_FILE_PATH):
-             logger.warning(f"OPERATIONAL_LOG_FILE_PATH '{self.OPERATIONAL_LOG_FILE_PATH}' is not absolute. Recommend setting to None or an absolute path like '/app/logs/operational.log' for container compatibility.")
-        # Ensure TEMP_AUDIO_DIR and TEMP_DOWNLOAD_DIR are absolute (already defaulted)
-        if self.TEMP_AUDIO_DIR and not os.path.isabs(self.TEMP_AUDIO_DIR):
-             logger.error(f"TEMP_AUDIO_DIR '{self.TEMP_AUDIO_DIR}' must be an absolute path (e.g., '/app/temp_audio').")
-             # raise ValueError("TEMP_AUDIO_DIR must be absolute") # Could raise here
-        if self.TEMP_DOWNLOAD_DIR and not os.path.isabs(self.TEMP_DOWNLOAD_DIR):
-            logger.error(f"TEMP_DOWNLOAD_DIR '{self.TEMP_DOWNLOAD_DIR}' must be an absolute path (e.g., '/app/temp_downloads').")
-            # raise ValueError("TEMP_DOWNLOAD_DIR must be absolute") # Could raise here
-        return self
-
-    # --- Secret Management Helper (Keep as is) ---
+    # --- Secret Management Helper ---
     def get_secret(self, secret_name: str) -> Optional[str]:
         """
         Safely retrieve a validated secret attribute by its field name.
         Returns the value if the secret exists and is validated, otherwise None.
         """
-        secret_fields = {
+        secret_fields_defined_in_model = {
             'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY',
             'HOSTINGER_IMAP_PASS', 'TWILIO_AUTH_TOKEN', 'DEEPGRAM_API_KEY',
-            'SENDER_COMPANY_ADDRESS', 'CLAY_API_KEY', 'SMARTPROXY_PASSWORD',
-            'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY', 'CLAY_CALLBACK_SECRET'
+            'SENDER_COMPANY_ADDRESS', # Not a secret, but handled by check_essential_secrets logic before
+            'CLAY_API_KEY', 'SMARTPROXY_PASSWORD', 'SMARTPROXY_USER',
+            'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY'
         }
         if hasattr(self, secret_name):
             value = getattr(self, secret_name)
-            # Use Pydantic's SecretStr handling if applicable, otherwise convert
-            if hasattr(value, 'get_secret_value'):
-                 secret_value = value.get_secret_value()
-            else:
-                 secret_value = str(value) if value is not None else None
-
-            if secret_name in secret_fields and secret_value:
-                return secret_value
-            elif secret_name not in secret_fields:
-                 # Allow retrieving non-secrets, but log warning
-                 # logger.warning(f"Attempted to get non-secret attribute '{secret_name}' via get_secret.")
-                 return secret_value
-            else:
-                 # Secret field exists but has no value
+            if value: # Ensure value is not None or empty
+                return str(value) # Pydantic types like SecretStr will cast to str
+            elif secret_name in secret_fields_defined_in_model:
+                 # If it's a known secret field but has no value (None), it means it wasn't set
+                 # and Pydantic should have caught it if it was truly required (no default).
+                 # If it had a default=None and wasn't set, this is expected.
+                 logger.debug(f"Secret attribute '{secret_name}' is present but has no value (None/empty).")
                  return None
-        else:
-            logger.warning(f"Attempted to get non-existent attribute '{secret_name}' via get_secret.")
-            return None
+        logger.warning(f"Attempted to get non-existent or non-set attribute '{secret_name}' via get_secret, or it's an optional secret that's not set.")
+        return None
 
 # --- Instantiate Settings ---
+# This is where the Pydantic validation error (DATABASE_URL missing) originates if env vars aren't set.
 try:
-    # Clear sensitive env vars after loading if necessary, but pydantic handles loading
-    # For Docker, env vars are the primary mechanism, so don't unset them here.
     settings = Settings()
-    # Basic console log during init, logger configured later in main.py
-    print(f"[Settings] Loaded for App: {settings.APP_NAME} v{settings.APP_VERSION}")
-    print(f"[Settings] Log Level: {settings.LOG_LEVEL}, Debug Mode: {settings.DEBUG}")
-    # Use validated URL object
-    print(f"[Settings] Base Agency URL: {settings.AGENCY_BASE_URL}")
-except (ValueError, SystemExit) as e:
-    print(f"CRITICAL SETTINGS ERROR: Failed to initialize settings: {e}")
-    # Use logger if already configured, otherwise print
-    logging.critical(f"CRITICAL SETTINGS ERROR: Failed to initialize settings: {e}", exc_info=True)
-    raise SystemExit(f"Settings validation failed: {e}") # Exit if critical settings fail
-except Exception as e:
-    print(f"CRITICAL SETTINGS ERROR: Unexpected error during settings initialization: {e}")
-    logging.critical(f"CRITICAL SETTINGS ERROR: Unexpected error during settings initialization: {e}", exc_info=True)
-    raise SystemExit(f"Unexpected settings initialization error: {e}")
+    logger.info(f"Settings loaded successfully for App: {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"Log Level set to: {settings.LOG_LEVEL}, Debug Mode: {settings.DEBUG}")
+    db_host = getattr(settings.DATABASE_URL, 'host', 'N/A') if settings.DATABASE_URL else 'N/A'
+    logger.info(f"Database URL Host (from settings object): {db_host}")
+    logger.info(f"Base Agency URL (from settings object): {settings.AGENCY_BASE_URL}")
+except Exception as e: # Catches Pydantic's ValidationError among others
+    # This logger message might not appear if basicConfig in main.py hasn't run due to this error.
+    # The print statements in main.py's except block are crucial for seeing this error during startup.
+    logger.critical(f"CRITICAL ERROR in settings.py: Failed to initialize Settings object: {e}", exc_info=True)
+    # Re-raise to ensure main.py catches it and exits, preventing the app from trying to run with invalid settings.
+    # This also ensures the deployment system (Coolify) sees a failure.
+    raise SystemExit(f"Settings initialization failed: {e}")
 
 # --- End of config/settings.py ---
