@@ -111,7 +111,9 @@
         .status-available,
         .status-success,
         .status-active,
-        .status-completed {
+        .status-completed,
+        .status-initializing {
+            /* Added initializing as green for startup */
             background-color: #00e676;
             /* Bright Green */
         }
@@ -121,7 +123,9 @@
         .status-failure,
         .status-error,
         .status-banned,
-        .status-failed {
+        .status-failed,
+        .status-failed_initialization {
+            /* Added failed_initialization as red */
             background-color: #ff1744;
             /* Bright Red */
         }
@@ -136,21 +140,19 @@
 
         .status-idle,
         .status-pending,
-        .status-unknown,
-        .status-initializing {
+        .status-unknown {
             background-color: #607d8b;
             /* Blue Grey */
         }
 
         .status-executing,
-        .status-working {
+        .status-working,
+        .status-planning,
+        /* Planning can also be blue */
+        .status-starting {
+            /* Added starting for healthcheck */
             background-color: #29b6f6;
             /* Light Blue */
-        }
-
-        .status-planning {
-            background-color: #ab47bc;
-            /* Purple */
         }
 
         .status-learning {
@@ -302,7 +304,6 @@
             <button id="approve-button" onclick="approveAgency()" style="display: none;">Approve Agency
                 Operation</button>
             <button onclick="exportData('clients')">Export Client Data (CSV)</button>
-            <!-- Add other global controls here if needed -->
         </div>
 
         <h2>Key Performance Indicators</h2>
@@ -339,7 +340,7 @@
             </div>
             <div class="card">
                 <h3>Avg. Client Score</h3>
-                <p id="kpi-avg-score">0.0</p>
+                <p id="kpi-avg-client-score">0.0</p>
                 <span>Across active clients</span>
             </div>
             <div class="card">
@@ -359,13 +360,11 @@
                 <h3>LLM Clients</h3>
                 <div id="status-llm">Loading...</div>
             </div>
-            <!-- Add other core system status cards if needed -->
         </div>
 
         <h2>Agent Status</h2>
         <div class="grid" id="agent-status-grid">
             <p>Loading agent statuses...</p>
-            <!-- Agent status cards will be populated by JavaScript -->
         </div>
 
         <h2>Actions & Testing</h2>
@@ -380,7 +379,7 @@
             <section>
                 <h3>Test Voice Call</h3>
                 <label for="test-call-number">Enter phone number (E.164 format, e.g., +15551234567):</label>
-                <input type="tel" id="+212717688467" placeholder="+15551234567"><br>
+                <input type="tel" id="test-call-number" placeholder="+15551234567"><br>
                 <button onclick="testVoiceCall()">Initiate Test Call</button>
             </section>
 
@@ -389,7 +388,6 @@
                 <p>Trigger the workflow to generate 3 sample UGC videos and email them to the operator.</p>
                 <button onclick="generateVideos()">Generate Videos</button>
             </section>
-            <!-- Add more action sections as needed -->
         </div>
 
     </div>
@@ -408,7 +406,7 @@
             calls_made_24h: document.getElementById('kpi-calls-made'),
             calls_success_24h: document.getElementById('kpi-calls-success'),
             call_success_rate: document.getElementById('kpi-call-success-rate'),
-            avg_client_score: document.getElementById('kpi-avg-score'),
+            avg_client_score: document.getElementById('kpi-avg-client-score'),
             active_clients: document.getElementById('kpi-active-clients')
         };
         const statusOrchestrator = document.getElementById('status-orchestrator');
@@ -422,31 +420,25 @@
         async function fetchStatus() {
             console.debug("Fetching status and KPIs...");
             try {
-                const response = await fetch('/api/status_kpi'); // Endpoint defined in ui/app.py
+                const response = await fetch('/api/status_kpi');
                 if (!response.ok) {
-                    // Handle non-2xx responses gracefully
                     let errorMsg = `HTTP error! status: ${response.status} ${response.statusText}`;
-                    try {
-                        const errorData = await response.json();
-                        errorMsg = errorData.error || errorMsg;
-                    } catch (e) { /* Ignore if response is not JSON */ }
+                    try { const errorData = await response.json(); errorMsg = errorData.error || errorMsg; } catch (e) { /* Ignore if response is not JSON */ }
                     throw new Error(errorMsg);
                 }
                 const data = await response.json();
                 console.debug("Status data received:", data);
 
-                // Update UI elements safely
                 updateApprovalStatus(data.approved_for_operation);
                 updateKpis(data.kpis);
                 updateOrchestratorStatus(data.orchestrator_status);
-                updateLlmStatus(data.llm_client_status); // Pass the specific LLM status object
+                updateLlmStatus(data.llm_client_status);
                 updateAgentStatuses(data.agent_statuses);
 
             } catch (error) {
                 console.error('Error fetching status:', error);
                 approvalStatusDiv.textContent = `Error fetching status: ${error.message}`;
-                approvalStatusDiv.className = 'not-approved'; // Use error styling
-                // Clear other potentially stale data or show error state
+                approvalStatusDiv.className = 'not-approved';
                 statusOrchestrator.innerHTML = `<span class="status-indicator status-error"></span>Error`;
                 statusLlm.innerHTML = `<p>Error loading LLM status.</p>`;
                 agentStatusGrid.innerHTML = '<p>Error loading agent statuses.</p>';
@@ -466,17 +458,15 @@
         }
 
         function updateKpis(kpis = {}) {
-            // Use nullish coalescing (??) for safer defaults
-            kpiElements.total_profit.textContent = `$${kpis.total_profit?.toFixed(2) ?? '0.00'}`;
+            kpiElements.total_profit.textContent = `$${(kpis.total_profit ?? 0).toFixed(2)}`;
             kpiElements.emails_sent_24h.textContent = kpis.emails_sent_24h ?? 0;
             kpiElements.emails_opened_24h.textContent = kpis.emails_opened_24h ?? 0;
             kpiElements.emails_responded_24h.textContent = kpis.emails_responded_24h ?? 0;
             kpiElements.calls_made_24h.textContent = kpis.calls_made_24h ?? 0;
             kpiElements.calls_success_24h.textContent = kpis.calls_success_24h ?? 0;
-            kpiElements.avg_client_score.textContent = kpis.avg_client_score?.toFixed(3) ?? '0.0';
+            kpiElements.avg_client_score.textContent = (kpis.avg_client_score ?? 0.0).toFixed(3);
             kpiElements.active_clients.textContent = kpis.active_clients ?? 0;
 
-            // Calculate Rates safely
             const sent = Number(kpis.emails_sent_24h ?? 0);
             const opened = Number(kpis.emails_opened_24h ?? 0);
             const responded = Number(kpis.emails_responded_24h ?? 0);
@@ -484,7 +474,7 @@
             const callsSuccess = Number(kpis.calls_success_24h ?? 0);
 
             const openRate = sent > 0 ? (opened / sent * 100).toFixed(1) : '0.0';
-            const responseRate = sent > 0 ? (responded / sent * 100).toFixed(1) : '0.0';
+            const responseRate = sent > 0 ? (responded / sent * 100).toFixed(1) : '0.0'; // Corrected this line
             const callSuccessRate = callsMade > 0 ? (callsSuccess / callsMade * 100).toFixed(1) : '0.0';
 
             kpiElements.open_rate.textContent = `Open Rate: ${openRate}%`;
@@ -493,19 +483,17 @@
         }
 
         function updateOrchestratorStatus(orchStatus = 'unknown') {
-            const statusClass = `status-${String(orchStatus).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`; // Sanitize class name
+            const statusClass = `status-${String(orchStatus).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
             const statusText = String(orchStatus).charAt(0).toUpperCase() + String(orchStatus).slice(1);
             statusOrchestrator.innerHTML = `<span class="status-indicator ${statusClass}"></span>${statusText}`;
         }
 
         function updateLlmStatus(llmStatuses = {}) {
             let llmHtml = '';
-            // Expecting format like {"primary": "available", "secondary": "unavailable"}
             if (llmStatuses && typeof llmStatuses === 'object' && Object.keys(llmStatuses).length > 0) {
                 for (const [keyId, status] of Object.entries(llmStatuses)) {
-                    const statusClass = `status-${String(status).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`; // Sanitize
+                    const statusClass = `status-${String(status).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
                     const statusText = String(status).charAt(0).toUpperCase() + String(status).slice(1);
-                    // Display a more descriptive key name if possible
                     const displayKeyName = keyId === 'primary' ? 'Primary LLM' : `LLM (${keyId})`;
                     llmHtml += `<p><span class="status-indicator ${statusClass}"></span>${displayKeyName}: ${statusText}</p>`;
                 }
@@ -516,19 +504,17 @@
         }
 
         function updateAgentStatuses(agentStatuses = {}) {
-            agentStatusGrid.innerHTML = ''; // Clear previous statuses
+            agentStatusGrid.innerHTML = '';
             if (agentStatuses && typeof agentStatuses === 'object' && Object.keys(agentStatuses).length > 0) {
-                // Sort agents alphabetically for consistent order
                 const sortedAgentNames = Object.keys(agentStatuses).sort();
                 sortedAgentNames.forEach(agentName => {
-                    const statusInfo = agentStatuses[agentName] || {}; // Default to empty object
+                    const statusInfo = agentStatuses[agentName] || {};
                     const status = statusInfo.status || 'unknown';
-                    const statusClass = `status-${String(status).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`; // Sanitize
+                    const statusClass = `status-${String(status).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
                     const statusText = String(status).charAt(0).toUpperCase() + String(status).slice(1);
                     const card = document.createElement('div');
                     card.className = 'card';
 
-                    // Safely access nested properties
                     const queueSize = statusInfo.queue_size ?? 'N/A';
                     const tasksProcessed = statusInfo.tasks_processed_session ?? 0;
                     const errors = statusInfo.errors_encountered_session ?? 0;
@@ -550,18 +536,16 @@
             }
         }
 
-
         // --- Action Functions ---
 
         async function approveAgency() {
             if (!confirm('Are you sure you want to approve the agency for full operation? This enables potentially costly actions.')) return;
             try {
-                // Use the correct endpoint defined in ui/app.py
                 const response = await fetch('/api/approve_agency', { method: 'POST' });
                 const data = await response.json();
                 if (response.ok && data.status === 'approved') {
                     alert('Agency approved successfully!');
-                    fetchStatus(); // Refresh status display immediately
+                    fetchStatus();
                 } else {
                     alert(`Approval failed: ${data.error || data.message || 'Unknown error'}`);
                 }
@@ -572,7 +556,7 @@
         }
 
         async function exportData(exportType = 'clients') {
-            const password = prompt("Enter download password to export data:"); // Use configured password
+            const password = prompt("Enter download password to export data:");
             if (!password) return;
             try {
                 const response = await fetch('/api/export_data', {
@@ -587,22 +571,18 @@
                     const a = document.createElement('a');
                     a.style.display = 'none';
                     a.href = url;
-                    // Extract filename from content-disposition or default
                     const disposition = response.headers.get('content-disposition');
-                    let filename = `${exportType}_export.csv`; // Default filename
+                    let filename = `${exportType}_export.csv`;
                     if (disposition && disposition.indexOf('attachment') !== -1) {
                         const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
                         const matches = filenameRegex.exec(disposition);
-                        if (matches != null && matches[1]) {
-                            filename = matches[1].replace(/['"]/g, '');
-                        }
+                        if (matches != null && matches[1]) { filename = matches[1].replace(/['"]/g, ''); }
                     }
                     a.download = filename;
                     document.body.appendChild(a);
                     a.click();
                     window.URL.revokeObjectURL(url);
                     document.body.removeChild(a);
-                    // No alert needed, download starts automatically
                 } else {
                     const data = await response.json();
                     alert(`Export failed: ${data.error || response.statusText}`);
@@ -615,10 +595,7 @@
 
         async function submitFeedback() {
             const feedback = feedbackTextArea.value.trim();
-            if (!feedback) {
-                alert("Please enter feedback before submitting.");
-                return;
-            }
+            if (!feedback) { alert("Please enter feedback before submitting."); return; }
             try {
                 const response = await fetch('/api/submit_feedback', {
                     method: 'POST',
@@ -628,7 +605,7 @@
                 const data = await response.json();
                 if (response.ok && data.status === 'success') {
                     alert('Feedback submitted successfully!');
-                    feedbackTextArea.value = ''; // Clear the text area
+                    feedbackTextArea.value = '';
                 } else {
                     alert(`Feedback submission failed: ${data.error || data.message || 'Unknown error'}`);
                 }
@@ -640,7 +617,6 @@
 
         async function testVoiceCall() {
             const phoneNumber = testCallInput.value.trim();
-            // Basic validation - E.164 format allows '+' and digits
             if (!phoneNumber || !/^\+?[1-9]\d{1,14}$/.test(phoneNumber)) {
                 alert("Please enter a valid phone number in E.164 format (e.g., +15551234567).");
                 return;
@@ -656,7 +632,7 @@
                 const data = await response.json();
                 if (response.ok && data.status === 'success') {
                     alert(`Test call initiation requested for ${phoneNumber}. Check agent logs.`);
-                    testCallInput.value = ''; // Clear input
+                    testCallInput.value = '';
                 } else {
                     alert(`Test call failed: ${data.error || data.message || 'Unknown error'}`);
                 }
@@ -685,7 +661,7 @@
         // --- Initial Load & Periodic Refresh ---
         document.addEventListener('DOMContentLoaded', () => {
             console.log("Dashboard DOM loaded. Fetching initial status...");
-            fetchStatus(); // Fetch status immediately on load
+            fetchStatus();
             setInterval(fetchStatus, 15000); // Refresh every 15 seconds
         });
 
