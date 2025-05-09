@@ -1,41 +1,51 @@
 # Filename: models.py
 # Description: SQLAlchemy Models for the AI Agency Database.
-# Version: 2.1 (IGNIS Transmutation - Standardized Naming, Financials, Relationships)
+# Version: 3.0 (IGNIS Final Transmutation - SQLAlchemy 'metadata' fix, relationships, enums)
 
 import uuid
 import enum
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import (
     create_engine, Column, String, DateTime, ForeignKey, Text, Boolean,
-    Integer, Float, Enum, UniqueConstraint, Index, CheckConstraint, LargeBinary
-)
+    Integer, Float, Enum as SAEnum, UniqueConstraint, Index, CheckConstraint, LargeBinary
+) # Renamed Enum to SAEnum to avoid conflict with standard Python enum
 from sqlalchemy.orm import relationship, validates, sessionmaker, declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
-# Import encryption utilities and custom Base AFTER settings are loaded
-# to ensure DATABASE_ENCRYPTION_KEY is available if utils.database uses it at import.
-# However, utils.database is designed to fetch the key on first use of encrypt/decrypt.
+# --- Settings and Utilities Import ---
+# This structure attempts to import essential utilities. If they fail,
+# it logs critically and uses fallbacks that will limit functionality,
+# signaling a severe configuration issue that must be manually resolved.
 try:
-    from utils.database import encrypt_data, decrypt_data, Base as CustomBase
-    from config.settings import settings # For potential direct use or context
-    UTILS_AVAILABLE = True
-except ImportError as e:
-    # This fallback is problematic for model definitions if encryption is integral.
-    # The real fix is to ensure utils.database and config.settings are importable and configured.
-    import logging
-    logging.getLogger(__name__).critical(f"CRITICAL: Failed to import utils/database or config.settings for models.py: {e}. Encryption/Decryption will fail.")
-    CustomBase = declarative_base() # type: ignore
-    def encrypt_data(data): return data # Dummy
-    def decrypt_data(data): return data # Dummy
-    class settings: DATABASE_ENCRYPTION_KEY = None # Dummy
-    UTILS_AVAILABLE = False
+    from utils.database import encrypt_data, decrypt_data, Base as CustomBaseFromUtil
+    from config.settings import settings as app_settings # Renamed to avoid conflict
+    UTILS_AND_SETTINGS_AVAILABLE = True
+except ImportError as e_import_utils:
+    import logging # Ensure logging is available for this critical fallback
+    logging.basicConfig(level=logging.ERROR) # Basic config if not already set
+    logger_models = logging.getLogger(__name__)
+    logger_models.critical(
+        f"CRITICAL FAILURE in models.py: Could not import 'utils.database' or 'config.settings'. "
+        f"Cause: {e_import_utils}. Database encryption and potentially other model functionalities will be broken. "
+        "This indicates a severe problem in project structure or dependencies that needs immediate attention."
+    )
+    CustomBaseFromUtil = declarative_base() # type: ignore
+    # Define dummy encryption functions that will fail if DATABASE_ENCRYPTION_KEY is expected but not found by a real function
+    def encrypt_data(data: Optional[str]) -> Optional[str]:
+        logger_models.error("Dummy encrypt_data called: Encryption unavailable due to import failure.")
+        return data # Or raise an error
+    def decrypt_data(data: Optional[str]) -> Optional[str]:
+        logger_models.error("Dummy decrypt_data called: Decryption unavailable due to import failure.")
+        return data # Or raise an error
+    class DummyAppSettings: # Minimal fallback for settings
+        DATABASE_ENCRYPTION_KEY: Optional[str] = None
+    app_settings = DummyAppSettings() # type: ignore
+    UTILS_AND_SETTINGS_AVAILABLE = False
 
+Base = CustomBaseFromUtil
 
-# Use the custom Base from utils.database if available, otherwise SQLAlchemy's default
-Base = CustomBase if UTILS_AVAILABLE else declarative_base() # type: ignore
-
-# --- Enum Definitions ---
+# --- Enum Definitions (Standard Python Enums) ---
 class TaskStatus(enum.Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
@@ -48,9 +58,8 @@ class TaskStatus(enum.Enum):
     LEARNING_PHASE = "learning_phase"
     ACTION_PHASE = "action_phase"
     REFLECTION_PHASE = "reflection_phase"
-    HALTED_BY_REFLECTION = "halted_by_reflection" # ThinkTool specific
-    SKIPPED = "skipped" # e.g. client already contacted
-
+    HALTED_BY_REFLECTION = "halted_by_reflection"
+    SKIPPED = "skipped"
 
 class AgentName(enum.Enum):
     ORCHESTRATOR = "Orchestrator"
@@ -61,26 +70,24 @@ class AgentName(enum.Enum):
     LEGAL_AGENT = "LegalAgent"
     GMAIL_CREATOR_AGENT = "GmailCreatorAgent"
     Browse_AGENT = "BrowseAgent"
-    VIDEO_CREATION_AGENT = "VideoCreationAgent" # Added for video generation
-    CLIENT_RESEARCH_AGENT = "ClientResearchAgent" # For Clay.com or other research
-    PAYMENT_PROCESSOR_AGENT = "PaymentProcessorAgent" # Hypothetical for payment interactions
+    VIDEO_CREATION_AGENT = "VideoCreationAgent"
+    CLIENT_RESEARCH_AGENT = "ClientResearchAgent"
+    PAYMENT_PROCESSOR_AGENT = "PaymentProcessorAgent"
     UNKNOWN = "Unknown"
 
-
 class ClientStatus(enum.Enum):
-    LEAD = "lead"  # Initial state from discovery
-    CONTACTED = "contacted"  # First outreach made
-    ENGAGED = "engaged"  # Two-way communication established
-    QUALIFIED = "qualified"  # Meets ideal customer profile
+    LEAD = "lead"
+    CONTACTED = "contacted"
+    ENGAGED = "engaged"
+    QUALIFIED = "qualified"
     PROPOSAL_SENT = "proposal_sent"
     NEGOTIATION = "negotiation"
-    CLOSED_WON = "closed_won"  # Deal won
-    CLOSED_LOST = "closed_lost"  # Deal lost
+    CLOSED_WON = "closed_won"
+    CLOSED_LOST = "closed_lost"
     ONBOARDING = "onboarding"
-    ACTIVE_SERVICE = "active_service" # Receiving ongoing services
-    DORMANT = "dormant"  # Previously active, now inactive
+    ACTIVE_SERVICE = "active_service"
+    DORMANT = "dormant"
     DO_NOT_CONTACT = "do_not_contact"
-
 
 class InteractionType(enum.Enum):
     EMAIL_SENT = "email_sent"
@@ -91,26 +98,25 @@ class InteractionType(enum.Enum):
     EMAIL_UNSUBSCRIBED = "email_unsubscribed"
     CALL_OUTBOUND_INITIATED = "call_outbound_initiated"
     CALL_ANSWERED = "call_answered"
-    CALL_COMPLETED = "call_completed" # Successful conversation
+    CALL_COMPLETED = "call_completed"
     CALL_VOICEMAIL_LEFT = "call_voicemail_left"
-    CALL_FAILED = "call_failed" # Technical failure, busy, no answer after retries
+    CALL_FAILED = "call_failed"
     CALL_SCHEDULED = "call_scheduled"
     SOCIAL_MEDIA_POST = "social_media_post"
     SOCIAL_MEDIA_DM = "social_media_dm"
-    WEBSITE_VISIT_TRACKED = "website_visit_tracked" # If tracking is implemented
+    WEBSITE_VISIT_TRACKED = "website_visit_tracked"
     FORM_SUBMISSION = "form_submission"
     MEETING_SCHEDULED = "meeting_scheduled"
     MEETING_COMPLETED = "meeting_completed"
     INVOICE_SENT = "invoice_sent"
     PAYMENT_RECEIVED = "payment_received"
-    NOTE_ADDED = "note_added" # Manual note by system or operator
-    TASK_COMPLETED_FOR_CLIENT = "task_completed_for_client" # Generic task completion
-
+    NOTE_ADDED = "note_added"
+    TASK_COMPLETED_FOR_CLIENT = "task_completed_for_client"
 
 class PaymentStatus(enum.Enum):
     PENDING = "pending"
-    PAID = "paid"
-    COMPLETED = "completed" # Alias for PAID, more generic for financial transactions
+    PAID = "paid" # Main successful status for invoice payments
+    COMPLETED = "completed" # Generic success for other financial transactions
     FAILED = "failed"
     REFUNDED = "refunded"
     PARTIALLY_PAID = "partially_paid"
@@ -118,6 +124,13 @@ class PaymentStatus(enum.Enum):
     VOIDED = "voided"
     OVERDUE = "overdue"
 
+class AccountStatus(enum.Enum):
+    ACTIVE = "active"
+    NEEDS_REVIEW = "needs_review"
+    BANNED = "banned"
+    NEEDS_PASSWORD_RESET = "needs_password_reset"
+    LOCKED = "locked"
+    DISABLED = "disabled" # Manually disabled by operator
 
 # --- Model Definitions ---
 
@@ -127,43 +140,39 @@ class Client(Base): # type: ignore
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    # Company & Contact Info
     company_name = Column(String(255), nullable=False, index=True)
     website = Column(String(512), nullable=True)
     primary_contact_name = Column(String(255), nullable=True)
-    primary_contact_email = Column(String(255), nullable=True, index=True, unique=True) # Could be unique if strictly one client per email
-    primary_contact_phone = Column(String(50), nullable=True) # Store in E.164 if possible
+    primary_contact_email = Column(String(255), nullable=True, index=True) # Consider unique=True if it's a hard constraint
+    primary_contact_phone = Column(String(50), nullable=True)
     industry = Column(String(100), nullable=True)
-    company_size = Column(String(50), nullable=True) # e.g., "1-10 employees", "50-200", or integer range
+    company_size = Column(String(50), nullable=True)
     country = Column(String(100), nullable=True)
     city = Column(String(100), nullable=True)
     
-    # Status & Engagement
-    client_status = Column(Enum(ClientStatus), default=ClientStatus.LEAD, nullable=False)
-    opt_in_status = Column(String(50), default="pending", index=True) # e.g., pending, opted_in, opted_out
-    client_score = Column(Float, default=0.0) # Lead score or engagement score
-    source = Column(String(100), nullable=True) # e.g., clay_import, manual, web_form
+    client_status = Column(SAEnum(ClientStatus), default=ClientStatus.LEAD, nullable=False)
+    opt_in_status = Column(String(50), default="pending", index=True) # e.g., pending, opted_in, opted_out_email, opted_out_calls
+    client_score = Column(Float, default=0.0, nullable=False)
+    source = Column(String(100), nullable=True) # e.g., clay_import, manual_entry, web_form
     
-    # Financial & Service Details
-    service_tier = Column(String(100), nullable=True) # e.g., basic, premium
+    service_tier = Column(String(100), nullable=True)
     contract_start_date = Column(DateTime(timezone=True), nullable=True)
     contract_end_date = Column(DateTime(timezone=True), nullable=True)
 
-    # Relationships
-    tasks = relationship("Task", back_populates="client", cascade="all, delete-orphan")
-    interactions = relationship("InteractionLog", back_populates="client", cascade="all, delete-orphan")
-    invoices = relationship("Invoice", back_populates="client", cascade="all, delete-orphan")
-    notes = relationship("Note", back_populates="client", cascade="all, delete-orphan")
-    # Custom fields (JSONB for flexibility)
-    custom_fields = Column(JSONB, nullable=True, default=dict) # Store additional structured data
+    # Renamed 'metadata' to 'json_data'
+    json_data = Column(JSONB, nullable=True, comment="Flexible JSON field for additional structured client data.")
 
+    tasks = relationship("Task", back_populates="client", cascade="all, delete-orphan", lazy="selectin")
+    interactions = relationship("InteractionLog", back_populates="client", cascade="all, delete-orphan", lazy="selectin")
+    invoices = relationship("Invoice", back_populates="client", cascade="all, delete-orphan", lazy="selectin")
+    notes = relationship("Note", back_populates="client", cascade="all, delete-orphan", lazy="selectin")
+    
     __table_args__ = (
-        Index('idx_client_company_name_email', 'company_name', 'primary_contact_email'),
+        Index('idx_client_company_email_unique', 'company_name', 'primary_contact_email', unique=True, postgresql_where=(primary_contact_email.isnot(None))), # type: ignore
+        Index('idx_client_status_opt_in', 'client_status', 'opt_in_status'),
     )
-
     def __repr__(self) -> str:
         return f"<Client(id={self.id}, company_name='{self.company_name}', email='{self.primary_contact_email}')>"
-
 
 class Task(Base): # type: ignore
     __tablename__ = "tasks"
@@ -171,87 +180,56 @@ class Task(Base): # type: ignore
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
-    agent_name = Column(Enum(AgentName), nullable=False, index=True)
-    status = Column(Enum(TaskStatus), default=TaskStatus.PENDING, nullable=False, index=True)
+    agent_name = Column(SAEnum(AgentName), nullable=False, index=True)
+    status = Column(SAEnum(TaskStatus), default=TaskStatus.PENDING, nullable=False, index=True)
     
-    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), nullable=True, index=True) # Can be null for system tasks
-    client = relationship("Client", back_populates="tasks")
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), nullable=True, index=True)
+    client = relationship("Client", back_populates="tasks", lazy="joined") # Eager load client for common task views
 
-    priority = Column(Integer, default=0) # Higher number = higher priority
-    payload = Column(JSONB) # Task specific data, e.g., email content, call script context
-    result = Column(JSONB, nullable=True) # Result of the task execution
+    priority = Column(Integer, default=0, nullable=False)
+    payload = Column(JSONB, comment="Task-specific input data.")
+    result = Column(JSONB, nullable=True, comment="Task-specific output data.")
     error_message = Column(Text, nullable=True)
-    attempts = Column(Integer, default=0)
-    max_attempts = Column(Integer, default=3)
+    attempts = Column(Integer, default=0, nullable=False)
+    max_attempts = Column(Integer, default=3, nullable=False)
     
-    scheduled_at = Column(DateTime(timezone=True), nullable=True) # For tasks to be run at a specific time
+    scheduled_at = Column(DateTime(timezone=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     
-    # For ThinkTool or multi-step tasks
-    parent_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True) # Self-referential for sub-tasks
-    sub_tasks = relationship("Task", backref="parent_task", remote_side=[id], cascade="all, delete-orphan")
+    parent_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True) # Allow parent deletion without cascading to subtasks directly, manage logic in app
+    sub_tasks = relationship("Task", backref="parent_task", remote_side=[id], lazy="selectin") # Avoids full cascade delete if parent task removed
     
-    # For ThinkTool: sequence of actions taken
-    action_history = Column(JSONB, nullable=True, default=list) # List of dicts: {"action": "...", "params": {...}, "timestamp": "...", "outcome": "..."}
-    current_objective = Column(Text, nullable=True) # Current specific goal for this task
+    action_history = Column(JSONB, nullable=True, default=list, comment="For ThinkTool: sequence of actions taken within the task.")
+    current_objective = Column(Text, nullable=True)
     
-    # For learning/reflection
-    knowledge_ids_used = Column(JSONB, nullable=True, default=list) # List of KnowledgeFragment IDs used
-    knowledge_ids_generated = Column(JSONB, nullable=True, default=list) # List of KnowledgeFragment IDs created
-
+    knowledge_ids_used = Column(JSONB, nullable=True, default=list)
+    knowledge_ids_generated = Column(JSONB, nullable=True, default=list)
 
     def __repr__(self) -> str:
         return f"<Task(id={self.id}, agent='{self.agent_name.value}', status='{self.status.value}')>"
 
-
 class InteractionLog(Base): # type: ignore
     __tablename__ = "interaction_logs"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True, nullable=False)
     
     client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, index=True)
-    client = relationship("Client", back_populates="interactions")
+    client = relationship("Client", back_populates="interactions", lazy="joined")
     
-    agent_name = Column(Enum(AgentName), nullable=True) # Agent responsible, if any
-    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True) # Associated task, if any
+    agent_name = Column(SAEnum(AgentName), nullable=True)
+    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True) # Keep log even if task is deleted
     
-    type = Column(Enum(InteractionType), nullable=False, index=True)
-    channel = Column(String(50), nullable=True) # e.g., email, phone, linkedin, website
-    content_summary = Column(Text, nullable=True) # e.g., email subject, call summary snippet
-    external_id = Column(String(255), nullable=True, index=True) # e.g., email message ID, call SID
+    type = Column(SAEnum(InteractionType), nullable=False, index=True)
+    channel = Column(String(50), nullable=True)
+    content_summary = Column(Text, nullable=True)
+    external_id = Column(String(255), nullable=True, index=True)
     
-    metadata = Column(JSONB, nullable=True) # Extra details, e.g., email open location, call duration, link clicked
+    # Renamed 'metadata' to 'json_data'
+    json_data = Column(JSONB, nullable=True, comment="Flexible JSON field for extra details like email open location, call duration, etc.")
 
     def __repr__(self) -> str:
         return f"<InteractionLog(id={self.id}, client_id={self.client_id}, type='{self.type.value}', ts='{self.timestamp}')>"
-
-# Simplified EmailLog and CallLog, can be absorbed into InteractionLog or kept separate for detail
-class EmailLog(Base): # type: ignore
-    __tablename__ = "email_logs" # Consider merging into InteractionLog
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), index=True)
-    email_address = Column(String(255), nullable=False)
-    subject = Column(Text, nullable=True)
-    body_hash = Column(String(64), nullable=True) # To detect duplicate content
-    status = Column(String(50), nullable=True) # e.g., sent, opened, clicked, bounced, replied, failed
-    external_message_id = Column(String(255), nullable=True, index=True)
-    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True)
-
-class CallLog(Base): # type: ignore
-    __tablename__ = "call_logs" # Consider merging into InteractionLog
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), index=True)
-    phone_number = Column(String(50), nullable=False)
-    duration_seconds = Column(Integer, nullable=True)
-    status = Column(String(50), nullable=True) # e.g., initiated, answered, completed, voicemail, failed, busy
-    recording_url = Column(String(512), nullable=True)
-    call_sid = Column(String(255), nullable=True, index=True) # Twilio SID or similar
-    transcription_summary = Column(Text, nullable=True)
-    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True)
-
 
 class AccountCredentials(Base): # type: ignore
     __tablename__ = "account_credentials"
@@ -259,133 +237,162 @@ class AccountCredentials(Base): # type: ignore
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    service_name = Column(String(100), nullable=False, index=True) # e.g., Gmail, LinkedIn, Twitter
+    service_name = Column(String(100), nullable=False, index=True)
     username = Column(String(255), nullable=False, index=True)
     
-    _encrypted_password = Column("encrypted_password", String(1024), nullable=True) # Encrypted
+    _encrypted_password = Column("encrypted_password", String(1024), nullable=True)
     
-    email_associated = Column(String(255), nullable=True, index=True) # Often same as username for email services
-    status = Column(String(50), default="active") # e.g., active, needs_review, banned, needs_password_reset, locked
-    last_used = Column(DateTime(timezone=True), nullable=True)
-    proxy_info = Column(JSONB, nullable=True) # Details of proxy used during creation or last use
-    creation_agent = Column(Enum(AgentName), nullable=True)
-    metadata = Column(JSONB, nullable=True) # e.g., security questions, recovery email used (if any)
+    email_associated = Column(String(255), nullable=True, index=True)
+    status = Column(SAEnum(AccountStatus), default=AccountStatus.ACTIVE, nullable=False)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    proxy_details = Column(JSONB, nullable=True, comment="Details of proxy used during creation or last successful use.")
+    creation_agent_name = Column(SAEnum(AgentName), nullable=True)
+    
+    # Renamed 'metadata' to 'json_data'
+    json_data = Column(JSONB, nullable=True, comment="Flexible JSON field for security questions, recovery email, 2FA codes (encrypted within JSON if highly sensitive), etc.")
 
-    # Ensure DATABASE_ENCRYPTION_KEY is set in .env for these to work
     @hybrid_property
     def password(self) -> Optional[str]:
-        if not UTILS_AVAILABLE or not settings.DATABASE_ENCRYPTION_KEY: return "[Encryption Unavailable]"
+        if not UTILS_AND_SETTINGS_AVAILABLE or not app_settings.DATABASE_ENCRYPTION_KEY:
+            # Log this failure clearly, as it implies a critical misconfiguration.
+            logger = logging.getLogger(__name__) # Ensure logger is accessible
+            logger.error(
+                f"Attempted to decrypt password for account '{self.username}' but encryption utils/key are unavailable. "
+                "This is a CRITICAL configuration issue."
+            )
+            return "[PASSWORD_DECRYPTION_UNAVAILABLE]" # Or raise an exception
         return decrypt_data(self._encrypted_password) if self._encrypted_password else None
 
     @password.setter
     def password(self, value: Optional[str]) -> None:
-        if not UTILS_AVAILABLE or not settings.DATABASE_ENCRYPTION_KEY:
-            raise EnvironmentError("DATABASE_ENCRYPTION_KEY not configured. Cannot encrypt password.")
+        if not UTILS_AND_SETTINGS_AVAILABLE or not app_settings.DATABASE_ENCRYPTION_KEY:
+            logger = logging.getLogger(__name__)
+            logger.critical(
+                f"Attempted to encrypt password for account '{self.username}' but encryption utils/key are unavailable. "
+                "Password NOT set. This is a CRITICAL configuration issue."
+            )
+            # It's crucial not to store the password in plain text or a dummy encrypted form.
+            # Raising an error is safer to prevent data mishandling.
+            raise EnvironmentError(
+                "DATABASE_ENCRYPTION_KEY not configured or utils unavailable. Cannot encrypt password."
+            )
         if value is None:
             self._encrypted_password = None
         else:
             self._encrypted_password = encrypt_data(value)
             
-    __table_args__ = (UniqueConstraint('service_name', 'username', name='uq_service_username'),)
+    __table_args__ = (UniqueConstraint('service_name', 'username', name='uq_account_service_username'),)
+    def __repr__(self) -> str:
+        return f"<AccountCredentials(id={self.id}, service='{self.service_name}', username='{self.username}', status='{self.status.value}')>"
 
 
 class StrategicDirective(Base): # type: ignore
-    __tablename__ = "strategic_directives" # For ThinkTool
+    __tablename__ = "strategic_directives"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     title = Column(String(255), nullable=False)
-    description = Column(Text, nullable=False) # High-level goal or strategy
-    source = Column(String(100)) # e.g., operator_input, system_generated_reflection
-    priority = Column(Integer, default=0) # Higher is more important
-    status = Column(String(50), default="active") # e.g., active, completed, paused, archived
-    parameters = Column(JSONB, nullable=True) # Specific constraints or targets for the directive
+    description = Column(Text, nullable=False)
+    source = Column(String(100), nullable=False) # e.g., operator_input, system_reflection
+    priority = Column(Integer, default=0, nullable=False)
+    status = Column(String(50), default="active", nullable=False) # e.g., active, completed, paused, archived
     
-    # Performance tracking against directive
-    kpis_to_track = Column(JSONB, nullable=True) # e.g., {"conversion_rate": 0.05, "leads_generated_per_week": 10}
-    current_performance = Column(JSONB, nullable=True) # Actual values for kpis_to_track
+    # Renamed 'parameters' to 'directive_parameters' to be more specific
+    directive_parameters = Column(JSONB, nullable=True, comment="Specific constraints or targets for the directive.")
+    
+    kpis_to_track = Column(JSONB, nullable=True)
+    current_performance_metrics = Column(JSONB, nullable=True)
     
     start_date = Column(DateTime(timezone=True), nullable=True)
-    end_date = Column(DateTime(timezone=True), nullable=True) # Directives can be time-bound
+    end_date = Column(DateTime(timezone=True), nullable=True)
+    def __repr__(self) -> str:
+        return f"<StrategicDirective(id={self.id}, title='{self.title}', status='{self.status}')>"
 
 
 class KnowledgeFragment(Base): # type: ignore
-    __tablename__ = "knowledge_fragments" # For ThinkTool learning
+    __tablename__ = "knowledge_fragments"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
-    type = Column(String(100), index=True) # e.g., successful_email_template, effective_call_script_opener, client_objection_handling
-    content = Column(Text, nullable=False) # The actual knowledge content
-    metadata = Column(JSONB, nullable=True) # Source, context, tags, confidence score, performance metrics
-    source_agent = Column(Enum(AgentName), nullable=True)
-    source_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True)
-    related_client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id"), nullable=True)
+    type = Column(String(100), index=True, nullable=False)
+    content = Column(Text, nullable=False)
     
-    # For vectorization / embeddings if used
-    embedding_vector = Column(LargeBinary, nullable=True) # Store embeddings (e.g. from OpenAI)
-    embedding_model = Column(String(100), nullable=True) # e.g., text-embedding-ada-002
+    # Renamed 'metadata' to 'json_data'
+    json_data = Column(JSONB, nullable=True, comment="Source, context, tags, confidence score, performance metrics, etc.")
     
-    # Learning metrics
-    effectiveness_score = Column(Float, default=0.0) # How effective this fragment has been
-    usage_count = Column(Integer, default=0)
+    source_agent_name = Column(SAEnum(AgentName), nullable=True)
+    source_task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    related_client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True)
+    
+    embedding_vector = Column(LargeBinary, nullable=True)
+    embedding_model_name = Column(String(100), nullable=True)
+    
+    effectiveness_score = Column(Float, default=0.0, nullable=False)
+    usage_count = Column(Integer, default=0, nullable=False)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     
-    # Relationships or tags for easier retrieval
-    tags = Column(JSONB, nullable=True, default=list) # List of strings
+    tags = Column(JSONB, nullable=True, default=list) # List of strings for searchable tags
+    def __repr__(self) -> str:
+        return f"<KnowledgeFragment(id={self.id}, type='{self.type}', usage_count={self.usage_count})>"
 
 
 class Invoice(Base): # type: ignore
     __tablename__ = "invoices"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True) # Keep invoice even if client is deleted
-    client = relationship("Client", back_populates="invoices")
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True) # Keep invoice even if client deleted
+    client = relationship("Client", back_populates="invoices", lazy="joined")
     
-    invoice_number = Column(String(50), unique=True, nullable=False)
-    issue_date = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    invoice_number = Column(String(50), unique=True, nullable=False, index=True)
+    issue_date = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     due_date = Column(DateTime(timezone=True), nullable=False)
     
     total_amount = Column(Float, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
-    status = Column(Enum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False, index=True)
+    status = Column(SAEnum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False, index=True)
     
-    line_items = Column(JSONB) # [{"description": "...", "quantity": 1, "unit_price": 100, "total": 100}, ...]
+    line_items = Column(JSONB, nullable=False) # [{"description": "...", "quantity": 1, "unit_price": 100, "total": 100}, ...]
     notes_to_client = Column(Text, nullable=True)
     
     paid_at = Column(DateTime(timezone=True), nullable=True)
-    payment_method = Column(String(50), nullable=True) # e.g., credit_card, bank_transfer
+    payment_method_details = Column(JSONB, nullable=True, comment="e.g., card_last4, transaction_type") # More specific than just string
     
-    # Relationships
-    financial_transactions = relationship("FinancialTransaction", back_populates="invoice", cascade="all, delete-orphan")
+    financial_transactions = relationship("FinancialTransaction", back_populates="invoice", cascade="all, delete-orphan", lazy="selectin")
 
     __table_args__ = (
         CheckConstraint('total_amount >= 0', name='chk_invoice_total_amount_positive'),
+        Index('idx_invoice_status_due_date', 'status', 'due_date'),
     )
+    def __repr__(self) -> str:
+        return f"<Invoice(id={self.id}, number='{self.invoice_number}', status='{self.status.value}', total={self.total_amount})>"
+
 
 class FinancialTransaction(Base): # type: ignore
     __tablename__ = "financial_transactions"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True, nullable=False)
     
-    type = Column(String(50), nullable=False, index=True) # e.g., payment, refund, fee, commission_payout
-    status = Column(Enum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False, index=True)
+    type = Column(String(50), nullable=False, index=True) # e.g., payment, refund, fee, commission_payout, adjustment
+    status = Column(SAEnum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False, index=True)
     
     amount = Column(Float, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
     
     description = Column(Text, nullable=True)
     
-    # Related entities
     invoice_id = Column(UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True)
-    invoice = relationship("Invoice", back_populates="financial_transactions")
+    invoice = relationship("Invoice", back_populates="financial_transactions", lazy="joined")
     
-    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True, index=True) # For payments not tied to a specific invoice directly
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True, index=True)
+    # client = relationship("Client") # Could add if needed, but invoice.client is often sufficient
     
-    external_transaction_id = Column(String(255), nullable=True, index=True) # e.g., Stripe charge ID
-    payment_gateway = Column(String(50), nullable=True) # e.g., Stripe, PayPal
+    external_transaction_id = Column(String(255), nullable=True, index=True)
+    payment_gateway_name = Column(String(50), nullable=True)
     
-    metadata = Column(JSONB, nullable=True) # e.g., gateway response, fee details
-
+    # Renamed 'metadata' to 'json_data'
+    json_data = Column(JSONB, nullable=True, comment="Gateway response, fee details, etc.")
+    def __repr__(self) -> str:
+        return f"<FinancialTransaction(id={self.id}, type='{self.type}', status='{self.status.value}', amount={self.amount})>"
 
 class Note(Base): # type: ignore
     __tablename__ = "notes"
@@ -393,57 +400,70 @@ class Note(Base): # type: ignore
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), nullable=True)
-    client = relationship("Client", back_populates="notes")
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), nullable=True, index=True)
+    client = relationship("Client", back_populates="notes", lazy="joined")
 
-    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True) # Note related to a specific task
+    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
 
-    author_agent_name = Column(Enum(AgentName), nullable=True) # If an agent created this note
-    author_user_id = Column(String(255), nullable=True) # If a human user created this note (placeholder for future user model)
+    author_agent_name = Column(SAEnum(AgentName), nullable=True)
+    author_user_identifier = Column(String(255), nullable=True, comment="Identifier for a human user if UI allows manual notes")
     
     content = Column(Text, nullable=False)
-    type = Column(String(50), default="general") # e.g., general, meeting_summary, important_info, client_feedback
-    is_pinned = Column(Boolean, default=False)
+    note_type = Column(String(50), default="general", nullable=False) # e.g., general, meeting_summary, important_info
+    is_pinned = Column(Boolean, default=False, nullable=False)
+    def __repr__(self) -> str:
+        return f"<Note(id={self.id}, type='{self.note_type}', client_id={self.client_id}, content='{self.content[:30]}...')>"
 
-    def __repr__(self):
-        return f"<Note(id={self.id}, client_id={self.client_id}, type='{self.type}', content='{self.content[:50]}...')>"
 
-
-# --- Function to create tables (optional, can be managed by Alembic) ---
-def create_all_tables(db_url: str) -> None:
-    """Creates all tables in the database."""
-    if not db_url:
-        logger.error("Database URL not provided. Cannot create tables.")
+# --- Optional: Function to create tables (for dev/testing, Alembic for prod) ---
+def create_all_tables_dev(db_url_sync: str) -> None:
+    """
+    Development utility to create all tables.
+    WARNING: For production, use a migration tool like Alembic.
+    Expects a synchronous database URL.
+    """
+    logger_models_dev = logging.getLogger(__name__ + "_dev_create") # Separate logger
+    if not db_url_sync:
+        logger_models_dev.error("Synchronous Database URL not provided. Cannot create tables.")
         return
     try:
-        engine = create_engine(db_url)
+        # Ensure using a synchronous engine for create_all
+        engine = create_engine(db_url_sync)
         Base.metadata.create_all(engine) # type: ignore
-        logger.info("All tables created successfully (if they didn't exist).")
-    except Exception as e:
-        logger.error(f"Error creating tables: {e}", exc_info=True)
+        logger_models_dev.info(f"All tables created successfully (if they didn't exist) on {db_url_sync}.")
+    except Exception as e_create:
+        logger_models_dev.error(f"Error creating tables on {db_url_sync}: {e_create}", exc_info=True)
 
 if __name__ == "__main__":
-    # Example usage:
-    # This is for direct execution for table creation, ensure DATABASE_URL is set in .env
-    # In a real app, you'd likely use Alembic for migrations.
-    if not settings.DATABASE_URL:
-        print("DATABASE_URL not set in environment. Cannot create tables.")
-        print("Please create a .env file with DATABASE_URL='postgresql+asyncpg://user:pass@host:port/dbname'")
+    # This block is for direct script execution (e.g., python models.py create_tables)
+    # Primarily for initial setup in a development environment.
+    # Production environments should use Alembic for schema migrations.
+    logging.basicConfig(level=logging.INFO) # Ensure logging is configured for this script execution
+    main_logger = logging.getLogger(__name__ + "_main")
+
+    if not UTILS_AND_SETTINGS_AVAILABLE:
+        main_logger.critical(
+            "Cannot proceed with __main__ block in models.py because critical utilities "
+            "(utils.database or config.settings) failed to import earlier. "
+            "Please check the logs for import errors related to these modules and their dependencies "
+            "(e.g., missing environment variables like DATABASE_ENCRYPTION_KEY)."
+        )
+    elif app_settings.DATABASE_URL:
+        # Convert async DSN to sync DSN for create_all if necessary
+        sync_db_url = str(app_settings.DATABASE_URL).replace("postgresql+asyncpg", "postgresql")
+        sync_db_url = sync_db_url.replace("postgresql+psycopg", "postgresql") # Another common async dialect
+        
+        main_logger.info(f"Attempting to create tables for database (using sync URL): {sync_db_url}")
+        create_all_tables_dev(sync_db_url)
+        main_logger.info(
+            "Table creation process finished. Review logs for success or errors. "
+            "IMPORTANT: For production, use Alembic for database migrations."
+        )
     else:
-        print(f"Attempting to create tables for database: {settings.DATABASE_URL}")
-        try:
-            # For direct execution, use a synchronous engine if create_engine is synchronous by default.
-            # If using asyncpg, the create_engine from sqlalchemy.ext.asyncio should be used,
-            # but create_all is a synchronous operation.
-            # For simplicity in this direct script, using a standard create_engine.
-            from sqlalchemy import create_engine as create_sync_engine
-            sync_db_url = settings.DATABASE_URL.replace("postgresql+asyncpg", "postgresql")
-            engine = create_sync_engine(sync_db_url)
-            Base.metadata.create_all(engine) # type: ignore
-            print("Tables created successfully (if they didn't exist).")
-            print("IMPORTANT: For production, use Alembic for database migrations.")
-        except Exception as e:
-            print(f"Error creating tables: {e}")
-            print("Ensure your database server is running and accessible, and credentials are correct.")
+        main_logger.error(
+            "DATABASE_URL not set in environment (via .env or system variables). "
+            "Cannot create tables. Please configure DATABASE_URL."
+            "Example: DATABASE_URL='postgresql+asyncpg://user:pass@host:port/dbname'"
+        )
 
 # --- End of models.py ---
