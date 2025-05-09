@@ -1,11 +1,13 @@
 # Filename: config/settings.py
 # Description: Configuration settings for the Nolli AI Sales System,
 #              validated using Pydantic. Secrets loaded from environment variables.
-# Version: 2.8 (Restored user's EXACT original OPENROUTER_MODELS list, maintained other v2.6 improvements)
+# Version: 2.9 (Focused fix for startup AttributeError and NameError)
 
 import os
 import json
 import logging
+import sys # <--- ADDED IMPORT SYS
+from urllib.parse import urlparse # <--- ADDED FOR ROBUST HOST PARSING FOR LOGGING
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import (
     Field, PostgresDsn, HttpUrl, DirectoryPath, EmailStr, field_validator, model_validator, ValidationInfo, AnyUrl
@@ -32,21 +34,15 @@ class Settings(BaseSettings):
 
     # --- LLM / OpenRouter Configuration ---
     OPENROUTER_API_KEY: Optional[str] = Field(default=None, description="Primary OpenRouter API Key. Load from env var 'OPENROUTER_API_KEY'.")
-    # --- RESTORED USER'S ORIGINAL OPENROUTER_MODELS LIST ---
     OPENROUTER_MODELS: Dict[str, str] = {
-        # --- High Power ---
         "think_synthesize": "google/gemini-2.5-pro-preview-03-25",
         "think_strategize": "google/gemini-2.5-pro-preview-03-25",
         "think_critique": "google/gemini-2.5-pro-preview-03-25",
         "legal_analysis": "google/gemini-2.5-pro-preview-03-25",
         "Browse_visual_analysis": "google/gemini-2.5-flash-preview:thinking",
         "email_draft": "google/gemini-2.5-flash-preview:thinking",
-
-        # --- Medium Power ---
         "think_radar": "google/gemini-2.5-flash-preview:thinking",
         "Browse_extract": "google/gemini-2.5-flash-preview:thinking",
-
-        # --- Fast & Cheap ---
         "default_llm": "google/gemini-2.5-flash-preview",
         "think_validate": "google/gemini-2.5-flash-preview",
         "think_user_education": "google/gemini-2.5-flash-preview",
@@ -55,7 +51,6 @@ class Settings(BaseSettings):
         "voice_response": "google/gemini-2.5-flash-preview",
         "Browse_summarize": "google/gemini-2.5-flash-preview",
     }
-    # --- END RESTORED USER MODELS ---
     OPENROUTER_API_TIMEOUT_S: float = Field(default=120.0, gt=0, description="Timeout in seconds for OpenRouter API calls.")
 
     # --- Email Agent Configuration ---
@@ -152,10 +147,6 @@ class Settings(BaseSettings):
         field_name = info.field_name
         if field_name == 'DATABASE_ENCRYPTION_KEY' and v and len(str(v)) < 32:
             raise ValueError(f"CRITICAL: '{field_name}' must be at least 32 characters long.")
-        # Ensure other essential secrets are present if they are truly essential for basic startup
-        # For example, if OPENROUTER_API_KEY is absolutely needed for the app to even load, check it here.
-        # However, the current design allows the app to load and log warnings for optional/non-critical-startup secrets.
-        # The `check_required_config` handles truly critical non-secret configurations.
         return v
 
     @field_validator(
@@ -165,7 +156,7 @@ class Settings(BaseSettings):
     @classmethod
     def check_optional_secrets(cls, v: Any, info: ValidationInfo) -> Any:
         field_name = info.field_name
-        if not v: # If the value is None or empty string after Pydantic attempts to load it
+        if not v:
             logger.warning(f"Optional secret/config '{field_name}' (env var '{field_name.upper()}') is not set. Related features might be disabled or limited.")
         return v
 
@@ -176,12 +167,8 @@ class Settings(BaseSettings):
     )
     @classmethod
     def check_required_config(cls, v: Any, info: ValidationInfo) -> Any:
-        if not v: # If the value is None or empty string
-             # This log will happen during Pydantic validation if a required field is missing.
-             # The SystemExit later will halt the app.
+        if not v:
              logger.critical(f"CRITICAL SETTING MISSING: '{info.field_name}' (env var '{info.field_name.upper()}') is not set and is required for the application to function.")
-             # Pydantic will raise a ValidationError if a required field (Ellipsis/...) is not provided.
-             # This validator adds an explicit log before Pydantic's own error.
         return v
 
     @model_validator(mode='after')
@@ -192,51 +179,63 @@ class Settings(BaseSettings):
         return self
 
     def get_secret(self, secret_name: str) -> Optional[str]:
-        # This method is for internal use by agents if they need to access a secret
-        # that was loaded into the Settings object.
         secret_fields_defined_in_model = {
             'DATABASE_ENCRYPTION_KEY', 'OPENROUTER_API_KEY',
             'HOSTINGER_IMAP_PASS', 'TWILIO_AUTH_TOKEN', 'DEEPGRAM_API_KEY',
-            'SENDER_COMPANY_ADDRESS', # Though not a 'secret' in the typical sense, it's loaded from env
+            'SENDER_COMPANY_ADDRESS',
             'CLAY_API_KEY', 'SMARTPROXY_PASSWORD', 'SMARTPROXY_USER',
             'MAILERSEND_API_KEY', 'MAILERCHECK_API_KEY', 'DOWNLOAD_PASSWORD'
         }
         if hasattr(self, secret_name):
             value = getattr(self, secret_name)
-            if value: # Ensure value is not None or empty string
+            if value:
                 return str(value)
-            # If the attribute exists but is None/empty, and it's a known secret field, log debug.
             elif secret_name in secret_fields_defined_in_model:
                  logger.debug(f"Secret attribute '{secret_name}' is present in model but has no value (None/empty).")
                  return None
-        # If attribute doesn't exist or is not in the known list and has no value.
         logger.warning(f"Attempted to get non-existent or non-set attribute '{secret_name}' via get_secret, or it's an optional secret that's not set.")
         return None
 
-# This is the main instantiation of settings.
-# Errors during this instantiation (like missing required env vars) will be caught by the try-except below.
 try:
     settings = Settings()
-    # The following logging lines are executed only if Settings() instantiates successfully.
-    logger.info(f"Settings loaded successfully for App: {settings.APP_NAME} v{settings.APP_VERSION} (config/settings.py v2.8)")
+    logger.info(f"Settings loaded successfully for App: {settings.APP_NAME} v{settings.APP_VERSION} (config/settings.py v2.9)")
     logger.info(f"Log Level set to: {settings.LOG_LEVEL}, Debug Mode: {settings.DEBUG}")
 
-    # Corrected way to access DATABASE_URL components for logging after successful Pydantic validation
     db_url_str = str(settings.DATABASE_URL) if settings.DATABASE_URL else "DATABASE_URL NOT SET"
     logger.info(f"Database URL (from settings object as string): {db_url_str}")
-    db_host = settings.DATABASE_URL.host if settings.DATABASE_URL else 'N/A'
-    logger.info(f"Database URL Host (from settings object): {db_host}")
+
+    # --- MODIFIED SECTION FOR ROBUST HOST LOGGING ---
+    db_host_for_log = 'N/A'
+    if settings.DATABASE_URL:
+        try:
+            # Try direct attribute access first, as it's cleaner if it works
+            db_host_for_log = settings.DATABASE_URL.host
+            if db_host_for_log is None: # If .host is None but no AttributeError
+                # Fallback to parsing from string if .host is None
+                parsed_url = urlparse(str(settings.DATABASE_URL))
+                db_host_for_log = parsed_url.hostname or 'N/A (parsed as None)'
+        except AttributeError:
+            # This is the case from your logs: 'MultiHostUrl' object has no attribute 'host'
+            logger.warning("AttributeError accessing settings.DATABASE_URL.host for logging, attempting to parse host from string.")
+            try:
+                parsed_url = urlparse(str(settings.DATABASE_URL))
+                db_host_for_log = parsed_url.hostname # .hostname is preferred over .host for urlparse
+                if not db_host_for_log: # Handle cases where hostname might be empty after parsing
+                    db_host_for_log = 'N/A (hostname not found in parsed URL)'
+            except Exception as parse_e:
+                logger.error(f"Could not parse host from DATABASE_URL string for logging: {parse_e}")
+                db_host_for_log = 'N/A (parse failed)'
+        except Exception as e_host: # Catch any other unexpected error getting host
+            logger.error(f"Unexpected error getting DATABASE_URL.host for logging: {e_host}")
+            db_host_for_log = 'N/A (unexpected error)'
+    logger.info(f"Database URL Host (for logging): {db_host_for_log}")
+    # --- END OF MODIFIED SECTION ---
 
     logger.info(f"Base Agency URL (from settings object): {settings.AGENCY_BASE_URL}")
 
 except Exception as e:
-    # This block catches errors from Pydantic validation (e.g., missing required fields)
-    # or any other error during Settings() instantiation.
-    # The critical log here is important for debugging startup issues.
-    logger.critical(f"CRITICAL ERROR in settings.py (v2.8): Failed to initialize Settings object: {e}", exc_info=True)
-    # The SystemExit will terminate the application, which is appropriate if critical settings are missing/invalid.
-    # The deployment logs will show this critical error and the SystemExit message.
-    print(f"CRITICAL ERROR: Failed to initialize Settings object in config/settings.py: {e}", file=sys.stderr)
+    logger.critical(f"CRITICAL ERROR in settings.py (v2.9): Failed to initialize Settings object: {e}", exc_info=True)
+    print(f"CRITICAL ERROR: Failed to initialize Settings object in config/settings.py: {e}", file=sys.stderr) # Uses imported sys
     print("The application cannot start due to missing or invalid critical environment variables. Please check your .env file or deployment environment configuration according to the errors above.", file=sys.stderr)
     raise SystemExit(f"FATAL: Settings initialization failed: {e}") from e
 
