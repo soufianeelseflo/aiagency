@@ -49,7 +49,7 @@ except ImportError:
     from agents.base_agent import GeniusAgentBase
 
 from agents.think_tool import ThinkTool
-from agents.Browse_agent import BrowseAgent
+from agents.browsing_agent import BrowseAgent
 from agents.email_agent import EmailAgent
 from agents.voice_sales_agent import VoiceSalesAgent
 from agents.legal_agent import LegalAgent
