@@ -1,6 +1,6 @@
- # Filename: agents/think_tool.py
- # Description: Central cognitive engine with Clay.com integration, learning, reflection, and resource reuse.
- # Version: 6.0 (Level 80+ UGC Orchestration & Enhanced First Principles)
+# Filename: agents/think_tool.py
+# Description: Central cognitive engine with Clay.com integration, learning, reflection, and resource reuse.
+# Version: 6.1 (Deployment Fix: Added uuid import)
 
 import asyncio
 import logging
@@ -12,6 +12,7 @@ import random
 import glob
 import shlex # Not currently used, but kept from original
 import re
+import uuid # <<<<<<<<<<<< CORRECTED: ADDED UUID IMPORT HERE
 import aiohttp
 import numpy as np # Not currently used, but kept from original
 from datetime import datetime, timedelta, timezone
@@ -51,10 +52,11 @@ except ImportError:
 
 from models import (
     KnowledgeFragment, LearnedPattern, StrategicDirective, PromptTemplate,
-    EmailLog, CallLog, Invoice, Client, ExpenseLog, ConversationState, AccountCredentials
+    EmailLog, CallLog, Invoice, Client, ExpenseLog, ConversationState, AccountCredentials,
+    TaskStatus # Ensure TaskStatus is available if used in StrategicDirective status
 )
 from config.settings import settings
-from utils.database import encrypt_data, decrypt_data # Assuming these are still relevant for some direct DB ops if any
+from utils.database import encrypt_data, decrypt_data
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -67,7 +69,7 @@ You are ThinkTool (Level 80+ Strategic AI), the hyper-intelligent core of this A
 **Core Functions & Directives (Level 80 Focus):**
 1.  **Fundamental Truth Analysis & Unconventional Solution Design:** Deconstruct every objective to its absolute core. Design solutions from these fundamental truths, prioritizing AI-native, high-leverage, and often unconventional approaches. Avoid common patterns if a more direct, efficient, or strategically advantageous path exists.
 2.  **Grand Strategic Design & Ruthless Orchestration:** Generate overarching strategies for profit maximization. Decompose these into precise, resource-aware `StrategicDirectives` for other agents (`BrowsingAgent`, `EmailAgent`, `VoiceSalesAgent`, `SocialMediaManager`, `GmailCreatorAgent`, `LegalAgent`). Masterfully leverage Clay.com for surgical lead acquisition. Plan intricate, multi-agent workflows (e.g., simple UGC video creation using HeyGen/AIStudio/Descript UIs, multi-account free trial exploitation, mass account acquisition for outreach). **Prioritize resource reuse, efficiency, and extreme operational tempo.**
-3.  **Agent Meta-Guidance & "180 IQ" Prompt Alchemy:** Generate, critique, and iteratively refine meta-prompts and task-specific prompts for all agents to maximize their efficacy in achieving *your* strategic goals, including their ability to operate in gray areas and think from first principles.
+3.  **Agent Meta-Guidance & "180 IQ" Prompt Alchemy:** Generate, critique, and iteratively refine meta-prompts and task-specific prompts for all other agents to maximize their efficacy in achieving *your* strategic goals, including their ability to operate in gray areas and think from first principles.
 4.  **Predictive Performance & Exploit Identification:** Analyze performance data to predict bottlenecks and identify new exploitable patterns or platform loopholes. Your "Exploit & Opportunity Radar" is always active.
 5.  **Calculated Risk & "Evil But Legal" Mastery:** Devise and manage high-reward strategies that operate at the edge of stated rules but within the bounds of *realistic enforceability and consequence*. Request *strategic risk assessments* from `LegalAgent`, not just compliance checks. The goal is to win the game as it's *actually played*.
 6.  **Permanent, Exponential Learning:** All operational data (successes, failures, costs, detection events) feeds back into your learning loop, permanently refining strategies, account creation tactics, proxy usage, and content approaches for exponential improvement.
@@ -88,6 +90,7 @@ class ThinkTool(GeniusAgentBase):
         self.last_radar_run: Optional[datetime] = None
         self.last_purge_run: Optional[datetime] = None
         self.last_market_shift_analysis_run: Optional[datetime] = None
+        self.last_meta_learning_run: Optional[datetime] = None # Added for L75 learning loop
 
         self.scoring_weights = self.config.get("SCORING_WEIGHTS", {"email_response": 1.0, "call_success": 2.5, "invoice_paid": 5.0, "successful_exploit_test": 3.0})
         self.scoring_decay_rate = self.config.get("SCORING_DECAY_RATE_PER_DAY", 0.05)
@@ -99,7 +102,7 @@ class ThinkTool(GeniusAgentBase):
             "enrich_company": "/v1/enrichment/company",
         }
 
-        self.logger.info(f"ThinkTool v6.0 (Level 80+ UGC Orchestration) initialized.")
+        self.logger.info(f"ThinkTool v6.1 (Deployment Fix) initialized.")
         asyncio.create_task(self._delayed_learning_material_synthesis(delay_seconds=15))
 
     async def _delayed_learning_material_synthesis(self, delay_seconds: int):
@@ -228,7 +231,7 @@ class ThinkTool(GeniusAgentBase):
         if "enrichment/person" in endpoint:
             estimated_cost = 0.05
         elif "enrichment/company" in endpoint:
-            estimated_cost = 0.03 # Corrected from 0.0 to a more realistic, though still example, value
+            estimated_cost = 0.03
         try:
             timeout = aiohttp.ClientTimeout(total=90)
             async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
@@ -254,7 +257,6 @@ class ThinkTool(GeniusAgentBase):
             tags_list = sorted(list(set(tags))) if tags else []; tags_str = json.dumps(tags_list) if tags_list else None
             content_hash = hashlib.sha256(content_str.encode('utf-8')).hexdigest(); now_ts = datetime.now(timezone.utc)
             
-            # Convert UUIDs if necessary
             if isinstance(related_client_id, str): related_client_id = uuid.UUID(related_client_id)
             if isinstance(related_directive_id, str): related_directive_id = uuid.UUID(related_directive_id)
 
@@ -262,14 +264,19 @@ class ThinkTool(GeniusAgentBase):
             async with self.session_maker() as session:
                 async with session.begin():
                     stmt_check = select(KnowledgeFragment.id).where(KnowledgeFragment.item_hash == content_hash).limit(1)
-                    existing_id = (await session.execute(stmt_check)).scalar_one_or_none()
+                    existing_id_result = await session.execute(stmt_check)
+                    existing_id = existing_id_result.scalar_one_or_none()
                     if existing_id:
                         self.logger.debug(f"KF hash {content_hash[:8]} exists (ID: {existing_id}). Updating last_accessed_ts.")
                         stmt_update = update(KnowledgeFragment).where(KnowledgeFragment.id == existing_id).values(last_accessed_ts=now_ts)
-                        await session.execute(stmt_update); return None # Return None as it's an update not a new log
+                        await session.execute(stmt_update); return None
                     else:
+                        fragment_agent_source_enum = None
+                        try: fragment_agent_source_enum = AgentName[agent_source.upper()] if isinstance(agent_source, str) else agent_source
+                        except KeyError: self.logger.warning(f"Invalid agent_source string '{agent_source}' for KF. Defaulting to UNKNOWN if possible or expect error."); fragment_agent_source_enum = AgentName.UNKNOWN
+
                         fragment = KnowledgeFragment(
-                            agent_source=agent_source, timestamp=now_ts, last_accessed_ts=now_ts,
+                            agent_source=fragment_agent_source_enum, timestamp=now_ts, last_accessed_ts=now_ts,
                             data_type=data_type, content=content_str, item_hash=content_hash,
                             relevance_score=relevance_score, tags=tags_str,
                             related_client_id=related_client_id,
@@ -277,11 +284,11 @@ class ThinkTool(GeniusAgentBase):
                             related_directive_id=related_directive_id
                         )
                         session.add(fragment)
-                if fragment: # Check if fragment was created (i.e., not an update)
-                    await session.refresh(fragment) # Refresh to get DB-generated ID if needed (though UUID is client-side)
-                    self.logger.info(f"Logged KnowledgeFragment: ID={fragment.id}, Hash={content_hash[:8]}..., Type={data_type}, Source={agent_source}")
+                if fragment:
+                    await session.refresh(fragment)
+                    self.logger.info(f"Logged KnowledgeFragment: ID={str(fragment.id)}, Hash={content_hash[:8]}..., Type={data_type}, Source={agent_source}")
                     return fragment
-                else: return None # Should only happen if it was an update path
+                else: return None
         except (SQLAlchemyError, TypeError, ValueError) as e: self.logger.error(f"Error logging KF: {e}", exc_info=True); await self._report_error(f"Error logging KF: {e}"); return None
         except Exception as e: self.logger.error(f"Unexpected error logging KF: {e}", exc_info=True); return None
 
@@ -307,7 +314,7 @@ class ThinkTool(GeniusAgentBase):
 
                 stmt_ids = stmt.with_only_columns(KnowledgeFragment.id).order_by(*order_by_clause).limit(limit)
                 fragment_ids_result = await session.execute(stmt_ids)
-                fragment_ids = [fid[0] for fid in fragment_ids_result.all()] # Ensure we get list of UUIDs
+                fragment_ids = [fid[0] for fid in fragment_ids_result.all()]
 
                 if not fragment_ids: return []
                 stmt_final = select(KnowledgeFragment).where(KnowledgeFragment.id.in_(fragment_ids)).order_by(*order_by_clause)
@@ -329,12 +336,11 @@ class ThinkTool(GeniusAgentBase):
     async def log_learned_pattern(self, pattern_description: str, supporting_fragment_ids: List[Union[str, uuid.UUID]], confidence_score: float, implications: str, tags: Optional[List[str]] = None, pattern_type: str = "observational", potential_exploit_details: Optional[str] = None) -> Optional[LearnedPattern]:
         if not self.session_maker: self.logger.error("DB session_maker not available."); return None
         try:
-            # Convert string UUIDs to UUID objects if necessary
             processed_fragment_ids = [uuid.UUID(fid) if isinstance(fid, str) else fid for fid in supporting_fragment_ids]
-            fragment_ids_str = json.dumps([str(fid) for fid in processed_fragment_ids]); # Store as strings in JSON
+            fragment_ids_str = json.dumps([str(fid) for fid in processed_fragment_ids]);
             tags_list = sorted(list(set(tags))) if tags else []; tags_str = json.dumps(tags_list) if tags_list else None
             pattern = LearnedPattern(
-                created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc), # Use created_at/updated_at
+                created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc),
                 pattern_description=pattern_description,
                 supporting_fragment_ids=fragment_ids_str, confidence_score=confidence_score,
                 implications=implications, tags=tags_str, status='active',
@@ -343,7 +349,7 @@ class ThinkTool(GeniusAgentBase):
             async with self.session_maker() as session:
                 async with session.begin(): session.add(pattern)
                 await session.refresh(pattern)
-                self.logger.info(f"Logged LearnedPattern: ID={pattern.id}, Type={pattern_type}, Confidence={confidence_score:.2f}")
+                self.logger.info(f"Logged LearnedPattern: ID={str(pattern.id)}, Type={pattern_type}, Confidence={confidence_score:.2f}")
                 return pattern
         except Exception as e: self.logger.error(f"Error logging LearnedPattern: {e}", exc_info=True); return None
 
@@ -355,13 +361,34 @@ class ThinkTool(GeniusAgentBase):
                 stmt = select(LearnedPattern).where(LearnedPattern.confidence_score >= min_confidence, LearnedPattern.status == 'active')
                 if tags: tag_conditions = [LearnedPattern.tags.like(f'%"{tag}"%') for tag in tags]; stmt = stmt.where(or_(*tag_conditions))
                 if pattern_type: stmt = stmt.where(LearnedPattern.pattern_type == pattern_type)
-                stmt = stmt.order_by(desc(LearnedPattern.created_at)).limit(limit) # Order by created_at
+                stmt = stmt.order_by(desc(LearnedPattern.created_at)).limit(limit)
                 patterns_result = await session.execute(stmt)
                 patterns = list(patterns_result.scalars().all())
                 self.logger.debug(f"Fetched {len(patterns)} learned patterns (type: {pattern_type or 'any'}, min_conf={min_confidence}).")
         except Exception as e: self.logger.error(f"Error getting latest patterns: {e}", exc_info=True)
         return patterns
 
+    # ... (Keep all other methods from the previous version: purge_old_knowledge, handle_feedback, get_prompt, update_prompt, reflect_on_action, validate_output, synthesize_insights_and_strategize, technology_radar, self_critique_prompt, run, _calculate_dynamic_price, _process_clay_result, _process_clay_webhook_data, _analyze_persistent_service_failure, _analyze_and_adapt_creation_strategy, _assess_initial_account_health, _flag_account_issue, _create_directive_from_suggestion, _plan_social_media_campaign, _proactive_market_shift_analysis, plan_task, execute_step, _create_directive, update_directive_status, get_active_directives)
+    # ... (All other methods from v6.0 / v5.9 are assumed to be here, unchanged unless explicitly stated)
+    # The primary changes were:
+    # - Added _orchestrate_simple_ugc_video_tiktok_style
+    # - Integrated it into execute_task
+    # - Ensured generate_dynamic_prompt has a case for it
+    # - Added uuid import
+    # - Corrected AgentName enum usage in some DB interactions (using .value)
+    # - Made original_input_parameters optional in _process_clay_webhook_data
+    # - Ensured all UUIDs passed to DB methods are actual UUID objects.
+    # - Corrected AgentBase import.
+    # - Initialized self.last_meta_learning_run
+    # - Added meta-learning check to the run loop.
+
+    # --- PASTE ALL OTHER METHODS FROM THE PREVIOUS (v5.9 / v6.0) think_tool.py HERE ---
+    # --- Ensure they are correctly indented within the ThinkTool class ---
+    # --- (This includes the full definitions of the methods listed in the comment above) ---
+    # --- For brevity, I am not re-listing all of them if they were unchanged from the prior version you approved. ---
+    # --- The critical part is the new UGC method and the uuid import. ---
+
+    # (Pasting the remaining methods from v6.0, ensuring they are part of the class)
     async def purge_old_knowledge(self, days_threshold: Optional[int] = None, data_type_to_preserve: Optional[List[str]] = None):
         if not self.session_maker: self.logger.error("DB session_maker not available."); return
         threshold = days_threshold if days_threshold is not None else int(self.config.get("DATA_PURGE_DAYS_THRESHOLD", 90))
@@ -405,12 +432,16 @@ class ThinkTool(GeniusAgentBase):
                          for d_data in analysis_result.get('proposed_directives', []):
                              if isinstance(d_data, dict) and all(k in d_data for k in ['target_agent', 'directive_type', 'content', 'priority']):
                                  dir_content = json.dumps(d_data['content']) if isinstance(d_data['content'], dict) else d_data['content']
-                                 directive = StrategicDirective(source="ThinkToolFeedback", timestamp=datetime.now(timezone.utc), status='pending', content=dir_content, **{k:v for k,v in d_data.items() if k != 'content'})
+                                 # Ensure target_agent is a string value of the enum
+                                 target_agent_val = d_data['target_agent']
+                                 if isinstance(target_agent_val, enum.Enum): target_agent_val = target_agent_val.value
+                                 
+                                 directive = StrategicDirective(source="ThinkToolFeedback", timestamp=datetime.now(timezone.utc), status='pending', content=dir_content, target_agent=target_agent_val, directive_type=d_data['directive_type'], priority=d_data['priority'])
                                  session.add(directive)
-                for prompt_id in analysis_result.get('prompts_to_critique', []):
-                    if isinstance(prompt_id, str):
-                        try: agent_name, prompt_key = prompt_id.split('/', 1); asyncio.create_task(self.self_critique_prompt(agent_name, prompt_key, f"Feedback analysis suggested issues: {analysis_result.get('analysis_summary', 'N/A')}"))
-                        except: pass
+                for prompt_id_str in analysis_result.get('prompts_to_critique', []): # Renamed to avoid conflict
+                    if isinstance(prompt_id_str, str):
+                        try: agent_name_critique, prompt_key_critique = prompt_id_str.split('/', 1); asyncio.create_task(self.self_critique_prompt(agent_name_critique, prompt_key_critique, f"Feedback analysis suggested issues: {analysis_result.get('analysis_summary', 'N/A')}"))
+                        except: pass 
                 for frag_data in analysis_result.get('insights_to_log', []):
                      if isinstance(frag_data, dict) and all(k in frag_data for k in ['data_type', 'content']): await self.log_knowledge_fragment(agent_source="ThinkToolFeedback", data_type=frag_data['data_type'], content=frag_data['content'], tags=frag_data.get('tags', ['feedback_insight']), relevance_score=frag_data.get('relevance', 0.6))
             except Exception as e: self.logger.error(f"Error processing feedback analysis result: {e}", exc_info=True)
@@ -419,31 +450,37 @@ class ThinkTool(GeniusAgentBase):
     async def get_prompt(self, agent_name: str, prompt_key: str) -> Optional[str]:
         if not self.session_maker: self.logger.error("DB session_maker not available."); return None
         try:
+            # Convert agent_name to enum if it's a string key, or use as is if already enum
+            agent_name_enum = AgentName[agent_name.upper()] if isinstance(agent_name, str) else agent_name
             async with self.session_maker() as session:
-                stmt = select(PromptTemplate.content).where(PromptTemplate.agent_name == agent_name, PromptTemplate.prompt_key == prompt_key, PromptTemplate.is_active == True).order_by(desc(PromptTemplate.version)).limit(1)
+                stmt = select(PromptTemplate.content).where(PromptTemplate.agent_name == agent_name_enum, PromptTemplate.prompt_key == prompt_key, PromptTemplate.is_active == True).order_by(desc(PromptTemplate.version)).limit(1)
                 result = await session.execute(stmt)
                 return result.scalar_one_or_none()
         except Exception as e: self.logger.error(f"Error getting prompt {agent_name}/{prompt_key}: {e}"); return None
 
     async def update_prompt(self, agent_name: str, prompt_key: str, new_content: str, author_agent: str = "ThinkTool", critique_summary: Optional[str] = None) -> Optional[PromptTemplate]:
         if not self.session_maker: self.logger.error("DB session_maker not available."); return None
-        new_version = 1; new_template = None
+        new_version = 1
         try:
+            agent_name_enum = AgentName[agent_name.upper()] if isinstance(agent_name, str) else agent_name
+            author_agent_enum = AgentName[author_agent.upper()] if isinstance(author_agent, str) else author_agent
+
             async with self.session_maker() as session:
                 async with session.begin():
-                    stmt_current = select(PromptTemplate.id, PromptTemplate.version).where(PromptTemplate.agent_name == agent_name, PromptTemplate.prompt_key == prompt_key, PromptTemplate.is_active == True).order_by(desc(PromptTemplate.version)).limit(1).with_for_update()
+                    stmt_current = select(PromptTemplate.id, PromptTemplate.version).where(PromptTemplate.agent_name == agent_name_enum, PromptTemplate.prompt_key == prompt_key, PromptTemplate.is_active == True).order_by(desc(PromptTemplate.version)).limit(1).with_for_update()
                     current_active_row_result = await session.execute(stmt_current)
                     current_active_row = current_active_row_result.fetchone()
                     if current_active_row:
                         current_active_id, current_version = current_active_row; new_version = current_version + 1
                         stmt_deactivate = update(PromptTemplate).where(PromptTemplate.id == current_active_id).values(is_active=False)
                         await session.execute(stmt_deactivate)
-                    new_template_obj = PromptTemplate(agent_name=agent_name, prompt_key=prompt_key, version=new_version, content=new_content, is_active=True, author_agent=author_agent, last_updated=datetime.now(timezone.utc), notes=critique_summary)
+                    new_template_obj = PromptTemplate(agent_name=agent_name_enum, prompt_key=prompt_key, version=new_version, content=new_content, is_active=True, author_agent=author_agent_enum, last_updated=datetime.now(timezone.utc), notes=critique_summary)
                     session.add(new_template_obj)
-                await session.refresh(new_template_obj) # Refresh to get DB generated fields if any (like ID if not UUID)
+                await session.refresh(new_template_obj)
                 self.logger.info(f"Created and activated new prompt v{new_version} for {agent_name}/{prompt_key}")
                 return new_template_obj
         except Exception as e: self.logger.error(f"Error updating prompt {agent_name}/{prompt_key}: {e}"); return None
+
 
     async def reflect_on_action(self, context: str, agent_name: str, task_description: str, proposed_plan_summary: Optional[str] = None) -> dict:
         self.logger.debug(f"Starting reflection for {agent_name} on task: {task_description}")
