@@ -16,7 +16,7 @@ from collections import Counter, deque
 
 # --- Project Imports ---
 try:
-    from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
+    from .base_agent import GeniusAgentBase
 except ImportError:
     logging.warning("Production base agent not found, using GeniusAgentBase.")
     from base_agent import GeniusAgentBase # Fallback

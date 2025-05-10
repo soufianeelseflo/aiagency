@@ -19,7 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # --- Project Imports ---
 try:
-    from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
+    from .base_agent import GeniusAgentBase
 except ImportError:
     logging.warning("Production base agent not found, using GeniusAgentBase. Ensure base_agent_prod.py is used.")
     # Define a dummy base class if the real one isn't found

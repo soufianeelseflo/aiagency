@@ -22,7 +22,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 # --- Project Imports ---
 try:
     # Use the production-ready base agent
-    from agents.base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
+    from .base_agent import GeniusAgentBase
 except ImportError:
     logging.warning("Production base agent not found, using GeniusAgentBase.")
     # Define a dummy base class if the real one isn't found

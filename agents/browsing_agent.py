@@ -23,11 +23,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # --- Project Imports ---
 try:
-    from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
+    from.base_agent import GeniusAgentBase
 except ImportError:
     logging.warning("Production base agent relative import failed, trying absolute.")
     try:
-        from agents.base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
+        from .base_agent import GeniusAgentBase
     except ImportError:
         logging.critical("Failed to import GeniusAgentBase. Check PYTHONPATH or project structure.")
         raise SystemExit("Cannot import GeniusAgentBase - critical dependency missing.")

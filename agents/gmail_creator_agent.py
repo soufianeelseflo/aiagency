@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 # --- Project Imports ---
 try:
-    from .base_agent import GeniusAgentBase_ProdReady as GeniusAgentBase
+    from .base_agent import GeniusAgentBase
     from faker import Faker
 except ImportError:
     logging.critical("Failed to import BaseAgent or Faker. Check paths/dependencies.")
