@@ -376,6 +376,57 @@ class LearnedPattern(Base): # type: ignore
         return f"<LearnedPattern(id={self.id}, type='{self.pattern_type}', confidence={self.confidence_score:.2f})>"
 # >>> END OF LearnedPattern CLASS DEFINITION <<<
 
+class EmailStyles(Base): # type: ignore
+    __tablename__ = "email_styles"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    style_name = Column(String(255), nullable=False, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    
+    # Example fields - can be expanded based on how EmailAgent uses it
+    # For instance, if it stores actual template snippets:
+    subject_template_snippet = Column(Text, nullable=True)
+    body_template_snippet_html = Column(Text, nullable=True) 
+    
+    tags = Column(JSONB, nullable=True, default=list, comment="Tags for categorization, e.g., 'formal', 'follow-up', 'cold_outreach'")
+    effectiveness_score = Column(Float, default=0.0, comment="Learned effectiveness of this style")
+    usage_count = Column(Integer, default=0)
+    
+    author_agent = Column(SAEnum(AgentName), nullable=True, comment="Agent that might have suggested or refined this style")
+    is_active = Column(Boolean, default=True, index=True)
+
+    def __repr__(self) -> str:
+        return f"<EmailStyles(id={self.id}, style_name='{self.style_name}')>"
+
+class KVStore(Base): # type: ignore
+    __tablename__ = "kv_store"
+    # Using a composite primary key for simplicity if keys are unique per category
+    # Or use a UUID id if preferred and make 'key_name' unique perhaps with a scope
+    
+    key_name = Column(String(255), primary_key=True, index=True)
+    # Optional: Add a category or scope if keys are not globally unique
+    # category = Column(String(100), primary_key=True, default="default", index=True) 
+    
+    value_text = Column(Text, nullable=True)
+    value_json = Column(JSONB, nullable=True)
+    value_blob = Column(LargeBinary, nullable=True) # For binary data if needed
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    
+    notes = Column(Text, nullable=True)
+
+    # If you add 'category':
+    # __table_args__ = (UniqueConstraint('category', 'key_name', name='uq_kv_category_key'),)
+
+    def __repr__(self) -> str:
+        # If you add 'category':
+        # return f"<KVStore(category='{self.category}', key='{self.key_name}')>"
+        return f"<KVStore(key='{self.key_name}')>"
+
 class Invoice(Base): # type: ignore
     __tablename__ = "invoices"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
