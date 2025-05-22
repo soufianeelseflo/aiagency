@@ -465,6 +465,7 @@ class EmailLog(Base): # type: ignore
     opened_at = Column(DateTime(timezone=True), nullable=True)
     responded_at = Column(DateTime(timezone=True), nullable=True)
     json_data = Column(JSONB, nullable=True, comment="Extra data like composition IDs, campaign ID, etc.")
+    compositions = relationship("EmailComposition", back_populates="email_log", cascade="all, delete-orphan", lazy="selectin")
 
 class CallLog(Base): # type: ignore
     __tablename__ = "call_logs"
@@ -512,6 +513,34 @@ class ExpenseLog(Base): # type: ignore
     description = Column(Text, nullable=True)
     task_id_reference = Column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
     json_data = Column(JSONB, nullable=True, comment="Additional details like token counts, API call specifics")
+
+class EmailComposition(Base): # type: ignore
+    __tablename__ = "email_compositions"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    email_log_id = Column(UUID(as_uuid=True), ForeignKey('email_logs.id', ondelete="SET NULL"), nullable=True, index=True)
+    email_log = relationship("EmailLog", back_populates="compositions", lazy="selectin") # Assuming EmailLog will have a 'compositions' relationship
+
+    subject_template_id = Column(UUID(as_uuid=True), ForeignKey('prompt_templates.id', ondelete="SET NULL"), nullable=True)
+    body_template_id = Column(UUID(as_uuid=True), ForeignKey('prompt_templates.id', ondelete="SET NULL"), nullable=True)
+    
+    # Store IDs of knowledge fragments used
+    knowledge_fragment_ids = Column(JSONB, nullable=True, default=list)
+    
+    # Store IDs or names of email styles used
+    email_style_ids_or_names = Column(JSONB, nullable=True, default=list)
+    
+    # Store any specific enriched data points that were key to this composition
+    key_enriched_data_points = Column(JSONB, nullable=True, default=dict)
+    
+    llm_model_used = Column(String(255), nullable=True)
+    generation_parameters = Column(JSONB, nullable=True, comment="e.g., temperature, max_tokens used for generation")
+    
+    notes = Column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<EmailComposition(id={self.id}, email_log_id={self.email_log_id})>"
 
 # --- Optional: Function to create tables (for dev/testing, Alembic for prod) ---
 def create_all_tables_dev(db_url_sync: str) -> None:
